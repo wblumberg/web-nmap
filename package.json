@@ -1,0 +1,20 @@
+{
+  "name": "web-nmap",
+  "version": "0.1.0",
+  "description": "Web-based NMAP2-style meteorological display",
+  "scripts": {
+    "start": "webpack serve --mode development",
+    "build": "webpack --mode production"
+  },
+  "dependencies": {
+    "autumnplot-gl": "^4.0.0"
+  },
+  "devDependencies": {
+    "ts-loader": "^9.5.0",
+    "typescript": "^5.0.0",
+    "webpack": "^5.90.0",
+    "webpack-cli": "^5.1.0",
+    "webpack-dev-server": "^5.0.0",
+    "webpack-glsl-loader": "^1.0.1"
+  }
+}

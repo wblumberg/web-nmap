@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>web-nmap</title>
+  <link href="https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0f0f23;
+      color: #e0e0e0;
+      font-family: monospace;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 40px;
+      background: #1a1a2e;
+      border-bottom: 1px solid #2a2a4e;
+      padding: 0 12px;
+      flex-shrink: 0;
+    }
+
+    #topbar .title {
+      font-size: 1rem;
+      font-weight: bold;
+      color: #e0e0e0;
+      letter-spacing: 0.05em;
+    }
+
+    #topbar select {
+      background: #0f0f23;
+      color: #e0e0e0;
+      border: 1px solid #2a2a4e;
+      padding: 3px 8px;
+      font-family: monospace;
+      font-size: 0.85rem;
+    }
+
+    #readout {
+      font-size: 0.8rem;
+      color: #e0e0e0;
+      min-width: 220px;
+      text-align: right;
+    }
+
+    #map {
+      flex: 1;
+    }
+
+    #colorbar-panel {
+      height: 70px;
+      background: #16213e;
+      border-top: 1px solid #2a2a4e;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+    }
+
+    #colorbar-panel.hidden {
+      display: none;
+    }
+
+    #colorbar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <span class="title">web-nmap</span>
+    <select id="view-select"></select>
+    <div id="readout"></div>
+  </div>
+  <div id="map"></div>
+  <div id="colorbar-panel" class="hidden">
+    <div id="colorbar"></div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
+  <script src="https://unpkg.com/@petamoriken/float16@3.8.4/browser/float16.js"></script>
+  <script src="web-nmap.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

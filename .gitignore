@@ -1,0 +1,5 @@
+node_modules/
+dist/
+public/api_keys.js
+.DS_Store
+*.log
