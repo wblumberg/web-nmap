@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>web-nmap</title>
+  <title>NMAP</title>
   <link href="https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.css" rel="stylesheet" />
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -45,6 +45,38 @@
       font-size: 0.85rem;
     }
 
+    #toolbar-buttons {
+      display: flex;
+      gap: 4px;
+    }
+
+    .toolbar-btn {
+      width: 32px;
+      height: 32px;
+      background: #0f0f23;
+      color: #e0e0e0;
+      border: 1px solid #2a2a4e;
+      cursor: pointer;
+      font-size: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      flex-shrink: 0;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .toolbar-btn:hover {
+      background: #2a2a4e;
+      border-color: #4a4a8e;
+    }
+
+    .toolbar-btn.active {
+      background: #16402e;
+      border-color: #3a8e5a;
+      color: #80f0a0;
+    }
+
     #readout {
       font-size: 0.8rem;
       color: #e0e0e0;
@@ -80,7 +112,13 @@
 </head>
 <body>
   <div id="topbar">
-    <span class="title">web-nmap</span>
+    <span class="title">NMAP</span>
+    <div id="toolbar-buttons">
+      <button id="btn-load" class="toolbar-btn" title="Load Data">&#8635;</button>
+      <button id="btn-freeze" class="toolbar-btn" title="Freeze Map Location">&#128204;</button>
+      <button id="btn-autoupdate" class="toolbar-btn" title="Auto-Update">&#9203;</button>
+      <button id="btn-template" class="toolbar-btn" title="(Template)">&#9634;</button>
+    </div>
     <select id="view-select"></select>
     <div id="readout"></div>
   </div>
@@ -92,6 +130,7 @@
   <script src="https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
   <script src="https://unpkg.com/@petamoriken/float16@3.8.4/browser/float16.js"></script>
+  <script src="style.js"></script>
   <script src="web-nmap.js"></script>
   <script src="main.js"></script>
 </body>

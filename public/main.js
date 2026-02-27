@@ -1,3 +1,4 @@
+// Make a synthetic 500mb height, wind, and wind speed field for testing purposes.  The height field is a simple cosine wave with a gradient, the wind field is a simple cosine wave with a gradient, and the wind speed field is the magnitude of the wind field.  The color map is defined for the wind speed range.
 function makeSynthetic500mbLayers() {
     const nx = 121, ny = 61;
     const grid = new apgl.PlateCarreeGrid(nx, ny, -130, 20, -65, 55);
@@ -65,9 +66,9 @@ function makeSynthetic500mbLayers() {
     const raw_wind_field = makeWinds(0);
     const raw_ws_field = makeWindSpeed(0);
 
-    const cntr = new apgl.Contour(raw_hght_field, {interval: 1, color: '#000000', line_width: lev => lev < 565 ? 2 : 4, line_style: lev => lev < 555 ? '--' : '-'});
+    const cntr = new apgl.Contour(raw_hght_field, {interval: 1, color: '#ffffff', line_width: lev => lev < 565 ? 2 : 4, line_style: lev => lev < 555 ? '--' : '-'});
     const filled = new apgl.ContourFill(raw_ws_field, {cmap: colormap, opacity: 0.8});
-    const barbs = new apgl.Barbs(raw_wind_field, {color: '#000000', thin_fac: 16});
+    const barbs = new apgl.Barbs(raw_wind_field, {color: '#ffffff', thin_fac: 16});
     const labels = new apgl.ContourLabels(cntr, {text_color: '#ffffff', halo: true, font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf'});
 
     const hght_layer = new apgl.PlotLayer('height', cntr);
@@ -84,6 +85,7 @@ function makeSynthetic500mbLayers() {
                                      barb: raw_wind_field.sampleField(lon, lat)})};
 }
 
+// Fetch a binary file from the server, decompress it using pako, and return it as a typed array.  The default data type is float16, but uint8 can also be specified.
 async function fetchBinary(fname, dtype) {
     dtype = dtype === undefined ? 'float16' : dtype;
     const resp = await fetch(fname);
@@ -94,11 +96,13 @@ async function fetchBinary(fname, dtype) {
     return new float16.Float16Array(new Float32Array(ary_inflated.buffer));
 }
 
+// Make some GFS layers for 2m temperature.  The data is read from a binary file and the color map is defined for the temperature range.
 async function makeGFSLayers() {
     const grid_gfs = new apgl.PlateCarreeGrid(1441, 721, 0, -90, 360, 90);
     const colormap = apgl.colormaps.pw_t2m;
     const t2m_data = await fetchBinary('data/gfs.bin.gz');
 
+    // The GFS data is missing the last column of data, so we need to pad it with the first column of data to make it wrap around the globe.  This is done by creating a new array with the same number of rows and columns as the original data, but with an extra column at the end.  The last column is filled with the first column of data.
     const t2m_data_pad = new float16.Float16Array(grid_gfs.ni * grid_gfs.nj);
     for (let j = 0; j < grid_gfs.nj; j++) {
         const idx_start = (grid_gfs.ni - 1) * j;
@@ -115,7 +119,7 @@ async function makeGFSLayers() {
 
     const t2m_contour = new apgl.Contour(t2m_field, {levels: [32], line_width: 4});
     const t2m_contourlayer = new apgl.PlotLayer('t2m_contour', t2m_contour);
-    const labels = new apgl.ContourLabels(t2m_contour, {text_color: '#ffffff', halo: true, font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf'});
+    const labels = new apgl.ContourLabels(t2m_contour, {text_color: '#ffffff', halo: true, font_url_template: 'font/{fontstack}/{range}.pbf'});
     const label_layer = new apgl.PlotLayer('label', labels);
 
     const svg = apgl.makeColorBar(colormap, {label: "Temperature", fontface: 'Trebuchet MS',
@@ -125,13 +129,18 @@ async function makeGFSLayers() {
     return {layers: [t2m_filllayer, t2m_contourlayer, label_layer], colorbar: [svg]};
 }
 
+// Make some HREF layers for probabilities and paintball.  The data is read from binary files and the color maps are defined for each probability level.
 async function makeHREFLayers() {
-    const grid_href = new apgl.LambertGrid.fromLLCornerLonLat(1799, 1059, -97.5, 38.5, [38.5, 38.5], -122.719528, 21.138123, 3000, 3000);
+    const grid_href = apgl.LambertGrid.fromLLCornerLonLat(1799, 1059, -97.5, 38.5, [38.5, 38.5], -122.719528, 21.138123, 3000, 3000);
 
-    const nh_prob_data = await fetchBinary('data/hrefv3.2023051100.f036.mxuphl5000_2000m.nh_max.086400_p99.85_0040km.bin.gz');
+    const nh_prob_data = (await fetchBinary('data/hrefv3.2023051100.f036.mxuphl5000_2000m.nh_max.086400_p99.85_0040km.bin.gz')).map(v => v * 100);
     const nh_prob_field = new apgl.RawScalarField(grid_href, nh_prob_data);
-    const nh_prob_contour = new apgl.Contour(nh_prob_field, {levels: [0.1, 0.3, 0.5, 0.7, 0.9], color: '#000000'});
+    const nh_prob_contour = new apgl.Contour(nh_prob_field, {levels: [10, 30, 50, 70, 90], color: '#ffffff'});
+    const labels = new apgl.ContourLabels(nh_prob_contour, {text_color: '#ffffff', halo: true, font_size: 15,
+                                                            font_url_template: 'font/{fontstack}/{range}.pbf'});
+
     const nh_prob_layer = new apgl.PlotLayer('nh_probs', nh_prob_contour);
+    const label_layer = new apgl.PlotLayer('nh_prob_labels', labels);
 
     const pb_data = await fetchBinary('data/hrefv3.2023051100.f036.mxuphl5000_2000m.086400.pb75.bin.gz');
     const href_pb_colors = ['#9d4c1c', '#f2b368', '#792394', '#d99cf9', '#1e3293', '#aabee3', '#bc373b', '#f0928f', '#397d21', '#b5f0ab'];
@@ -141,11 +150,12 @@ async function makeHREFLayers() {
 
     const svg = apgl.makePaintballKey(href_pb_colors,
                                       ['HRRR', 'HRRR -6h', 'HRW ARW', 'HRW ARW -12h', 'HRW FV3', 'HRW FV3 -12h', 'HRW NSSL', 'HRW NSSL -12h', 'NAM 3k', 'NAM 3k -12h'],
-                                      {n_cols: 5});
+                                      {n_cols: 5, color: '#ffffff'});
 
-    return {layers: [paintball_layer, nh_prob_layer], colorbar: [svg]};
+    return {layers: [paintball_layer, nh_prob_layer, label_layer], colorbar: [svg]};
 }
 
+// Make some MRMS layers for composite reflectivity and precipitation type.  The data is read from binary files and the color maps are defined for each precipitation type.
 async function makeMRMSLayers() {
     const grid_mrms = new apgl.PlateCarreeGrid(7000, 3500, -129.995, 20.005, -60.005, 54.995);
     const data = await fetchBinary('data/mrms.202112152259.cref.bin.gz');
@@ -215,18 +225,19 @@ async function makeObsLayers() {
     const obs_field = new apgl.RawObsField(obs_grid, obs.map(o => o.data));
 
     const station_plot_locs = {
-        tmpf: {type: 'number', pos: 'ul', color: '#cc0000', formatter: val => val === null ? '' : val.toFixed(0)},
-        dwpf: {type: 'number', pos: 'll', color: '#00aa00', formatter: val => val === null ? '' : val.toFixed(0)},
-        wind: {type: 'barb', pos: 'c'},
-        preswx: {type: 'symbol', pos: 'cl', color: '#ff00ff'},
+        tmpf: {type: 'number', pos: 'ul', halo: false, color: '#cc0000', formatter: val => val === null ? '' : val.toFixed(0)},
+        dwpf: {type: 'number', pos: 'll', halo: false, color: '#00aa00', formatter: val => val === null ? '' : val.toFixed(0)},
+        wind: {type: 'barb', pos: 'c', color: '#ffffff'},
+        preswx: {type: 'symbol', pos: 'cl', halo: false, color: '#ff00ff'},
         skyc: {type: 'symbol', pos: 'c'},
     };
-    const station_plot = new apgl.StationPlot(obs_field, {config: station_plot_locs, thin_fac: 8, font_size: 14});
+    const station_plot = new apgl.StationPlot(obs_field, {config: station_plot_locs, thin_fac: 8, font_size: 14, font_url_template: "font/{fontstack}/{range}.pbf"});
     const station_plot_layer = new apgl.PlotLayer('station-plots', station_plot);
 
     return {layers: [station_plot_layer]};
 }
 
+// Some sample data type and views for the map.  Each view has a name, a function to create the layers, and a maximum zoom level.
 const views = {
     'default': {
         name: 'Synthetic 500mb',
@@ -255,22 +266,23 @@ const views = {
     },
 };
 
+// On Load of the page, create the map and populate the view selection menu.  When a new view is selected, update the map with the new layers and colorbar.
 window.addEventListener('load', () => {
+    // Populate the view selection menu with the available views.  The menu will be updated with new layers and colorbars when the user selects a different view from the menu.
     const menu = document.querySelector('#view-select');
     menu.innerHTML = Object.entries(views).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('');
 
+    //Set up the MapLibre GL map with a custom style and initial view settings.  The map will be updated with new layers and colorbars when the user selects a different view from the menu.
     const map = new maplibregl.Map({
         container: 'map',
-        style: 'http://localhost:8080/style.json',
+        style: 'http://localhost:9000/style.json',
         center: [-97.5, 38.5],
         zoom: 4,
         maxZoom: 7,
+        projection: 'globe',
     });
 
-    map.on('load', () => {
-        map.setProjection({type: 'globe'});
-    });
-
+    // Keep track of the current layers and mousemove handler so they can be removed when a new view is selected
     let current_layers = [];
     let current_mousemove_handler = null;
 
@@ -280,18 +292,24 @@ window.addEventListener('load', () => {
 
         const {layers, colorbar, sampler} = await view.makeLayers();
 
+        // Remove existing layers
         current_layers.forEach(lyr => {
             map.removeLayer(lyr.id);
         });
 
+        // Add new layers associated with the basemap
         layers.forEach(lyr => {
             map.addLayer(lyr, 'coastline');
+            map.addLayer(lyr, 'lands');
+            map.addLayer(lyr, 'countries');
         });
 
+        // Setup colorbar panel in the bottom part of the page.  If there are multiple colorbars, they will be stacked according to AutumnPlot-GL
         const colorbar_panel = document.querySelector('#colorbar-panel');
         const colorbar_container = document.querySelector('#colorbar');
         colorbar_container.innerHTML = '';
 
+        // If there are colorbars, add them to the colorbar container and show the colorbar panel.  If there are no colorbars, hide the colorbar panel.
         if (colorbar && colorbar.length > 0) {
             colorbar.forEach(cb => colorbar_container.appendChild(cb));
             colorbar_panel.classList.remove('hidden');
@@ -301,14 +319,18 @@ window.addEventListener('load', () => {
 
         current_layers = layers;
 
+        // Readout from mousemove events to display coordinates, geographical locations (e.g., lat/lon, counties, asos, etc.) similar to NMAP2's lower right hand corner thingy and sampled data values
         const readout = document.querySelector('#readout');
 
+        // Remove the previous mousemove handler if it exists, and set up a new one that samples data values at the mouse location and displays them in the readout.  If no sampler is provided, just display the lat/lon coordinates.
         if (current_mousemove_handler) {
             map.off('mousemove', current_mousemove_handler);
             current_mousemove_handler = null;
         }
 
         if (sampler !== undefined) {
+            // If a sampler is provided, use it to sample data values at the mouse location and display them in the readout
+            // TODO: provide options to display the sampled data values in different formats (e.g., raw, formatted, etc.) and to display additional information (e.g., units, descriptions, etc.) and to display the sampled data values in a tooltip or popup instead of the readout
             current_mousemove_handler = (ev) => {
                 const coord = ev.lngLat.wrap();
                 readout.innerHTML = `${coord.lat.toFixed(2)}°N ${coord.lng.toFixed(2)}°E`;
@@ -321,6 +343,8 @@ window.addEventListener('load', () => {
                 }
             };
         } else {
+            // If no sampler is provided, just display the lat/lon coordinates
+            // TODO: Include other options for the readout, such as displaying the coordinates in different formats (e.g., DMS, UTM, etc.) and displaying additional information (e.g., elevation, county, country, state, time, etc.) and displaying the readout in a tooltip or popup instead of the readout.
             current_mousemove_handler = (ev) => {
                 const coord = ev.lngLat.wrap();
                 readout.innerHTML = `${coord.lat.toFixed(2)}°N ${coord.lng.toFixed(2)}°E`;
@@ -329,6 +353,60 @@ window.addEventListener('load', () => {
         map.on('mousemove', current_mousemove_handler);
     }
 
+    // Initial map update when the page loads, and also when the user selects a different view from the menu
     map.on('load', updateMap);
     menu.addEventListener('change', updateMap);
+
+    // --- Toolbar buttons ---
+
+    // Load Data: manually trigger a data reload
+    document.querySelector('#btn-load').addEventListener('click', () => {
+        updateMap();
+    });
+
+    // Freeze Map Location: lock/unlock pan and zoom interactions
+    let locationFrozen = false;
+    const freezeBtn = document.querySelector('#btn-freeze');
+    freezeBtn.addEventListener('click', () => {
+        locationFrozen = !locationFrozen;
+        freezeBtn.classList.toggle('active', locationFrozen);
+        freezeBtn.title = locationFrozen ? 'Unfreeze Map Location' : 'Freeze Map Location';
+        if (locationFrozen) {
+            map.dragPan.disable();
+            map.scrollZoom.disable();
+            map.boxZoom.disable();
+            map.doubleClickZoom.disable();
+            map.touchZoomRotate.disable();
+            map.keyboard.disable();
+        } else {
+            map.dragPan.enable();
+            map.scrollZoom.enable();
+            map.boxZoom.enable();
+            map.doubleClickZoom.enable();
+            map.touchZoomRotate.enable();
+            map.keyboard.enable();
+        }
+    });
+
+    // Auto-Update: reload data on a fixed interval (60 seconds)
+    const AUTO_UPDATE_INTERVAL_MS = 60000;
+    let autoUpdateTimer = null;
+    const autoUpdateBtn = document.querySelector('#btn-autoupdate');
+    autoUpdateBtn.addEventListener('click', () => {
+        if (autoUpdateTimer) {
+            clearInterval(autoUpdateTimer);
+            autoUpdateTimer = null;
+            autoUpdateBtn.classList.remove('active');
+            autoUpdateBtn.title = 'Auto-Update (off)';
+        } else {
+            autoUpdateTimer = setInterval(updateMap, AUTO_UPDATE_INTERVAL_MS);
+            autoUpdateBtn.classList.add('active');
+            autoUpdateBtn.title = 'Auto-Update (on)';
+        }
+    });
+
+    // Template: placeholder for future functionality
+    document.querySelector('#btn-template').addEventListener('click', () => {
+        // TODO: implement
+    });
 });
