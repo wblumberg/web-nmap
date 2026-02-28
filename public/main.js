@@ -237,37 +237,21 @@ async function makeObsLayers() {
     return {layers: [station_plot_layer]};
 }
 
-// Some sample data type and views for the map.  Each view has a name, a function to create the layers, and a maximum zoom level.
-const views = {
-    'default': {
-        name: 'Synthetic 500mb',
-        makeLayers: makeSynthetic500mbLayers,
-        maxZoom: 7,
-    },
-    'gfs': {
-        name: 'GFS T2m',
-        makeLayers: makeGFSLayers,
-        maxZoom: 7,
-    },
-    'href': {
-        name: 'HREF',
-        makeLayers: makeHREFLayers,
-        maxZoom: 7,
-    },
-    'mrms': {
-        name: 'MRMS Composite Reflectivity',
-        makeLayers: makeMRMSLayers,
-        maxZoom: 8.5,
-    },
-    'obs': {
-        name: 'Surface Observations',
-        makeLayers: makeObsLayers,
-        maxZoom: 8.5,
-    },
-};
+// Register makeLayers implementations for each catalog entry that has been implemented.
+// IDs must match the corresponding "id" field in data/catalog.json.
+DataRegistry.register('synthetic_500mb', makeSynthetic500mbLayers);
+DataRegistry.register('gfs_t2m',         makeGFSLayers);
+DataRegistry.register('href',            makeHREFLayers);
+DataRegistry.register('mrms_cref',       makeMRMSLayers);
+DataRegistry.register('metar',           makeObsLayers);
 
-// On Load of the page, create the map and populate the view selection menu.  When a new view is selected, update the map with the new layers and colorbar.
-window.addEventListener('load', () => {
+// On Load of the page, load the catalog, create the map, and populate the view selection menu.
+window.addEventListener('load', async () => {
+    // Load the dataset catalog from data/catalog.json (analogous to GEMPAK's datatype.tbl),
+    // then build the views map from catalog entries that have a registered makeLayers function.
+    await DataCatalog.load();
+    const views = DataCatalog.buildViews();
+
     // Populate the view selection menu with the available views.  The menu will be updated with new layers and colorbars when the user selects a different view from the menu.
     const menu = document.querySelector('#view-select');
     menu.innerHTML = Object.entries(views).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('');
@@ -359,9 +343,25 @@ window.addEventListener('load', () => {
 
     // --- Toolbar buttons ---
 
-    // Load Data: manually trigger a data reload
+    // Initialize the Layer Manager (which internally initialises DataSelector).
+    // "Load Data" opens the Layer Manager so the user can add / remove sources,
+    // set the dominant source, choose frame count / skip, then hit Apply.
+    LayerManager.init();
     document.querySelector('#btn-load').addEventListener('click', () => {
-        updateMap();
+        LayerManager.open(({ sources, dominantId, numFrames, frameSkip, frames }) => {
+            // For now, render the dominant source (or first source) using the
+            // existing single-view pipeline.  Multi-layer simultaneous rendering
+            // can be wired here once the plotter supports stacked PlotLayers.
+            const activeId = dominantId || (sources.length ? sources[0].id : null);
+            if (!activeId) return;
+            const opt = menu.querySelector(`option[value="${activeId}"]`);
+            if (opt) {
+                menu.value = activeId;
+                updateMap();
+            } else {
+                console.warn(`LayerManager: id "${activeId}" not in view-select menu`);
+            }
+        });
     });
 
     // Freeze Map Location: lock/unlock pan and zoom interactions
