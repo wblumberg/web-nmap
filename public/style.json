@@ -5,7 +5,7 @@
     "pitch": 0,
     "center": [-97.5, 38.5],
     "bearing": 0,
-    "glyphs": "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+    "glyphs": "font/{fontstack}/{range}.pbf",
     "layers": [
         {
             "id": "background",
@@ -242,7 +242,7 @@
             ],
             "layout": {
                 "text-font": [
-                    "Open Sans Semibold"
+                    "Trebuchet MS"
                 ],
                 "text-size": [
                     "step", ["zoom"], 12,
@@ -250,7 +250,7 @@
                     6, ["case", [">=", ["get", "rank"], 13], 20, [">=", ["get", "rank"], 10], 16, 12]
                 ],
                 "text-field": "{name}",
-                "visibility": "visible",
+                "visibility": "none",
                 "text-max-width": 10,
                 "text-transform": "none"
             },

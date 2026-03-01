@@ -500,7 +500,7 @@
         "id": "scatterometer",
         "name": "Scatterometer Winds",
         "category": "MISC",
-        "subcategory": "SCATSAT",
+        "subcategory": "SCATTEROMETER",
         "description": "Ocean surface wind vectors derived from satellite scatterometer (ASCAT, OSCAT) backscatter measurements.",
         "path_template": "data/ascat.{YYYY}{MM}{DD}{HH}{mm}.json",
         "temporal_frequency_min": null,
@@ -562,6 +562,23 @@
         "max_zoom": 12,
         "enabled": false,
         "tags": ["aircraft", "ADS-B", "aviation", "flight track"],
+        "grid": null
+    },
+    {
+        "id": "eddy_dissipation",
+        "name": "Eddy Dissipation Rate (EDR)",
+        "category": "MISC",
+        "subcategory": "AIRCRAFT",  
+        "description": "Real-time eddy dissipation rate (EDR) turbulence estimates derived from commercial aircraft flight data (ADS-B / Mode-S).",
+        "path_template": "data/edr.{YYYY}{MM}{DD}{HH}{mm}.json",
+        "temporal_frequency_min": 1,
+        "time_range_hr": 1,
+        "has_forecast_hour": false,
+        "data_format": "json",
+        "dtype": "json",
+        "max_zoom": 12,
+        "enabled": false,
+        "tags": ["turbulence", "EDR", "aviation", "aircraft", "ADS-B"],
         "grid": null
     }
 ]

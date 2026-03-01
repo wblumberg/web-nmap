@@ -1,3 +1,30 @@
+/* 
+TODO: Make an "ERROR" button that will allow the user to view messages from the Javascript console referring to errors in plotting data, etc.  These messages should also be informative.
+
+TODO: Figure out how the "restore" file capability will work for the generation of various maps from gridded data.  This will allow the user to save a configuration of the map (e.g., layers, colorbars, etc.) and restore it later.
+
+Questions:
+  - How should I go about organizing the various restore files?  I do like the way SPC has been doing it with categories (basic, moisture, instability, lift, shear, precip, winter, fire, composite, overlays, etc.)
+  - One file, one restore file.
+
+TODO: Figure out how to create and organize "restore" files for different ways of visualizing observed data (upper air and surface).  These files should provide different ways to visualize the data by changing up how different station plots look?  What about the local storm reports, etc.?
+
+TODO: Figure out how to specify or list the different colormaps that can be used to plot the satellite and radar data.
+
+TODO: Create the method of binning upper air and surface observations.
+
+TODO: Test the time matching of the various datasets to make sure that the data is being plotted correctly and that the time matching is working as expected.  This will require some test cases with known data and known times.
+
+TODO: Figure out what parts of this system are offloaded to the server and what parts are the client's responsiblity.
+
+TODO: Include a settings menu that allows the user to change the settings of NMAP.
+TODO: Include a slider that will change the animation speed.
+
+TODO: Implement the Automated Devorak Technique for Cyclone Intensity Estimates.
+TODO: Implement the cloud top height algorithm from NMAP2.
+
+
+*/
 // Make a synthetic 500mb height, wind, and wind speed field for testing purposes.  The height field is a simple cosine wave with a gradient, the wind field is a simple cosine wave with a gradient, and the wind speed field is the magnitude of the wind field.  The color map is defined for the wind speed range.
 function makeSynthetic500mbLayers() {
     const nx = 121, ny = 61;
@@ -270,8 +297,136 @@ window.addEventListener('load', async () => {
     let current_layers = [];
     let current_mousemove_handler = null;
 
+    // ------------------------------------------------------------------
+    // Frame-time controller (dominant-source timeline playback scaffold)
+    // ------------------------------------------------------------------
+    const frameTimeValueEl = document.querySelector('#frame-time-value');
+    const FRAME_PLAY_INTERVAL_MS = 900;
+    let frameTimes = [];            // ascending (oldest -> newest)
+    let currentFrameIdx = -1;       // index into frameTimes
+    let playbackTimer = null;
+    let playbackMode = 'pause';     // 'pause' | 'loop-fwd' | 'loop-back' | 'rock'
+    let rockDirection = 1;          // +1 forward, -1 backward
+
+    function _fmtFrameUTC(dt) {
+        if (!(dt instanceof Date)) return '--';
+        const pad = n => String(n).padStart(2, '0');
+        const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getUTCMonth()];
+        return `${pad(dt.getUTCDate())} ${mon} ${dt.getUTCFullYear()} ${pad(dt.getUTCHours())}:${pad(dt.getUTCMinutes())} UTC`;
+    }
+
+    // update the frame-time display in the UI based on the current frame index and the list of frame times
+    function _updateFrameDisplay() {
+        const cur = (currentFrameIdx >= 0 && currentFrameIdx < frameTimes.length) ? frameTimes[currentFrameIdx] : null;
+        const idxTxt = (cur && frameTimes.length) ? ` [${currentFrameIdx + 1}/${frameTimes.length}]` : '';
+        frameTimeValueEl.textContent = cur ? `${_fmtFrameUTC(cur)}${idxTxt}` : '--';
+    }
+
+    // set the current frame index and update the display.  If the index is out of bounds, it will be clamped to the valid range.
+    function _setCurrentFrameIdx(idx) {
+        if (!frameTimes.length) {
+            currentFrameIdx = -1;
+            _updateFrameDisplay();
+            return;
+        }
+        currentFrameIdx = Math.max(0, Math.min(frameTimes.length - 1, idx));
+        _updateFrameDisplay();
+    }
+
+    // stop any ongoing playback and clear the playback timer
+    function _stopPlayback() {
+        if (playbackTimer) {
+            clearInterval(playbackTimer);
+            playbackTimer = null;
+        }
+        playbackMode = 'pause';
+    }
+    
+    // step the current frame index by delta, wrapping around if necessary.  If delta is negative and the current frame index is 0, it will wrap to the last frame.
+    function _step(delta) {
+        if (delta < 0 && currentFrameIdx === 0) {
+            _setCurrentFrameIdx(frameTimes.length - 1);
+            return;
+        }
+        if (!frameTimes.length) return;
+        _setCurrentFrameIdx(currentFrameIdx + delta >= frameTimes.length ? 0 : currentFrameIdx + delta);
+    }
+
+    // step the current frame index forward by 1, wrapping around to 0 if necessary
+    function _tickLoopForward() {
+        if (!frameTimes.length) return;
+        const next = currentFrameIdx + 1;
+        _setCurrentFrameIdx(next >= frameTimes.length ? 0 : next);
+    }
+
+    // step the current frame index backward by 1, wrapping around to the last frame if necessary
+    function _tickLoopBackward() {
+        if (!frameTimes.length) return;
+        const next = currentFrameIdx - 1;
+        _setCurrentFrameIdx(next < 0 ? frameTimes.length - 1 : next);
+    }
+
+    // step the current frame index forward or backward by 1, reversing direction when the end or beginning of the frame times is reached
+    function _tickRock() {
+        if (!frameTimes.length) return;
+        if (frameTimes.length === 1) {
+            _setCurrentFrameIdx(0);
+            return;
+        }
+        let next = currentFrameIdx + rockDirection;
+        if (next >= frameTimes.length) {
+            rockDirection = -1;
+            next = frameTimes.length - 2;
+        } else if (next < 0) {
+            rockDirection = 1;
+            next = 1;
+        }
+        _setCurrentFrameIdx(next);
+    }
+
+    // start playback in the specified mode ('loop-fwd', 'loop-back', or 'rock').  If the same mode is already active, it will stop playback.  If a different mode is active, it will switch to the new mode.
+    function _startPlayback(mode) {
+        if (!frameTimes.length) return;
+        if (playbackMode === mode && playbackTimer) {
+            _stopPlayback();
+            return;
+        }
+        _stopPlayback();
+        playbackMode = mode;
+        if (mode === 'rock') rockDirection = 1;
+        playbackTimer = setInterval(() => {
+            if (playbackMode === 'loop-fwd') _tickLoopForward();
+            else if (playbackMode === 'loop-back') _tickLoopBackward();
+            else if (playbackMode === 'rock') _tickRock();
+        }, FRAME_PLAY_INTERVAL_MS);
+    }
+
+    // set the list of frame times from the dominant source, normalizing them to Date objects and sorting them in ascending order.  The current frame index will be set to the last frame (newest) by default.
+    function _setFrameTimesFromDominant(framesNewestToOldest) {
+        _stopPlayback();
+        const normalized = (Array.isArray(framesNewestToOldest) ? framesNewestToOldest : [])
+            .map(t => t instanceof Date ? new Date(t.getTime()) : new Date(t))
+            .filter(d => Number.isFinite(d.getTime()));
+        normalized.sort((a, b) => a.getTime() - b.getTime()); // oldest -> newest
+        frameTimes = normalized;
+        // Default to latest frame when a new timeline is applied
+        _setCurrentFrameIdx(frameTimes.length ? frameTimes.length - 1 : -1);
+    }
+
+    // Expose central frame-time state for future loader integration.
+    window.NmapFrameState = {
+        getTimes: () => frameTimes.slice(),
+        getCurrentIndex: () => currentFrameIdx,
+        getCurrentTime: () => (currentFrameIdx >= 0 && currentFrameIdx < frameTimes.length) ? new Date(frameTimes[currentFrameIdx].getTime()) : null,
+        setCurrentIndex: (idx) => _setCurrentFrameIdx(+idx || 0),
+    };
+
+    // ------------------------------------------------------------------
+    // Map update function
+    // ------------------------------------------------------------------
     async function updateMap() {
         const view = views[menu.value];
+        console.debug('%c[NMAP]%c updateMap() → view="%s"', 'color:#55d46a;font-weight:bold', 'color:inherit', menu.value);
         map.setMaxZoom(view.maxZoom);
 
         const {layers, colorbar, sampler} = await view.makeLayers();
@@ -311,10 +466,13 @@ window.addEventListener('load', async () => {
             map.off('mousemove', current_mousemove_handler);
             current_mousemove_handler = null;
         }
-
+        
+        // TODO: Include other options for the readout, such as displaying the coordinates in different formats (e.g., DMS, UTM, etc.) and displaying additional information (e.g., elevation, county, country, state, time, etc.) and displaying the readout in a tooltip or popup instead of the readout.
         if (sampler !== undefined) {
             // If a sampler is provided, use it to sample data values at the mouse location and display them in the readout
+
             // TODO: provide options to display the sampled data values in different formats (e.g., raw, formatted, etc.) and to display additional information (e.g., units, descriptions, etc.) and to display the sampled data values in a tooltip or popup instead of the readout
+
             current_mousemove_handler = (ev) => {
                 const coord = ev.lngLat.wrap();
                 readout.innerHTML = `${coord.lat.toFixed(2)}°N ${coord.lng.toFixed(2)}°E`;
@@ -328,7 +486,7 @@ window.addEventListener('load', async () => {
             };
         } else {
             // If no sampler is provided, just display the lat/lon coordinates
-            // TODO: Include other options for the readout, such as displaying the coordinates in different formats (e.g., DMS, UTM, etc.) and displaying additional information (e.g., elevation, county, country, state, time, etc.) and displaying the readout in a tooltip or popup instead of the readout.
+
             current_mousemove_handler = (ev) => {
                 const coord = ev.lngLat.wrap();
                 readout.innerHTML = `${coord.lat.toFixed(2)}°N ${coord.lng.toFixed(2)}°E`;
@@ -338,10 +496,62 @@ window.addEventListener('load', async () => {
     }
 
     // Initial map update when the page loads, and also when the user selects a different view from the menu
-    map.on('load', updateMap);
+    map.on('load', () => {
+        console.info('%c[NMAP]%c Map loaded — MapLibre ready', 'color:#55d46a;font-weight:bold', 'color:inherit');
+        updateMap();
+        ProductGen.init(map);
+    });
     menu.addEventListener('change', updateMap);
 
     // --- Toolbar buttons ---
+
+    // Playback controls (timeline scaffold only; data loading by frame is wired later)
+    document.querySelector('#btn-goto-first').addEventListener('click', () => {
+        _stopPlayback();
+        _setCurrentFrameIdx(0);
+    });
+    document.querySelector('#btn-goto-last').addEventListener('click', () => {
+        _stopPlayback();
+        _setCurrentFrameIdx(frameTimes.length - 1);
+    });
+    document.querySelector('#btn-step-back').addEventListener('click', () => {
+        _stopPlayback();
+        _step(-1);
+    });
+    document.querySelector('#btn-step-fwd').addEventListener('click', () => {
+        _stopPlayback();
+        _step(+1);
+    });
+    document.querySelector('#btn-loop-back').addEventListener('click', () => _startPlayback('loop-back'));
+    document.querySelector('#btn-loop-fwd').addEventListener('click', () => _startPlayback('loop-fwd'));
+    document.querySelector('#btn-rock').addEventListener('click', () => _startPlayback('rock'));
+
+    // Keyboard controls for timeline playback (spacebar toggles pause/play, left/right arrows step backward/forward, up/down arrows toggle loop forward/back)
+    document.addEventListener('keydown', (ev) => {
+        if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA') return;
+        if (ev.code === 'Space') {
+            ev.preventDefault();
+            if (playbackMode === 'pause') _startPlayback('loop-fwd');
+            else _stopPlayback();
+        } else if (ev.code === 'Comma') {
+            ev.preventDefault();
+            _stopPlayback();
+            
+            _step(-1);
+        } else if (ev.code === 'Period') {
+            ev.preventDefault();
+            _stopPlayback();
+            _step(+1);
+        } else if (ev.code === 'KeyL') {
+            ev.preventDefault();    
+            _startPlayback('loop-fwd');
+        } else if (ev.code === 'KeyK') {
+            ev.preventDefault();
+            _startPlayback('loop-back');
+        }
+    });
+
+    _updateFrameDisplay();
 
     // Initialize the Layer Manager (which internally initialises DataSelector).
     // "Load Data" opens the Layer Manager so the user can add / remove sources,
@@ -354,6 +564,22 @@ window.addEventListener('load', async () => {
             // can be wired here once the plotter supports stacked PlotLayers.
             const activeId = dominantId || (sources.length ? sources[0].id : null);
             if (!activeId) return;
+            // Log the received config
+            console.groupCollapsed('%c[NMAP]%c LayerManager applied — loading %d frame(s) of "%s"',
+                'color:#55d46a;font-weight:bold', 'color:inherit', frames.length, activeId);
+            console.info('  Sources (%d):', sources.length,
+                sources.map(s => `${s.id}${s.cycleTime ? ' @'+s.cycleTime.toISOString().slice(0,13)+'Z' : ''}`));
+            console.info('  Dominant:', activeId);
+            console.info('  numFrames:', numFrames, '  frameSkip:', frameSkip);
+            if (frames.length) {
+                console.info('  Time range:', frames[frames.length-1].toISOString(), '→', frames[0].toISOString(),
+                    `(${((frames[0]-frames[frames.length-1])/3600000).toFixed(1)}h span)`);
+            }
+            console.groupEnd();
+
+            // Centralize the active timeline to dominant-source frame times.
+            _setFrameTimesFromDominant(frames);
+
             const opt = menu.querySelector(`option[value="${activeId}"]`);
             if (opt) {
                 menu.value = activeId;
@@ -365,6 +591,8 @@ window.addEventListener('load', async () => {
     });
 
     // Freeze Map Location: lock/unlock pan and zoom interactions
+    // This is so the user can do other things without having to worry
+    // about accidentally moving the map around.
     let locationFrozen = false;
     const freezeBtn = document.querySelector('#btn-freeze');
     freezeBtn.addEventListener('click', () => {
@@ -403,6 +631,13 @@ window.addEventListener('load', async () => {
             autoUpdateBtn.classList.add('active');
             autoUpdateBtn.title = 'Auto-Update (on)';
         }
+    });
+
+    // Product Generation panel
+    const productBtn = document.querySelector('#btn-product');
+    productBtn.addEventListener('click', () => {
+        const nowOpen = ProductGen.toggle();
+        productBtn.classList.toggle('active', nowOpen);
     });
 
     // Template: placeholder for future functionality

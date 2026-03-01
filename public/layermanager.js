@@ -24,6 +24,17 @@
 const LayerManager = (() => {
 
     // ------------------------------------------------------------------
+    // Tiny scoped logger
+    // ------------------------------------------------------------------
+    const LM = {
+        tag: '%c[LM]%c',
+        css: ['color:#4a9eff;font-weight:bold', 'color:inherit'],
+        info (msg, ...a) { console.info( this.tag + ' ' + msg, ...this.css, ...a); },
+        debug(msg, ...a) { console.debug(this.tag + ' ' + msg, ...this.css, ...a); },
+        warn (msg, ...a) { console.warn( this.tag + ' ' + msg, ...this.css, ...a); },
+    };
+
+    // ------------------------------------------------------------------
     // Persistent state (survives dialog close/open cycles)
     // ------------------------------------------------------------------
     let _sources      = [];     // [{ uid, id, name, color, entry }]
@@ -35,7 +46,8 @@ const LayerManager = (() => {
     let _overlay      = null;
     let _uidCounter   = 0;
 
-    // Probe state
+    // PROBE STATE - this is the action that actually queries the data directory
+    // for available frames and builds the timeline.
     let _allFrames    = [];     // ALL found frames from last probe (newest first)
     let _probedFrames = [];     // selected subset after applying numFrames / frameSkip
     let _probing      = false;  // true while HEAD requests are in flight
@@ -64,6 +76,13 @@ const LayerManager = (() => {
         return PALETTE[_sources.length % PALETTE.length];
     }
 
+    // Format a source as CATEGORY / Subcategory / Name (NMAP2-style slash path).
+    function _srcLabel(src) {
+        const e = src.entry;
+        if (!e) return src.name;
+        return [e.category, e.subcategory, e.name].filter(Boolean).join(' / ');
+    }
+
     // ------------------------------------------------------------------
     // Build DOM — called once by init()
     // ------------------------------------------------------------------
@@ -76,49 +95,49 @@ const LayerManager = (() => {
     <span id="lm-title">&#9632; DATA SOURCE MANAGER</span>
     <button id="lm-close" title="Close">&#10005;</button>
   </div>
-  <div id="lm-body">
-    <div id="lm-left">
-      <div class="lm-section-hdr">ACTIVE SOURCES</div>
-      <ul id="lm-source-list"></ul>
-      <div id="lm-source-btns">
-        <button class="lm-btn lm-btn-action" id="lm-btn-new">+ New Source</button>
-        <button class="lm-btn lm-btn-action" id="lm-btn-edit" disabled>Edit Source</button>
-        <button class="lm-btn lm-btn-remove" id="lm-btn-remove" disabled>&#10005; Remove</button>
-      </div>
+  <div id="lm-sources">
+    <div class="lm-section-hdr">ACTIVE SOURCES</div>
+    <ul id="lm-source-list"></ul>
+    <div id="lm-source-btns">
+      <button class="lm-btn lm-btn-action" id="lm-btn-new">+ New Source</button>
+      <button class="lm-btn lm-btn-action" id="lm-btn-edit" disabled>Edit Source</button>
+      <button class="lm-btn lm-btn-remove" id="lm-btn-remove" disabled>&#10005; Remove</button>
+      <label class="lm-bin-label" title="Bin Source (not yet implemented)"><input type="checkbox" id="lm-bin-check" disabled /> Bin Source</label>
     </div>
-    <div id="lm-right">
-      <div class="lm-section-hdr">SETTINGS</div>
-      <div class="lm-setting-block">
-        <div class="lm-setting-row">
-          <label class="lm-label">Dominant</label>
-          <select id="lm-dominant"></select>
-        </div>
-        <div class="lm-setting-row">
-          <label class="lm-label">Frames</label>
-          <div id="lm-frames-control">
-            <input id="lm-frames-num" type="number" min="1" max="100" value="12" />
-            <input id="lm-frames-slider" type="range" min="1" max="100" value="12" />
-            <span id="lm-frames-label">12</span>
-          </div>
-        </div>
-        <div class="lm-setting-row">
-          <label class="lm-label">Skip frames</label>
-          <select id="lm-skip">
-            <option value="1">1 (none)</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="5">5</option>
-            <option value="10">10</option>
-          </select>
+  </div>
+  <div id="lm-settings">
+    <div class="lm-section-hdr">SETTINGS</div>
+    <div id="lm-settings-row">
+      <div class="lm-setting-group">
+        <label class="lm-label">Dominant</label>
+        <select id="lm-dominant"></select>
+      </div>
+      <div class="lm-setting-group">
+        <label class="lm-label">Frames</label>
+        <div id="lm-frames-control">
+          <input id="lm-frames-num" type="number" min="1" max="100" value="12" />
+          <input id="lm-frames-slider" type="range" min="1" max="100" value="12" />
+          <span id="lm-frames-label">12</span>
         </div>
       </div>
-      <div id="lm-frame-info"></div>
+      <div class="lm-setting-group">
+        <label class="lm-label">Skip</label>
+        <select id="lm-skip">
+          <option value="1">1 (none)</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="5">5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
     </div>
+    <div id="lm-frame-info"></div>
   </div>
   <div id="lm-timeline-section">
     <div class="lm-section-hdr">
       TIMELINE
       <span id="lm-timeline-range"></span>
+      <button class="lm-btn" id="lm-curtime-btn" title="Jump to current time">Current Time</button>
       <button class="lm-btn lm-btn-range" id="lm-range-btn">Range/Int&#8230;</button>
     </div>
     <div id="lm-timeline-scroll">
@@ -210,7 +229,8 @@ const LayerManager = (() => {
             _scheduleProbe();
         });
 
-        // Frame count — keep num input and slider in sync
+        // Frame count — keep num input and slider controlling the width of the
+        // time window in sync.
         const numInput = overlay.querySelector('#lm-frames-num');
         const slider   = overlay.querySelector('#lm-frames-slider');
         const label    = overlay.querySelector('#lm-frames-label');
@@ -230,6 +250,15 @@ const LayerManager = (() => {
         // Skip dropdown
         overlay.querySelector('#lm-skip').addEventListener('change', (e) => {
             _frameSkip = +e.target.value;
+            _recomputeSelection();
+        });
+
+        // Current Time button — reset to auto-newest
+        overlay.querySelector('#lm-curtime-btn').addEventListener('click', () => {
+            _rangeStart     = null;
+            _rangeEnd       = null;
+            _selWindowStart = null;   // auto mode → selbox snaps to newest frames
+            _updateSliderMax();
             _recomputeSelection();
         });
 
@@ -280,6 +309,7 @@ const LayerManager = (() => {
                 const old = _sources[idx];
                 _sources[idx] = { uid: old.uid, id, name: entry.name, color: old.color, entry, cycleTime: storedCycle };
                 if (_dominantId === old.id) _dominantId = id;
+                LM.info(`Source replaced → uid=${old.uid} | ${old.id} ⟶ ${id} (${entry.name})`);
             }
             _editingUid = null;
         } else {
@@ -288,6 +318,7 @@ const LayerManager = (() => {
             const color = _nextColor();
             _sources.push({ uid, id, name: entry.name, color, entry, cycleTime: storedCycle });
             if (_sources.length === 1) _dominantId = id; // auto-assign first dominant
+            LM.info(`Source added → uid=${uid} | id="${id}" name="${entry.name}" cycle=${storedCycle ? storedCycle.toISOString() : 'n/a'} dominant=${_dominantId === id}`);
         }
 
         _renderAll();
@@ -321,7 +352,9 @@ const LayerManager = (() => {
         // If removed source was dominant, reassign
         if (removedSrc && removedSrc.id === _dominantId) {
             _dominantId = _sources.length ? _sources[0].id : null;
+            LM.info(`Dominant reassigned → "${_dominantId}" (removed source was dominant)`);
         }
+        if (removedSrc) LM.info(`Source removed → uid=${removedSrc.uid} | id="${removedSrc.id}" name="${removedSrc.name}" | ${_sources.length} source(s) remaining`);
         _selectedUid = null;
         _renderAll();
     }
@@ -356,7 +389,7 @@ const LayerManager = (() => {
 
             li.innerHTML =
                 `<span class="lm-src-swatch" style="background:${src.color}"></span>` +
-                `<span class="lm-src-name">${src.name}</span>` +
+                `<span class="lm-src-name" title="${_srcLabel(src)}">${_srcLabel(src)}</span>` +
                 cycleTag +
                 (isDominant ? `<span class="lm-src-dom" title="Dominant source">&#8679;</span>` : '') +
                 `<button class="lm-src-up"   title="Move up"   data-uid="${src.uid}">&#9650;</button>` +
@@ -406,7 +439,7 @@ const LayerManager = (() => {
         _sources.forEach(src => {
             const opt = document.createElement('option');
             opt.value = src.id;
-            opt.textContent = src.name;
+            opt.textContent = _srcLabel(src);
             if (src.id === _dominantId) opt.selected = true;
             sel.appendChild(opt);
         });
@@ -441,6 +474,11 @@ const LayerManager = (() => {
 
         const candidates = [];
 
+        let _maxCycles = 0;
+
+        // Search for valid frames by probing the data directory.  If statement
+        // below handles the two cases: forecast datasets (cycle + fhr) vs
+        // analysis/obs datasets (cycle = valid time).
         if (dom.has_forecast_hour && dom.forecast_hr_step && dom.max_forecast_hr != null) {
             // Forecast dataset: probe ONLY the cycle time chosen in DataSelector.
             // If no cycle was chosen, return empty so the UI can prompt the user.
@@ -459,19 +497,35 @@ const LayerManager = (() => {
             }
         } else {
             // Analysis / obs: the cycle time IS the valid time.
-            for (let ci = 0; ci < maxCycles; ci++) {
+
+            // FIXME: If the user has set a custom range/interval, we should probe only the range of times that
+            // the user has requested, rather than blindly probing the last maxCycles.
+            // If the user has set "current time" (no range), we can probe the last maxCycles as we do now.
+
+            if (_rangeStart !== null) {
+                const rangeStart = _rangeStart;
+                const rangeEnd   = _rangeEnd || latestCycle;
+                _maxCycles = Math.ceil((rangeEnd.getTime() - rangeStart.getTime()) / (freqMin * 60000));
+            } else {
+                _rangeStart = null;
+                _rangeEnd   = null;
+                _maxCycles = maxCycles;
+            }
+            for (let ci = 0; ci < _maxCycles; ci++) {
                 const cycle = new Date(latestCycle.getTime() - ci * freqMin * 60000);
                 const path  = DataCatalog.expandPath(dom.path_template, cycle);
                 candidates.push({ valid: cycle, cycle, fhr: null, path });
             }
         }
+        LM.info(`Probing ${candidates.length} candidate frames for dominant source "${_dominantId}"`);
+        LM.info(`Probe token=${token} | maxCycles=${_maxCycles} | rangeStart=${_rangeStart ? _rangeStart.toISOString() : 'null'} | rangeEnd=${_rangeEnd ? _rangeEnd.toISOString() : 'null'}`);
 
         // For forecast datasets the full candidate list is already bounded by
         // max_forecast_hr; for obs/analysis it is bounded by time_range_hr via maxCycles.
         // Never apply the obs-derived maxCycles cap to forecast candidates.
         const MAX_PROBES = dom.has_forecast_hour
             ? candidates.length
-            : Math.min(maxCycles, 2000);
+            : Math.min(_maxCycles, 2000);
         const probeList  = candidates.slice(0, MAX_PROBES);
 
         // Fire all HEAD requests in parallel
@@ -523,11 +577,14 @@ const LayerManager = (() => {
         // Filter to the visible range first
         const tlEnd   = _rangeEnd   || allFrames[0].valid;
         const tlStart = _rangeStart || allFrames[allFrames.length - 1].valid;
+        
+        LM.info(`Setting the timeline limits as ${tlStart.toISOString()} → ${tlEnd.toISOString()}"`);
+
         const visible = allFrames.filter(
             f => f.valid.getTime() >= tlStart.getTime() &&
                  f.valid.getTime() <= tlEnd.getTime());
         if (!visible.length) return [];
-
+        
         if (_selWindowStart === null) {
             // ── Auto mode: just take newest N frames (with skip/interval thinning) ──
             const result = [];
@@ -620,15 +677,29 @@ const LayerManager = (() => {
         _probeTimer = null;
         const token = ++_probeToken;
         _probing = true;
+        const domEntry = _dominantId ? DataCatalog.byId(_dominantId) : null;
+        LM.debug(`Probe #${token} started → dominant="${_dominantId || 'none'}" sources=${_sources.length}`);
         _renderTimeline();
         _renderFrameInfo();
         const frames = await _probeFrames(token);
-        if (frames === null) return; // stale — a newer probe is running
+        if (frames === null) {
+            LM.debug(`Probe #${token} cancelled (superseded)`);
+            return; // stale — a newer probe is running
+        }
         _allFrames      = frames;
         _selWindowStart = null;          // reset selection window to newest end
         _updateSliderMax();
         _probedFrames   = _computeSelected(_allFrames);
         _probing = false;
+        if (_allFrames.length) {
+            const oldest  = _allFrames[_allFrames.length - 1].valid;
+            const newest  = _allFrames[0].valid;
+            const spanHr  = ((newest - oldest) / 3600000).toFixed(1);
+            LM.info(`Probe #${token} complete → ${_allFrames.length} total frames found | span ${spanHr}h | oldest ${oldest.toISOString()} → newest ${newest.toISOString()}`);
+            LM.debug(`  Selected (displayed): ${_probedFrames.length} frame(s) | numFrames=${_numFrames} frameSkip=${_frameSkip}`);
+        } else {
+            LM.warn(`Probe #${token} complete → 0 frames found for dominant="${_dominantId || 'none'}"`);
+        }
         _renderTimeline();
         _renderFrameInfo();
     }
@@ -800,8 +871,21 @@ const LayerManager = (() => {
 
         const allNewest = _allFrames[0].valid;
         const allOldest = _allFrames[_allFrames.length - 1].valid;
-        const tlEnd     = _rangeEnd   || allNewest;
-        const tlStart   = _rangeStart || allOldest;
+
+        // For forecast data use the actual frame span; for obs/analysis anchor the
+        // right edge at wall-clock "now" and stretch left by time_range_hr so the
+        // full expected window is always visible even when data only partially fills it.
+        let defaultEnd, defaultStart;
+        if (hasFhr) {
+            defaultEnd   = allNewest;
+            defaultStart = allOldest;
+        } else {
+            const lookbackHr = (dom && dom.time_range_hr) || 48;
+            defaultEnd   = new Date();                                             // now
+            defaultStart = new Date(defaultEnd.getTime() - lookbackHr * 3600000); // now - lookback
+        }
+        const tlEnd   = _rangeEnd   || defaultEnd;
+        const tlStart = _rangeStart || defaultStart;
         const totalMs   = Math.max(tlEnd.getTime() - tlStart.getTime(), 3600000); // min 1 h
         const totalHr   = totalMs / 3600000;
 
@@ -1007,6 +1091,7 @@ const LayerManager = (() => {
         }
         _overlay.querySelector('#lm-ri-date').value =
             `${center.getUTCFullYear()}-${pad(center.getUTCMonth()+1)}-${pad(center.getUTCDate())}`;
+        // TODO: Change the time input to a 24-hour format and remove the AM/PM selection. This will simplify the user interface and avoid confusion with time zones.  The web browser chooses the locale (and thus the time format) based on the user's system settings, which can lead to inconsistencies. By enforcing a 24-hour format, we ensure that all users see the same time representation, regardless of their locale. This is especially important for applications that deal with global data and need to avoid ambiguity in time representation.  We could create two separate boxes, one for hour, one for minute to get around this.
         _overlay.querySelector('#lm-ri-time').value =
             `${pad(center.getUTCHours())}:${pad(center.getUTCMinutes())}`;
         _overlay.querySelector('#lm-ri-before').value   = Math.round(beforeHr);
@@ -1029,6 +1114,8 @@ const LayerManager = (() => {
         _rangeIntervalMin = intVal ? Math.max(1, +intVal) : null;
         _selWindowStart   = null;   // reset selection box to auto (newest end)
 
+        LM.info(`Timeline Range Set to ${_rangeStart.toISOString()} → ${_rangeEnd.toISOString()}`);
+        
         _overlay.querySelector('#lm-ri-modal').style.display = 'none';
         _updateSliderMax();
         _recomputeSelection();
@@ -1055,6 +1142,17 @@ const LayerManager = (() => {
     function _handleApply() {
         // Use probed valid times; falls back to empty array if probe hasn't completed yet.
         const frames = _probedFrames.map(f => f.valid);
+        // Log a grouped summary before closing the dialog
+        const domEntry = _dominantId ? DataCatalog.byId(_dominantId) : null;
+        console.groupCollapsed('%c[LM]%c Apply — %d source(s), %d frame(s)', 'color:#4a9eff;font-weight:bold', 'color:inherit', _sources.length, frames.length);
+        console.info('  Dominant :', _dominantId, domEntry ? `(${domEntry.name})` : '(none)');
+        console.info('  Sources  :', _sources.map(s => `uid=${s.uid} "${s.id}" ${s.cycleTime ? '@'+_fmtCycleShort(s.cycleTime) : ''}`.trim()));
+        console.info('  numFrames:', _numFrames, '  frameSkip:', _frameSkip);
+        if (frames.length) {
+            console.info('  Frame range:', frames[frames.length-1].toISOString(), '→', frames[0].toISOString());
+            console.info('  Frames (newest→oldest):', frames.map(d => d.toISOString()));
+        }
+        console.groupEnd();
         _close();
         if (typeof _onApply === 'function') {
             _onApply({
@@ -1100,5 +1198,7 @@ const LayerManager = (() => {
         },
     };
 })();
+
+// TODO: Figure out how the layer manager will handle the miscellanous data sources as they are a little different and infrequent compared to the other data sources. 
 
 window.LayerManager = LayerManager;

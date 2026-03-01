@@ -1,0 +1,25 @@
+Data types should have the following metadata for WebNMAP:
+    - id
+    - name 
+    - category (MODEL_DET, MODEL_ENS, OBS_SURFACE, OBS_UPPERAIR, ANALYSIS, SATELLITE, RADAR MOSAIC, RADAR_SITE, MISC)
+    - subcategory (e.g., GFS, HREF, METAR, SHIP, LTNG, ASDI_T, ASDI_H, OSCAT)
+    - description
+    - path_template
+    - data_store_catalog (path to a text file listing all of the available files for this dataset)
+    - default_interval_min (e.g., null, 1, 10, 60 - null means no default interval min)
+    - default_range_hr (how far back to look for data)
+    - default_frame_no (number of default frames to view from this data source)
+    - has_forecast_hour (true/false, indicates whether or not to construct a timeline into the future)
+    - data_format (json or zarr)
+    - dtype (json, float16, etc. - might need to be removed eventually)
+    - max_zoom (e.g., maximum zoom level for map)
+    - tags (e.g., a list of tags associated with this data source)
+    - time_matching (nearest | before | after | exact)
+    - matching_tolerance_min (e.g., number of minutes to tolerate time matching)
+    - allow_binning (true/false - allow the user to bin the obs and group them to be passed for plotting)
+    - bin_obs (true/false)
+    - bin_window_before (number of minutes before)
+    - bin_window_after (number of minutes after)
+    - bin_only_show_latest (true/false)
+    - settings_gui (true/false - whether or not the data type will have a custom GUI for configuring the data source)
+
