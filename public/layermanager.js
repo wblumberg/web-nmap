@@ -84,7 +84,7 @@ const LayerManager = (() => {
     }
 
     // ------------------------------------------------------------------
-    // Build DOM — called once by init()
+    // Build DOM — called only once by init()
     // ------------------------------------------------------------------
     function _buildDOM() {
         const overlay = document.createElement('div');
@@ -226,6 +226,19 @@ const LayerManager = (() => {
             _allFrames     = [];   // force full re-probe for new source
             _probedFrames  = [];
             _selWindowStart = null; // reset selection window to newest end
+            // If the newly selected dominant has a catalog default_frame_no, adopt it
+            try {
+                const domEntry = _dominantId ? DataCatalog.byId(_dominantId) : null;
+                if (domEntry && domEntry.default_frame_no) {
+                    _numFrames = domEntry.default_frame_no;
+                    const numInput = overlay.querySelector('#lm-frames-num');
+                    const slider   = overlay.querySelector('#lm-frames-slider');
+                    const label    = overlay.querySelector('#lm-frames-label');
+                    numInput.value = _numFrames;
+                    slider.value   = _numFrames;
+                    label.textContent = _numFrames;
+                }
+            } catch (e) {}
             _scheduleProbe();
         });
 
@@ -308,7 +321,23 @@ const LayerManager = (() => {
             if (idx !== -1) {
                 const old = _sources[idx];
                 _sources[idx] = { uid: old.uid, id, name: entry.name, color: old.color, entry, cycleTime: storedCycle };
-                if (_dominantId === old.id) _dominantId = id;
+                if (_dominantId === old.id) {
+                    _dominantId = id;
+                    try {
+                        const domEntry = DataCatalog.byId(_dominantId);
+                        if (domEntry && domEntry.default_frame_no) {
+                            _numFrames = domEntry.default_frame_no;
+                            const numInput = _overlay.querySelector('#lm-frames-num');
+                            const slider   = _overlay.querySelector('#lm-frames-slider');
+                            const label    = _overlay.querySelector('#lm-frames-label');
+                            if (numInput && slider && label) {
+                                numInput.value = _numFrames;
+                                slider.value   = _numFrames;
+                                label.textContent = _numFrames;
+                            }
+                        }
+                    } catch (e) {}
+                }
                 LM.info(`Source replaced → uid=${old.uid} | ${old.id} ⟶ ${id} (${entry.name})`);
             }
             _editingUid = null;
@@ -317,7 +346,23 @@ const LayerManager = (() => {
             const uid = ++_uidCounter;
             const color = _nextColor();
             _sources.push({ uid, id, name: entry.name, color, entry, cycleTime: storedCycle });
-            if (_sources.length === 1) _dominantId = id; // auto-assign first dominant
+            if (_sources.length === 1) {
+                _dominantId = id; // auto-assign first dominant
+                try {
+                    const domEntry = DataCatalog.byId(_dominantId);
+                    if (domEntry && domEntry.default_frame_no) {
+                        _numFrames = domEntry.default_frame_no;
+                        const numInput = _overlay.querySelector('#lm-frames-num');
+                        const slider   = _overlay.querySelector('#lm-frames-slider');
+                        const label    = _overlay.querySelector('#lm-frames-label');
+                        if (numInput && slider && label) {
+                            numInput.value = _numFrames;
+                            slider.value   = _numFrames;
+                            label.textContent = _numFrames;
+                        }
+                    }
+                } catch (e) {}
+            }
             LM.info(`Source added → uid=${uid} | id="${id}" name="${entry.name}" cycle=${storedCycle ? storedCycle.toISOString() : 'n/a'} dominant=${_dominantId === id}`);
         }
 
@@ -325,6 +370,8 @@ const LayerManager = (() => {
 
         // Return focus to layer manager (DataSelector already closed)
         _overlay.style.display = 'flex';
+        // If adding/replacing a source changed the dominant or we auto-assigned one, probe for frames
+        if (_dominantId) _scheduleProbe();
     }
 
     // ------------------------------------------------------------------
@@ -345,6 +392,7 @@ const LayerManager = (() => {
         _overlay.querySelector('#lm-btn-remove').disabled = !hasSel;
     }
 
+    // Remove a selected data source from the list of data sources.
     function _removeSelected() {
         if (_selectedUid === null) return;
         const removedSrc = _sources.find(s => s.uid === _selectedUid);
@@ -357,6 +405,69 @@ const LayerManager = (() => {
         if (removedSrc) LM.info(`Source removed → uid=${removedSrc.uid} | id="${removedSrc.id}" name="${removedSrc.name}" | ${_sources.length} source(s) remaining`);
         _selectedUid = null;
         _renderAll();
+    }
+
+    // Add near other utility helpers in LayerManager scope
+    function _escapeRegExp(s) {
+        return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    // Helper function to convert a template filename to one we can use with Regex
+    function _templateToRegex(pathTemplate) {
+        const tokenRegex = /\{(YYYY|MM|DD|HH|mm|FFF)\}/g;
+        
+        // Replace tokens FIRST, before escaping
+        const withPlaceholders = pathTemplate.replace(tokenRegex, (_, t) => {
+            if (t === 'YYYY') return '___YYYY___';
+            if (t === 'FFF') return '___FFF___';
+            if (t === 'MM') return '___MM___';
+            if (t === 'DD') return '___DD___';
+            if (t === 'HH') return '___HH___';
+            if (t === 'mm') return '___mm___';
+            return '';
+        });
+        
+        // NOW escape regex special chars
+        const escaped = _escapeRegExp(withPlaceholders);
+        
+        // Replace placeholders with capture groups
+        const pattern = '^' + escaped
+            .replace('___YYYY___', '(?<YYYY>\\d{4})')
+            .replace('___FFF___', '(?<FFF>\\d{3})')
+            .replace('___MM___', '(?<MM>\\d{2})')
+            .replace('___DD___', '(?<DD>\\d{2})')
+            .replace('___HH___', '(?<HH>\\d{2})')
+            .replace('___mm___', '(?<mm>\\d{2})')
+            + '$';
+        
+        return new RegExp(pattern);
+    }
+    
+    // Match a path against a path_template and extract the following information: cycle/valid/fhr info.
+    function _frameFromPath(path, dom, rx) {
+        //LM.info(`Probing path "${path}" against template "${dom.path_template}" and regex "${rx}"`);
+        const m = rx.exec(path);
+        //LM.info(`Probing path "${path}" → match=${m ? 'yes' : 'no'}`);
+        if (!m || !m.groups) return null;
+
+        const y = +(m.groups.YYYY ?? NaN);
+        if (!Number.isFinite(y)) return null;
+
+        const mo = (m.groups.MM != null ? +m.groups.MM : 1) - 1;
+        const d  = (m.groups.DD != null ? +m.groups.DD : 1);
+        const h  = (m.groups.HH != null ? +m.groups.HH : 0);
+        const mi = (m.groups.mm != null ? +m.groups.mm : 0);
+
+        const cycle = new Date(Date.UTC(y, mo, d, h, mi, 0, 0));
+        if (Number.isNaN(cycle.getTime())) return null;
+
+        const fhr = (m.groups.FFF != null) ? +m.groups.FFF : null;
+        const valid = (dom.has_forecast_hour && fhr != null)
+            ? new Date(cycle.getTime() + fhr * 3600000)
+            : cycle;
+
+        LM.info(`Successfully found "${path}" → valid=${valid.toISOString()} cycle=${cycle.toISOString()} fhr=${fhr}`);
+        return { valid, cycle, fhr, path };
     }
 
     // ------------------------------------------------------------------
@@ -458,95 +569,71 @@ const LayerManager = (() => {
     // trimmed to _numFrames entries with _frameSkip spacing.
     // Returns null if this probe was superseded by a newer one.
     // ------------------------------------------------------------------
-    async function _probeFrames(token) {
-        const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
-        if (!dom || !dom.temporal_frequency_min || !dom.path_template) return [];
+    async function _probeFramesFromStoreCatalog(token, dom) {
+        if (!dom?.data_store_catalog || !dom?.path_template) return [];
 
-        const freqMin    = dom.temporal_frequency_min;
-        const lookbackHr = dom.time_range_hr || 48;
-        const now        = new Date();
-        // Floor to the latest cycle boundary
-        const epochMin    = Math.floor(now.getTime() / (freqMin * 60000)) * freqMin * 60000;
-        const latestCycle = new Date(epochMin);
-        // +2 extra cycles ensures the full lookbackHr window is always covered
-        // even when latestCycle is up to 2 cycle-lengths behind the exact current time.
-        const maxCycles  = Math.ceil(lookbackHr * 60 / freqMin) + 2;
+        // Keep existing behavior for forecast datasets: require selected cycle.
+        const dominantSrc = _sources.find(s => s.id === _dominantId);
+        const selectedCycle = dominantSrc ? dominantSrc.cycleTime : null;
+        if (dom.has_forecast_hour && !selectedCycle) return [];
 
-        const candidates = [];
-
-        let _maxCycles = 0;
-
-        // Search for valid frames by probing the data directory.  If statement
-        // below handles the two cases: forecast datasets (cycle + fhr) vs
-        // analysis/obs datasets (cycle = valid time).
-        if (dom.has_forecast_hour && dom.forecast_hr_step && dom.max_forecast_hr != null) {
-            // Forecast dataset: probe ONLY the cycle time chosen in DataSelector.
-            // If no cycle was chosen, return empty so the UI can prompt the user.
-            const dominantSrc = _sources.find(s => s.id === _dominantId);
-            const cycleTime   = dominantSrc ? dominantSrc.cycleTime : null;
-
-            if (!cycleTime) return [];
-
-            for (let fhr = 0; fhr <= dom.max_forecast_hr; fhr += dom.forecast_hr_step) {
-                const valid  = new Date(cycleTime.getTime() + fhr * 3600000);
-                // Do NOT skip future valid times — forecast files exist before their valid time.
-                // The HEAD request determines actual file existence.
-                const fhrStr = String(fhr).padStart(3, '0');
-                const path = DataCatalog.expandPath(dom.path_template, cycleTime, { FFF: fhrStr });
-                candidates.push({ valid, cycle: cycleTime, fhr, path });
-            }
-        } else {
-            // Analysis / obs: the cycle time IS the valid time.
-
-            // FIXME: If the user has set a custom range/interval, we should probe only the range of times that
-            // the user has requested, rather than blindly probing the last maxCycles.
-            // If the user has set "current time" (no range), we can probe the last maxCycles as we do now.
-
-            if (_rangeStart !== null) {
-                const rangeStart = _rangeStart;
-                const rangeEnd   = _rangeEnd || latestCycle;
-                _maxCycles = Math.ceil((rangeEnd.getTime() - rangeStart.getTime()) / (freqMin * 60000));
-            } else {
-                _rangeStart = null;
-                _rangeEnd   = null;
-                _maxCycles = maxCycles;
-            }
-            for (let ci = 0; ci < _maxCycles; ci++) {
-                const cycle = new Date(latestCycle.getTime() - ci * freqMin * 60000);
-                const path  = DataCatalog.expandPath(dom.path_template, cycle);
-                candidates.push({ valid: cycle, cycle, fhr: null, path });
-            }
+        let resp;
+        try {
+            resp = await fetch(dom.data_store_catalog, { cache: 'no-store' });
+        } catch {
+            return [];
         }
-        LM.info(`Probing ${candidates.length} candidate frames for dominant source "${_dominantId}"`);
-        LM.info(`Probe token=${token} | maxCycles=${_maxCycles} | rangeStart=${_rangeStart ? _rangeStart.toISOString() : 'null'} | rangeEnd=${_rangeEnd ? _rangeEnd.toISOString() : 'null'}`);
+        if (token !== _probeToken) return null;
+        if (!resp.ok) return [];
 
-        // For forecast datasets the full candidate list is already bounded by
-        // max_forecast_hr; for obs/analysis it is bounded by time_range_hr via maxCycles.
-        // Never apply the obs-derived maxCycles cap to forecast candidates.
-        const MAX_PROBES = dom.has_forecast_hour
-            ? candidates.length
-            : Math.min(_maxCycles, 2000);
-        const probeList  = candidates.slice(0, MAX_PROBES);
-
-        // Fire all HEAD requests in parallel
-        const results = await Promise.all(probeList.map(async (cand) => {
-            try {
-                const resp = await fetch(cand.path, { method: 'HEAD', cache: 'no-store' });
-                return resp.ok ? cand : null;
-            } catch {
-                return null;
-            }
-        }));
-
-        // Discard result if a newer probe has been started
+        LM.info(`Probing data_store_catalog "${dom.data_store_catalog}" for dominant source "${_dominantId}"`);
+        const text = await resp.text();
         if (token !== _probeToken) return null;
 
-        const found = results.filter(Boolean);
-        // Sort newest valid time first
-        found.sort((a, b) => b.valid - a.valid);
+        const rx = _templateToRegex(dom.path_template);
+        const seen = new Set();
+        const frames = [];
 
-        // Return all found frames — selection is applied separately by _computeSelected()
-        return found;
+        const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+        LM.info(`Found ${lines.length} files listed in data_store_catalog "${dom.data_store_catalog}"`);
+        for (const raw of lines) {
+            const p = raw.replace(/^\.\//, '');
+            if (seen.has(p)) continue;
+            seen.add(p);
+
+            const fr = _frameFromPath(p, dom, rx);
+            if (!fr) continue;
+
+            // For forecast datasets, only include files from the selected cycle
+            if (dom.has_forecast_hour && selectedCycle) {
+                if (fr.cycle.getTime() !== selectedCycle.getTime()) continue;
+            }
+            
+            // Apply range filter if set (for obs/analysis data)
+            if (_rangeStart && fr.valid < _rangeStart) continue;
+            if (_rangeEnd && fr.valid > _rangeEnd) continue;
+            
+            frames.push(fr);
+        }
+
+        frames.sort((a, b) => b.valid - a.valid);
+        LM.info(`Probed ${frames.length} frames from data_store_catalog "${dom.data_store_catalog}" for dominant source "${_dominantId}"`);
+        return frames;
+    }
+
+    async function _probeFrames(token) {
+        const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
+        if (!dom || !dom.path_template) return [];
+
+        // IMPORTANT:
+        // If data_store_catalog is configured, trust it completely.
+        // Do NOT fall back to interval-based HEAD probing.
+        if (dom.data_store_catalog) {
+            const frames = await _probeFramesFromStoreCatalog(token, dom);
+            if (frames === null) return null;
+            return frames;
+        }
+
     }
 
     // Median inter-frame gap from probed data — much more accurate than catalog value
@@ -572,77 +659,73 @@ const LayerManager = (() => {
     // Drag mode (_selWindowStart set): pick frames within a time window positioned
     //   by the user; window width = numFrames × actualFreq.
     function _computeSelected(allFrames) {
-        if (!allFrames.length) return [];
+        if (!Array.isArray(allFrames) || allFrames.length === 0) return [];
 
-        // Filter to the visible range first
         const tlEnd   = _rangeEnd   || allFrames[0].valid;
         const tlStart = _rangeStart || allFrames[allFrames.length - 1].valid;
-        
-        LM.info(`Setting the timeline limits as ${tlStart.toISOString()} → ${tlEnd.toISOString()}"`);
 
-        const visible = allFrames.filter(
-            f => f.valid.getTime() >= tlStart.getTime() &&
-                 f.valid.getTime() <= tlEnd.getTime());
+        const visible = allFrames.filter(f =>
+            f.valid.getTime() >= tlStart.getTime() &&
+            f.valid.getTime() <= tlEnd.getTime()
+        );
         if (!visible.length) return [];
-        
-        if (_selWindowStart === null) {
-            // ── Auto mode: just take newest N frames (with skip/interval thinning) ──
-            const result = [];
-            if (_rangeIntervalMin) {
-                const intervalMs = _rangeIntervalMin * 60000;
-                let lastMs = Infinity;
-                for (const f of visible) {
-                    if (lastMs - f.valid.getTime() >= intervalMs - 30000) {
-                        result.push(f);
-                        lastMs = f.valid.getTime();
-                        if (result.length >= _numFrames) break;
-                    }
-                }
-            } else {
-                let idx = 0;
-                for (const f of visible) {
-                    if (idx % _frameSkip === 0) {
-                        result.push(f);
-                        if (result.length >= _numFrames) break;
-                    }
-                    idx++;
-                }
-            }
-            return result; // newest-first
-        }
 
-        // ── Drag mode: time-window based on actual measured spacing ──
-        const actualFreqMs = _actualFreqMs(allFrames);
-        const windowMs  = _numFrames * actualFreqMs;  // skip never inflates box
-        const winStart  = new Date(Math.max(_selWindowStart.getTime(), tlStart.getTime()));
-        const winEnd    = new Date(Math.min(winStart.getTime() + windowMs, tlEnd.getTime()));
+        const out = [];
+        const unlimited = (() => {
+            const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
+            return !!(dom && dom.default_frame_no === -1);
+        })();
+        const maxFrames = unlimited ? Infinity : _numFrames;
 
-        const result = [];
-        if (_rangeIntervalMin) {
-            const intervalMs = _rangeIntervalMin * 60000;
-            let lastMs = Infinity;
-            for (const f of visible) {
-                if (f.valid.getTime() > winEnd.getTime())   continue;
-                if (f.valid.getTime() < winStart.getTime()) break;
-                if (lastMs - f.valid.getTime() >= intervalMs - 30000) {
-                    result.push(f);
-                    lastMs = f.valid.getTime();
-                    if (result.length >= _numFrames) break;
-                }
+        // IMPORTANT:
+        // Always select from ACTUAL visible frames only.
+        // No synthetic stepping by temporal_frequency_min.
+        let idx = 0;
+        for (const f of visible) {
+            if (idx % _frameSkip === 0) {
+                out.push(f);
+                if (out.length >= maxFrames) break;
             }
-        } else {
-            let idx = 0;
-            for (const f of visible) {
-                if (f.valid.getTime() > winEnd.getTime())   continue;
-                if (f.valid.getTime() < winStart.getTime()) break;
-                if (idx % _frameSkip === 0) {
-                    result.push(f);
-                    if (result.length >= _numFrames) break;
-                }
-                idx++;
-            }
+            idx++;
         }
-        return result; // newest-first
+        return out;
+    }
+
+    function _uniqFramesByValidMs(frames) {
+        const seen = new Set();
+        const out = [];
+        for (const f of frames) {
+            const ms = f.valid.getTime();
+            if (seen.has(ms)) continue;
+            seen.add(ms);
+            out.push(f);
+        }
+        return out.sort((a, b) => b.valid - a.valid);
+    }
+
+    // Wherever you finalize probe results:
+    async function _refreshProbeNow() {
+        const token = ++_probeToken;
+        _probing = true;
+        try {
+            const probed = await _probeFrames(token);
+            if (token !== _probeToken) return;
+
+            _allFrames = _uniqFramesByValidMs(Array.isArray(probed) ? probed : []);
+            // IMPORTANT: do NOT synthesize fallback frames here.
+            // Remove any code like: if (!_allFrames.length) _allFrames = _buildIdealizedFrames(...);
+
+            _probedFrames = _computeSelected(_allFrames);
+        } finally {
+            if (token === _probeToken) _probing = false;
+            _render?.();
+        }
+    }
+
+    // In timeline render path, use actual frame times only:
+    function _timelineTimesForRender() {
+        // IMPORTANT: no generation from temporal_frequency_min
+        return _allFrames.map(f => f.valid);
     }
 
     // Update frames slider/numInput max to the count of available frames in the
@@ -671,6 +754,11 @@ const LayerManager = (() => {
     function _scheduleProbe() {
         if (_probeTimer) clearTimeout(_probeTimer);
         _probeTimer = setTimeout(_runProbe, 400);
+    }
+
+    function _isStoreDrivenDominant() {
+        const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
+        return !!dom?.data_store_catalog;
     }
 
     async function _runProbe() {
@@ -841,12 +929,14 @@ const LayerManager = (() => {
         container.style.alignItems    = 'flex-start';
         container.style.minHeight     = '';
 
+        // Tell the user we're finding all of the available data.
         if (_probing) {
             container.innerHTML = '<span class="lm-tl-empty lm-tl-probing">Probing data directory&#8230;</span>';
             rangeLabel.textContent = '';
             return;
         }
 
+        // If don't have all of the frames, let the user know.
         if (!_allFrames.length) {
             const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
             const dominantSrc = _sources.find(s => s.id === _dominantId);
@@ -872,25 +962,34 @@ const LayerManager = (() => {
         const allNewest = _allFrames[0].valid;
         const allOldest = _allFrames[_allFrames.length - 1].valid;
 
-        // For forecast data use the actual frame span; for obs/analysis anchor the
-        // right edge at wall-clock "now" and stretch left by time_range_hr so the
-        // full expected window is always visible even when data only partially fills it.
+        // KEY FIX:
+        // For store-driven sources (data_store_catalog), ALWAYS derive the timeline
+        // extents from actual available frames — never from wall-clock "now" or
+        // idealized time_range_hr.  This prevents the axis from spanning a full
+        // idealized window when only sparse real files exist.
         let defaultEnd, defaultStart;
-        if (hasFhr) {
+        if (dom && dom.data_store_catalog) {
+            // Store-driven: axis spans actual available frames only, plus one interval of padding
+            const padMs = freqMin * 60000;
+            defaultStart = new Date(allOldest.getTime() - padMs);
+            defaultEnd   = new Date(allNewest.getTime() + padMs);
+        } else if (hasFhr) {
             defaultEnd   = allNewest;
             defaultStart = allOldest;
         } else {
-            const lookbackHr = (dom && dom.time_range_hr) || 48;
-            defaultEnd   = new Date();                                             // now
-            defaultStart = new Date(defaultEnd.getTime() - lookbackHr * 3600000); // now - lookback
+            // Legacy HEAD-probed obs/analysis: anchor right edge at now
+            const lookbackHr = (dom && dom.default_range_hr) || 48;
+            defaultEnd   = new Date();
+            defaultStart = new Date(defaultEnd.getTime() - lookbackHr * 3600000);
         }
+
+        // Set up the timeline start and end dates.
         const tlEnd   = _rangeEnd   || defaultEnd;
         const tlStart = _rangeStart || defaultStart;
+
         const totalMs   = Math.max(tlEnd.getTime() - tlStart.getTime(), 3600000); // min 1 h
         const totalHr   = totalMs / 3600000;
 
-        // Auto-scale: fit inside the visible scroll container (subtract padding).
-        // No lower-bound floor — long spans (336 h = 14 days) must scale down to fit.
         const containerW = Math.max(200,
             (container.parentElement ? container.parentElement.clientWidth - 24 : 700) || 700);
         const pxPerHr   = Math.min(60, containerW / Math.max(totalHr, 1));
@@ -909,7 +1008,6 @@ const LayerManager = (() => {
         dayRow.className = 'lm-tl-dayrow';
         dayRow.style.width = totalPx + 'px';
 
-        // Iterate every UTC day that overlaps the range
         const firstDay = new Date(Date.UTC(
             tlStart.getUTCFullYear(), tlStart.getUTCMonth(), tlStart.getUTCDate()));
         for (let d = new Date(firstDay); d.getTime() <= tlEnd.getTime(); d = new Date(d.getTime() + 86400000)) {
@@ -918,7 +1016,6 @@ const LayerManager = (() => {
             const right   = Math.min(totalPx,  posX(dayEnd));
             if (right <= left) continue;
 
-            // Day label (e.g. "Feb27"), centered over the span
             const span = document.createElement('div');
             span.className = 'lm-tl-dayspan';
             span.style.left  = left + 'px';
@@ -926,7 +1023,6 @@ const LayerManager = (() => {
             span.textContent = MONS[d.getUTCMonth()] + pad(d.getUTCDate());
             dayRow.appendChild(span);
 
-            // Vertical day divider at midnight (skip the very left edge — that's the axis start)
             if (left > 2) {
                 const div = document.createElement('div');
                 div.className  = 'lm-tl-daydiv';
@@ -941,19 +1037,16 @@ const LayerManager = (() => {
         axisRow.className = 'lm-tl-axisrow';
         axisRow.style.width = totalPx + 'px';
 
-        // Choose hour-tick interval: smallest step where ticks are at least 28 px apart
         let tickHr = 24;
         for (const candidate of [1, 2, 3, 6, 12, 24, 48, 72, 168]) {
             if (candidate * pxPerHr >= 28) { tickHr = candidate; break; }
         }
 
-        // Horizontal baseline
         const axisLine = document.createElement('div');
         axisLine.className = 'lm-tl-axisline';
         axisLine.style.width = totalPx + 'px';
         axisRow.appendChild(axisLine);
 
-        // Hour ticks: start from the first even multiple of tickHr on or after tlStart
         const startHr0 = new Date(Date.UTC(
             tlStart.getUTCFullYear(), tlStart.getUTCMonth(), tlStart.getUTCDate()));
         for (let h = 0; ; h += tickHr) {
@@ -980,7 +1073,8 @@ const LayerManager = (() => {
         }
         container.appendChild(axisRow);
 
-        // ── Row 3: Dot row (frame dots + selection box) ────────────────
+        // ── Row 3: Dot row ─────────────────────────────────────────────
+        // This is where we show all of the frames available using dots.
         const dotRow = document.createElement('div');
         dotRow.className = 'lm-tl-dotrow';
         dotRow.style.width = totalPx + 'px';
@@ -999,7 +1093,7 @@ const LayerManager = (() => {
             const dot = document.createElement('div');
             dot.className    = 'lm-tl-dot ' +
                 (isLatest ? 'lm-tl-latest' : isSelected ? 'lm-tl-included' : 'lm-tl-excluded');
-            dot.style.left   = (left - 1) + 'px';   // center the 3px bar
+            dot.style.left   = (left - 1) + 'px';
             dot.dataset.path = frame.path;
 
             if (hasFhr) {
@@ -1012,17 +1106,15 @@ const LayerManager = (() => {
             dotRow.appendChild(dot);
         }
 
-        // Draggable selection-window box — position derived from actual selected frames
-        // in auto mode, or from the time window in drag mode.
+        // Draggable selection box
+        // Let's setup the draggable selection box so the user can select a range of frames to load.
         let selLeft, selW;
         if (_selWindowStart === null && _probedFrames.length) {
-            // Auto: span exactly the selected frames
             const selNewest = _probedFrames[0].valid;
             const selOldest = _probedFrames[_probedFrames.length - 1].valid;
             selLeft = Math.max(0, posX(selOldest));
             selW    = Math.max(4, posX(selNewest) - selLeft);
         } else {
-            // Drag mode: use time window based on actual spacing
             const actualFreqMs2 = _actualFreqMs(_allFrames);
             const windowMs2 = _numFrames * actualFreqMs2;
             let winStart2;
@@ -1042,9 +1134,8 @@ const LayerManager = (() => {
         selbox.addEventListener('mousedown', (e) => {
             e.preventDefault();
             _dragStartX    = e.clientX;
-            // Convert the box's current left-edge pixel back to a timestamp
             _dragStartWSms = tlStart.getTime() + selLeft / _tlPxPerMs;
-            _selWindowStart = new Date(_dragStartWSms); // switch to drag mode
+            _selWindowStart = new Date(_dragStartWSms);
             document.addEventListener('mousemove', _onDragMove);
             document.addEventListener('mouseup',   _onDragEnd);
         });
@@ -1086,7 +1177,7 @@ const LayerManager = (() => {
         } else {
             center   = new Date();
             const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
-            beforeHr = (dom && dom.time_range_hr) ? Math.min(dom.time_range_hr, 48) : 24;
+            beforeHr = (dom && dom.default_range_hr) ? Math.min(dom.default_range_hr, 48) : 24;
             afterHr  = (dom && dom.has_forecast_hour && dom.max_forecast_hr) ? dom.max_forecast_hr : 0;
         }
         _overlay.querySelector('#lm-ri-date').value =
@@ -1184,6 +1275,11 @@ const LayerManager = (() => {
         open(onApply) {
             _onApply = onApply;
 
+            // If a dominant source is present, prefer its catalog defaults
+            const domEntry = _dominantId ? DataCatalog.byId(_dominantId) : (_sources.length ? DataCatalog.byId(_sources[0].id) : null);
+            if (domEntry && domEntry.default_frame_no) {
+                _numFrames = domEntry.default_frame_no;
+            }
             // Sync UI controls to persisted state
             _overlay.querySelector('#lm-frames-num').value    = _numFrames;
             _overlay.querySelector('#lm-frames-slider').value = _numFrames;
@@ -1197,6 +1293,7 @@ const LayerManager = (() => {
             _overlay.style.display = 'flex';
         },
     };
+    
 })();
 
 // TODO: Figure out how the layer manager will handle the miscellanous data sources as they are a little different and infrequent compared to the other data sources. 

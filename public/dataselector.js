@@ -124,24 +124,95 @@ const DataSelector = (() => {
     // Cycle-time helpers (forecast datasets)
     // ------------------------------------------------------------------
 
+    function _escapeRegExp(s) {
+        return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function _templateToRegex(pathTemplate) {
+        const tokenRegex = /\{(YYYY|MM|DD|HH|mm|FFF)\}/g;
+
+        // Replace tokens FIRST with unique placeholders, then escape
+        const withPlaceholders = pathTemplate.replace(tokenRegex, (_, t) => `___${t}___`);
+        const escaped = _escapeRegExp(withPlaceholders);
+
+        const pattern = '^' + escaped
+            .replace('___YYYY___', '(?<YYYY>\\d{4})')
+            .replace('___MM___',   '(?<MM>\\d{2})')
+            .replace('___DD___',   '(?<DD>\\d{2})')
+            .replace('___HH___',   '(?<HH>\\d{2})')
+            .replace('___mm___',   '(?<mm>\\d{2})')
+            .replace('___FFF___',  '(?<FFF>\\d{3})')
+            + '$';
+        return new RegExp(pattern);
+    }
+
+    function _cycleFromPath(path, rx) {
+        const m = rx.exec(path);
+        if (!m || !m.groups) return null;
+
+        const y  = +(m.groups.YYYY ?? NaN);
+        if (!Number.isFinite(y)) return null;
+
+        const mo = (m.groups.MM != null ? +m.groups.MM : 1) - 1;
+        const d  = (m.groups.DD != null ? +m.groups.DD : 1);
+        const h  = (m.groups.HH != null ? +m.groups.HH : 0);
+        const mi = (m.groups.mm != null ? +m.groups.mm : 0);
+
+        const cycle = new Date(Date.UTC(y, mo, d, h, mi, 0, 0));
+        return Number.isNaN(cycle.getTime()) ? null : cycle;
+    }
+
+    async function _probeCyclesFromStoreCatalog(entry, token) {
+        let resp;
+        try {
+            resp = await fetch(entry.data_store_catalog, { cache: 'no-store' });
+        } catch { return null; }
+
+        if (token !== _cycleProbeToken) return null;
+        if (!resp.ok) return null;
+
+        const text = await resp.text();
+        if (token !== _cycleProbeToken) return null;
+
+        const rx = _templateToRegex(entry.path_template);
+        const seenMs = new Set();
+        const cycles = [];
+
+        const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+        for (const raw of lines) {
+            const p = raw.replace(/^\.\//, '');
+            const cycle = _cycleFromPath(p, rx);
+            if (!cycle) continue;
+            if (seenMs.has(cycle.getTime())) continue;
+            seenMs.add(cycle.getTime());
+            cycles.push(cycle);
+        }
+
+        // Return newest-first
+        cycles.sort((a, b) => b - a);
+        return cycles;
+    }
+
     /**
-     * Probe for available cycle times for a forecast entry by HEAD-requesting
-     * each candidate cycle's first forecast hour.  Returns an array of Date
-     * objects (newest first), or null if this probe was superseded.
+     * Probe for available cycle times for a forecast entry.
+     * Uses data_store_catalog when available; falls back to HEAD probing.
      */
     async function _probeCycles(entry, token) {
-        if (!entry || !entry.has_forecast_hour ||
-            !entry.path_template || !entry.temporal_frequency_min) return null;
+        if (!entry || !entry.has_forecast_hour || !entry.path_template) return null;
 
-        const freqMin    = entry.temporal_frequency_min;
-        const lookbackHr = Math.min(entry.time_range_hr || 48, 120);
-        const now        = new Date();
-        const epochMin   = Math.floor(now.getTime() / (freqMin * 60000)) * freqMin * 60000;
+        // Prefer data_store_catalog — no HEAD requests needed
+        if (entry.data_store_catalog) {
+            return _probeCyclesFromStoreCatalog(entry, token);
+        }
+
+        // Legacy HEAD-probe fallback
+        const freqMin     = entry.temporal_frequency_min;
+        const lookbackHr  = Math.min(entry.time_range_hr || 48, 120);
+        const now         = new Date();
+        const epochMin    = Math.floor(now.getTime() / (freqMin * 60000)) * freqMin * 60000;
         const latestCycle = new Date(epochMin);
-        const maxCycles  = Math.min(Math.ceil(lookbackHr * 60 / freqMin) + 1, 20);
+        const maxCycles   = Math.min(Math.ceil(lookbackHr * 60 / freqMin) + 1, 20);
 
-        // Use f000 (or forecast_hr_step if 0 is not a valid fhr) to test whether
-        // the cycle directory/file exists.
         const checkFhr = (entry.forecast_hr_step != null && entry.forecast_hr_step > 0)
             ? entry.forecast_hr_step : 0;
         const fhrStr = String(checkFhr).padStart(3, '0');
@@ -160,7 +231,7 @@ const DataSelector = (() => {
             } catch { return null; }
         }));
 
-        if (token !== _cycleProbeToken) return null; // stale
+        if (token !== _cycleProbeToken) return null;
         return results.filter(Boolean);
     }
 

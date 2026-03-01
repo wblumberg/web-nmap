@@ -127,7 +127,7 @@ async function fetchBinary(fname, dtype) {
 async function makeGFSLayers() {
     const grid_gfs = new apgl.PlateCarreeGrid(1441, 721, 0, -90, 360, 90);
     const colormap = apgl.colormaps.pw_t2m;
-    const t2m_data = await fetchBinary('data/gfs.bin.gz');
+    const t2m_data = await fetchBinary('data/gfs/gfs.bin.gz');
 
     // The GFS data is missing the last column of data, so we need to pad it with the first column of data to make it wrap around the globe.  This is done by creating a new array with the same number of rows and columns as the original data, but with an extra column at the end.  The last column is filled with the first column of data.
     const t2m_data_pad = new float16.Float16Array(grid_gfs.ni * grid_gfs.nj);
@@ -160,7 +160,7 @@ async function makeGFSLayers() {
 async function makeHREFLayers() {
     const grid_href = apgl.LambertGrid.fromLLCornerLonLat(1799, 1059, -97.5, 38.5, [38.5, 38.5], -122.719528, 21.138123, 3000, 3000);
 
-    const nh_prob_data = (await fetchBinary('data/hrefv3.2023051100.f036.mxuphl5000_2000m.nh_max.086400_p99.85_0040km.bin.gz')).map(v => v * 100);
+    const nh_prob_data = (await fetchBinary('data/href/hrefv3.2023051100.f036.mxuphl5000_2000m.nh_max.086400_p99.85_0040km.bin.gz')).map(v => v * 100);
     const nh_prob_field = new apgl.RawScalarField(grid_href, nh_prob_data);
     const nh_prob_contour = new apgl.Contour(nh_prob_field, {levels: [10, 30, 50, 70, 90], color: '#ffffff'});
     const labels = new apgl.ContourLabels(nh_prob_contour, {text_color: '#ffffff', halo: true, font_size: 15,
@@ -169,7 +169,7 @@ async function makeHREFLayers() {
     const nh_prob_layer = new apgl.PlotLayer('nh_probs', nh_prob_contour);
     const label_layer = new apgl.PlotLayer('nh_prob_labels', labels);
 
-    const pb_data = await fetchBinary('data/hrefv3.2023051100.f036.mxuphl5000_2000m.086400.pb75.bin.gz');
+    const pb_data = await fetchBinary('data/href/hrefv3.2023051100.f036.mxuphl5000_2000m.086400.pb75.bin.gz');
     const href_pb_colors = ['#9d4c1c', '#f2b368', '#792394', '#d99cf9', '#1e3293', '#aabee3', '#bc373b', '#f0928f', '#397d21', '#b5f0ab'];
     const pb_field = new apgl.RawScalarField(grid_href, pb_data);
     const paintball = new apgl.Paintball(pb_field, {colors: [...href_pb_colors].reverse()});
@@ -185,7 +185,7 @@ async function makeHREFLayers() {
 // Make some MRMS layers for composite reflectivity and precipitation type.  The data is read from binary files and the color maps are defined for each precipitation type.
 async function makeMRMSLayers() {
     const grid_mrms = new apgl.PlateCarreeGrid(7000, 3500, -129.995, 20.005, -60.005, 54.995);
-    const data = await fetchBinary('data/mrms.202112152259.cref.bin.gz');
+    const data = await fetchBinary('data/mrms/mrms.202112152259.cref.bin.gz');
     const data_mask = await fetchBinary('data/hrrr.2021121522.ptype.bin.gz', 'uint8');
 
     const crain_colors = ['#bce8be', '#a6d3a8', '#93c393', '#7fb482', '#68a06a', '#568e56', '#48894d', '#3b8043', '#2b7a39', '#1f7331',
@@ -240,7 +240,7 @@ async function makeObsLayers() {
                             'tsrasn', 'tsra', 'tspl', 'tsgr', '+tsfzrapl', '+tsra', '+tssn', 'tssa', '+tsgr',
                             '-up', '+up', '-fzup', '+fzup'];
 
-    const resp = await fetch('data/surface_20240823_1500.json');
+    const resp = await fetch('data/metar/surface_20240823_1500.json');
     const obs = await resp.json();
 
     obs.forEach((ob, iob) => {
@@ -272,7 +272,10 @@ DataRegistry.register('href',            makeHREFLayers);
 DataRegistry.register('mrms_cref',       makeMRMSLayers);
 DataRegistry.register('metar',           makeObsLayers);
 
+// ---------------------------------------------------------------------------------------------
 // On Load of the page, load the catalog, create the map, and populate the view selection menu.
+// This is the initialization section for the page or the main() in a way.
+// ---------------------------------------------------------------------------------------------
 window.addEventListener('load', async () => {
     // Load the dataset catalog from data/catalog.json (analogous to GEMPAK's datatype.tbl),
     // then build the views map from catalog entries that have a registered makeLayers function.
@@ -308,6 +311,7 @@ window.addEventListener('load', async () => {
     let playbackMode = 'pause';     // 'pause' | 'loop-fwd' | 'loop-back' | 'rock'
     let rockDirection = 1;          // +1 forward, -1 backward
 
+    // Format the Frame DateTime
     function _fmtFrameUTC(dt) {
         if (!(dt instanceof Date)) return '--';
         const pad = n => String(n).padStart(2, '0');
@@ -331,6 +335,11 @@ window.addEventListener('load', async () => {
         }
         currentFrameIdx = Math.max(0, Math.min(frameTimes.length - 1, idx));
         _updateFrameDisplay();
+        // Debug: log timeline and current index for playback verification
+        try { console.debug('%c[FRAMES]%c currentIdx=%d / total=%d currentTime=%s', 'color:#4a9eff;font-weight:bold', 'color:inherit', currentFrameIdx, frameTimes.length, frameTimes[currentFrameIdx] ? frameTimes[currentFrameIdx].toISOString() : 'null'); } catch (e) {}
+        // Refresh dynamic layers when the current frame changes so subscripts
+        // that produce per-frame PlotLayers are applied immediately.
+        try { updateMap(); } catch (e) { /* ignore timing races during startup */ }
     }
 
     // stop any ongoing playback and clear the playback timer
@@ -424,24 +433,94 @@ window.addEventListener('load', async () => {
     // ------------------------------------------------------------------
     // Map update function
     // ------------------------------------------------------------------
+    // Right now, this function gets called every time we step forward a frame or back a frame
+    // We need this function to use Tim's lovely MultiPlotLayer functionality to create a smooth
+    // transition between frames.  Upon the load of the data, we need to generate the MultiPlotLayers
+    // and add/delete the field whenever new data comes in that needs to be added to the loop.
+    // TODO: Update the updateMap function to use the MultiPlotLayer
     async function updateMap() {
         const view = views[menu.value];
         console.debug('%c[NMAP]%c updateMap() → view="%s"', 'color:#55d46a;font-weight:bold', 'color:inherit', menu.value);
         map.setMaxZoom(view.maxZoom);
 
-        const {layers, colorbar, sampler} = await view.makeLayers();
+        // If a subscript is registered for this view and we have timeline
+        // information, prefer the subscript so it can produce per-frame layers.
+        let layers, colorbar, sampler;
+        if (window.SubscriptRegistry && SubscriptRegistry.has(menu.value) && frameTimes.length) {
+            const currentTime = window.NmapFrameState.getCurrentTime();
+            const obj = await SubscriptRegistry.getLayersForFrame(menu.value, currentTime, {
+                declarativeRasterRenderer: null
+            });
+            if (obj && obj.layers) {
+                layers = obj.layers;
+                colorbar = obj.colorbar;
+                sampler = obj.sampler;
+            }
+        }
+        if (!layers) {
+            const res = await view.makeLayers();
+            layers = res.layers; colorbar = res.colorbar; sampler = res.sampler;
+        }
 
-        // Remove existing layers
-        current_layers.forEach(lyr => {
-            map.removeLayer(lyr.id);
-        });
+        // Add new layers before removing old ones where possible to avoid
+        // a brief blank state (flicker) during the swap. If a new layer id
+        // already exists on the map, remove that existing layer first to
+        // prevent addLayer collisions.
+        const newIds = (layers || []).map(l => l && l.id).filter(Boolean);
+        for (const id of newIds) {
+            if (map.getLayer(id)) {
+                try { map.removeLayer(id); } catch (e) { /* best-effort */ }
+            }
+        }
+        // If AutumnPlot-GL exposes MultiLayerPlot, prefer a single multi-layer
+        // wrapper per view so AutumnPlot can composite internally and avoid
+        // visible flicker. Otherwise fall back to adding each PlotLayer.
+        let usedMulti = false;
+        try {
+            if (window.apgl && typeof apgl.MultiLayerPlot === 'function' && Array.isArray(layers) && layers.length) {
+                const mlKey = `${menu.value}-ml`;
+                window._apglMultiLayerMap = window._apglMultiLayerMap || {};
+                let ml = window._apglMultiLayerMap[mlKey];
+                if (ml) {
+                    // Update existing multilayer instance if supported.
+                    if (typeof ml.setLayers === 'function') {
+                        ml.setLayers(layers);
+                    } else {
+                        // Not updatable — remove and recreate.
+                        try { if (map.getLayer(ml.id)) map.removeLayer(ml.id); } catch (e) {}
+                        ml = new apgl.MultiLayerPlot(mlKey, layers);
+                        map.addLayer(ml);
+                        window._apglMultiLayerMap[mlKey] = ml;
+                    }
+                } else {
+                    // Create and register new MultiLayerPlot
+                    ml = new apgl.MultiLayerPlot(mlKey, layers);
+                    map.addLayer(ml);
+                    window._apglMultiLayerMap[mlKey] = ml;
+                }
+                // Mark we used multilayer rendering and ensure current_layers
+                // contains the single multilayer entry so later cleanup knows
+                // what to remove.
+                current_layers = [{ id: ml.id }];
+                usedMulti = true;
+            }
+        } catch (err) {
+            console.warn('updateMap: MultiLayerPlot integration failed', err && err.message);
+            usedMulti = false;
+        }
 
-        // Add new layers associated with the basemap
-        layers.forEach(lyr => {
-            map.addLayer(lyr, 'coastline');
-            map.addLayer(lyr, 'lands');
-            map.addLayer(lyr, 'countries');
-        });
+        if (!usedMulti) {
+            for (const lyr of (layers || [])) {
+                try { map.addLayer(lyr); } catch (err) { console.warn('updateMap: failed to add layer', lyr && lyr.id, err && err.message); }
+            }
+        }
+        // Remove old layers that weren't re-used by the new set.
+        const keep = new Set(newIds);
+        for (const old of current_layers || []) {
+            if (!old || !old.id) continue;
+            if (keep.has(old.id)) continue;
+            try { if (map.getLayer(old.id)) map.removeLayer(old.id); } catch (e) { /* ignore */ }
+        }
 
         // Setup colorbar panel in the bottom part of the page.  If there are multiple colorbars, they will be stacked according to AutumnPlot-GL
         const colorbar_panel = document.querySelector('#colorbar-panel');
@@ -553,6 +632,11 @@ window.addEventListener('load', async () => {
 
     _updateFrameDisplay();
 
+    /* -------------------------------------------------------------------------
+    /  This section of the code connects the toolbar buttons for different functionalities
+    /  to their respective listeners and configuration.
+    / -------------------------------------------------------------------------*/
+
     // Initialize the Layer Manager (which internally initialises DataSelector).
     // "Load Data" opens the Layer Manager so the user can add / remove sources,
     // set the dominant source, choose frame count / skip, then hit Apply.
@@ -633,7 +717,7 @@ window.addEventListener('load', async () => {
         }
     });
 
-    // Product Generation panel
+    // Connect the Product Generation Button to the panel
     const productBtn = document.querySelector('#btn-product');
     productBtn.addEventListener('click', () => {
         const nowOpen = ProductGen.toggle();
