@@ -23,9 +23,9 @@
 
 const LayerManager = (() => {
 
-    // ------------------------------------------------------------------
-    // Tiny scoped logger
-    // ------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    // Tiny scoped logger to debug and inform about LayerManager state changes
+    // ------------------------------------------------------------------------
     const LM = {
         tag: '%c[LM]%c',
         css: ['color:#4a9eff;font-weight:bold', 'color:inherit'],
@@ -39,14 +39,14 @@ const LayerManager = (() => {
     // ------------------------------------------------------------------
     let _sources      = [];     // [{ uid, id, name, color, entry }]
     let _dominantId   = null;   // catalog id of dominant source
-    let _numFrames    = 12;
-    let _frameSkip    = 1;
-    let _onApply      = null;
+    let _numFrames    = 12;     // Number of frames to show in the timeline
+    let _frameSkip    = 1;      // Number of frames to skip in the dominant data source
+    let _onApply      = null;   // callback to call when user clicks "Apply"
     let _editingUid   = null;   // uid being replaced via "Edit Source"
-    let _overlay      = null;
-    let _uidCounter   = 0;
+    let _overlay      = null;   // DOM overlay for the layer manager dialog
+    let _uidCounter   = 0;      // Incrementing counter for assigning unique IDs to sources
 
-    // PROBE STATE - this is the action that actually queries the data directory
+    // PROBE STATE - this is the action that actually queries the data store
     // for available frames and builds the timeline.
     let _allFrames    = [];     // ALL found frames from last probe (newest first)
     let _probedFrames = [];     // selected subset after applying numFrames / frameSkip
@@ -62,7 +62,7 @@ const LayerManager = (() => {
     // Draggable selection-window box (time-coordinate based)
     let _selWindowStart   = null;  // Date | null — left edge of red box (null = auto-newest)
     let _tlPxPerMs        = 0;     // pixels-per-ms (set during render, used by drag)
-    let _dragStartX       = 0;
+    let _dragStartX       = 0;     // mouse X at drag begin
     let _dragStartWSms    = 0;     // window start in ms at drag begin
 
     // ------------------------------------------------------------------
@@ -375,7 +375,7 @@ const LayerManager = (() => {
     }
 
     // ------------------------------------------------------------------
-    // Selection helpers
+    // Dataset/Product selection helpers
     // ------------------------------------------------------------------
     let _selectedUid = null;
 
@@ -407,7 +407,7 @@ const LayerManager = (() => {
         _renderAll();
     }
 
-    // Add near other utility helpers in LayerManager scope
+    // Helper for escaping regex special characters in a string
     function _escapeRegExp(s) {
         return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
@@ -470,10 +470,13 @@ const LayerManager = (() => {
         return { valid, cycle, fhr, path };
     }
 
+    // BEGIN RENDERING FUNCTIONS
+
     // ------------------------------------------------------------------
     // Render the source list
     // ------------------------------------------------------------------
     function _renderSourceList() {
+        LM.info(`Rendering source list (${_sources.length} source(s), selectedUid=${_selectedUid}, dominantId=${_dominantId})`);
         const ul = _overlay.querySelector('#lm-source-list');
         ul.innerHTML = '';
 
@@ -557,254 +560,6 @@ const LayerManager = (() => {
     }
 
     // ------------------------------------------------------------------
-    // Probe the data directory for actually-available frames.
-    //
-    // Fires HTTP HEAD requests against expanded path_template URLs and
-    // returns only the candidates that respond with HTTP 200.
-    //
-    // For datasets with has_forecast_hour, candidates span (cycle × fhr)
-    // so the timeline shows *valid* times instead of cycle times.
-    //
-    // Returns an array of { valid, cycle, fhr, path } sorted newest first,
-    // trimmed to _numFrames entries with _frameSkip spacing.
-    // Returns null if this probe was superseded by a newer one.
-    // ------------------------------------------------------------------
-    async function _probeFramesFromStoreCatalog(token, dom) {
-        if (!dom?.data_store_catalog || !dom?.path_template) return [];
-
-        // Keep existing behavior for forecast datasets: require selected cycle.
-        const dominantSrc = _sources.find(s => s.id === _dominantId);
-        const selectedCycle = dominantSrc ? dominantSrc.cycleTime : null;
-        if (dom.has_forecast_hour && !selectedCycle) return [];
-
-        let resp;
-        try {
-            resp = await fetch(dom.data_store_catalog, { cache: 'no-store' });
-        } catch {
-            return [];
-        }
-        if (token !== _probeToken) return null;
-        if (!resp.ok) return [];
-
-        LM.info(`Probing data_store_catalog "${dom.data_store_catalog}" for dominant source "${_dominantId}"`);
-        const text = await resp.text();
-        if (token !== _probeToken) return null;
-
-        const rx = _templateToRegex(dom.path_template);
-        const seen = new Set();
-        const frames = [];
-
-        const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-        LM.info(`Found ${lines.length} files listed in data_store_catalog "${dom.data_store_catalog}"`);
-        for (const raw of lines) {
-            const p = raw.replace(/^\.\//, '');
-            if (seen.has(p)) continue;
-            seen.add(p);
-
-            const fr = _frameFromPath(p, dom, rx);
-            if (!fr) continue;
-
-            // For forecast datasets, only include files from the selected cycle
-            if (dom.has_forecast_hour && selectedCycle) {
-                if (fr.cycle.getTime() !== selectedCycle.getTime()) continue;
-            }
-            
-            // Apply range filter if set (for obs/analysis data)
-            if (_rangeStart && fr.valid < _rangeStart) continue;
-            if (_rangeEnd && fr.valid > _rangeEnd) continue;
-            
-            frames.push(fr);
-        }
-
-        frames.sort((a, b) => b.valid - a.valid);
-        LM.info(`Probed ${frames.length} frames from data_store_catalog "${dom.data_store_catalog}" for dominant source "${_dominantId}"`);
-        return frames;
-    }
-
-    async function _probeFrames(token) {
-        const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
-        if (!dom || !dom.path_template) return [];
-
-        // IMPORTANT:
-        // If data_store_catalog is configured, trust it completely.
-        // Do NOT fall back to interval-based HEAD probing.
-        if (dom.data_store_catalog) {
-            const frames = await _probeFramesFromStoreCatalog(token, dom);
-            if (frames === null) return null;
-            return frames;
-        }
-
-    }
-
-    // Median inter-frame gap from probed data — much more accurate than catalog value
-    // when the actual archive is sparser or denser than the catalog advertises.
-    function _actualFreqMs(allFrames) {
-        if (allFrames.length < 2) {
-            const dom = DataCatalog.byId(_dominantId);
-            const fMin = (dom && dom.has_forecast_hour && dom.forecast_hr_step)
-                ? dom.forecast_hr_step * 60
-                : (dom ? dom.temporal_frequency_min : 60);
-            return fMin * 60000;
-        }
-        const gaps = [];
-        for (let i = 0; i < allFrames.length - 1; i++)
-            gaps.push(allFrames[i].valid.getTime() - allFrames[i+1].valid.getTime());
-        gaps.sort((a, b) => a - b);
-        return gaps[Math.floor(gaps.length / 2)];
-    }
-
-    // Apply the selection window to allFrames.
-    // Auto mode (_selWindowStart===null): walk newest→oldest, no time-window needed
-    //   — box position is derived from the actual selected frames afterward.
-    // Drag mode (_selWindowStart set): pick frames within a time window positioned
-    //   by the user; window width = numFrames × actualFreq.
-    function _computeSelected(allFrames) {
-        if (!Array.isArray(allFrames) || allFrames.length === 0) return [];
-
-        const tlEnd   = _rangeEnd   || allFrames[0].valid;
-        const tlStart = _rangeStart || allFrames[allFrames.length - 1].valid;
-
-        const visible = allFrames.filter(f =>
-            f.valid.getTime() >= tlStart.getTime() &&
-            f.valid.getTime() <= tlEnd.getTime()
-        );
-        if (!visible.length) return [];
-
-        const out = [];
-        const unlimited = (() => {
-            const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
-            return !!(dom && dom.default_frame_no === -1);
-        })();
-        const maxFrames = unlimited ? Infinity : _numFrames;
-
-        // IMPORTANT:
-        // Always select from ACTUAL visible frames only.
-        // No synthetic stepping by temporal_frequency_min.
-        let idx = 0;
-        for (const f of visible) {
-            if (idx % _frameSkip === 0) {
-                out.push(f);
-                if (out.length >= maxFrames) break;
-            }
-            idx++;
-        }
-        return out;
-    }
-
-    function _uniqFramesByValidMs(frames) {
-        const seen = new Set();
-        const out = [];
-        for (const f of frames) {
-            const ms = f.valid.getTime();
-            if (seen.has(ms)) continue;
-            seen.add(ms);
-            out.push(f);
-        }
-        return out.sort((a, b) => b.valid - a.valid);
-    }
-
-    // Wherever you finalize probe results:
-    async function _refreshProbeNow() {
-        const token = ++_probeToken;
-        _probing = true;
-        try {
-            const probed = await _probeFrames(token);
-            if (token !== _probeToken) return;
-
-            _allFrames = _uniqFramesByValidMs(Array.isArray(probed) ? probed : []);
-            // IMPORTANT: do NOT synthesize fallback frames here.
-            // Remove any code like: if (!_allFrames.length) _allFrames = _buildIdealizedFrames(...);
-
-            _probedFrames = _computeSelected(_allFrames);
-        } finally {
-            if (token === _probeToken) _probing = false;
-            _render?.();
-        }
-    }
-
-    // In timeline render path, use actual frame times only:
-    function _timelineTimesForRender() {
-        // IMPORTANT: no generation from temporal_frequency_min
-        return _allFrames.map(f => f.valid);
-    }
-
-    // Update frames slider/numInput max to the count of available frames in the
-    // current visible range.  Clamps _numFrames if it now exceeds the new max.
-    function _updateSliderMax() {
-        if (!_overlay) return;
-        const tlEnd   = _rangeEnd   || (_allFrames.length ? _allFrames[0].valid                   : null);
-        const tlStart = _rangeStart || (_allFrames.length ? _allFrames[_allFrames.length-1].valid : null);
-        const count   = (!tlStart || !tlEnd) ? 0
-            : _allFrames.filter(f => f.valid >= tlStart && f.valid <= tlEnd).length;
-        const maxVal  = Math.max(1, count);
-        const slider  = _overlay.querySelector('#lm-frames-slider');
-        const numInput = _overlay.querySelector('#lm-frames-num');
-        const label    = _overlay.querySelector('#lm-frames-label');
-        slider.max    = maxVal;
-        numInput.max  = maxVal;
-        if (_numFrames > maxVal) {
-            _numFrames = maxVal;
-            slider.value         = maxVal;
-            numInput.value       = maxVal;
-            label.textContent    = maxVal;
-        }
-    }
-
-    // Debounce helper: schedule a probe run 400 ms after the last settings change.
-    function _scheduleProbe() {
-        if (_probeTimer) clearTimeout(_probeTimer);
-        _probeTimer = setTimeout(_runProbe, 400);
-    }
-
-    function _isStoreDrivenDominant() {
-        const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
-        return !!dom?.data_store_catalog;
-    }
-
-    async function _runProbe() {
-        _probeTimer = null;
-        const token = ++_probeToken;
-        _probing = true;
-        const domEntry = _dominantId ? DataCatalog.byId(_dominantId) : null;
-        LM.debug(`Probe #${token} started → dominant="${_dominantId || 'none'}" sources=${_sources.length}`);
-        _renderTimeline();
-        _renderFrameInfo();
-        const frames = await _probeFrames(token);
-        if (frames === null) {
-            LM.debug(`Probe #${token} cancelled (superseded)`);
-            return; // stale — a newer probe is running
-        }
-        _allFrames      = frames;
-        _selWindowStart = null;          // reset selection window to newest end
-        _updateSliderMax();
-        _probedFrames   = _computeSelected(_allFrames);
-        _probing = false;
-        if (_allFrames.length) {
-            const oldest  = _allFrames[_allFrames.length - 1].valid;
-            const newest  = _allFrames[0].valid;
-            const spanHr  = ((newest - oldest) / 3600000).toFixed(1);
-            LM.info(`Probe #${token} complete → ${_allFrames.length} total frames found | span ${spanHr}h | oldest ${oldest.toISOString()} → newest ${newest.toISOString()}`);
-            LM.debug(`  Selected (displayed): ${_probedFrames.length} frame(s) | numFrames=${_numFrames} frameSkip=${_frameSkip}`);
-        } else {
-            LM.warn(`Probe #${token} complete → 0 frames found for dominant="${_dominantId || 'none'}"`);
-        }
-        _renderTimeline();
-        _renderFrameInfo();
-    }
-
-    // Recompute selection from cached frames and re-render (no server round-trip).
-    function _recomputeSelection() {
-        if (!_allFrames.length) {
-            // No frames cached yet — need a full probe
-            _scheduleProbe();
-            return;
-        }
-        _probedFrames = _computeSelected(_allFrames);
-        _renderTimeline();
-        _renderFrameInfo();
-    }
-
-    // ------------------------------------------------------------------
     // Render frame info summary (uses probed frame list)
     // ------------------------------------------------------------------
     function _renderFrameInfo() {
@@ -866,54 +621,6 @@ const LayerManager = (() => {
             fhrNote +
             `</div>`;
     }
-
-    // ------------------------------------------------------------------
-    // Selection-box drag handlers (module-level to allow removeEventListener)
-    // ------------------------------------------------------------------
-    const _onDragMove = (e) => {
-        if (!_tlPxPerMs) return;
-        const actualFreqMs = _actualFreqMs(_allFrames);
-        const windowMs = _numFrames * actualFreqMs;  // skip never inflates box
-
-        const tlEnd   = _rangeEnd   || (_allFrames.length ? _allFrames[0].valid                   : new Date());
-        const tlStart = _rangeStart || (_allFrames.length ? _allFrames[_allFrames.length-1].valid : new Date());
-
-        const dx  = e.clientX - _dragStartX;
-        const dtMs = dx / _tlPxPerMs;
-        let newStart = new Date(_dragStartWSms + dtMs);
-        // Clamp so box stays within visible range
-        newStart = new Date(Math.max(newStart.getTime(), tlStart.getTime()));
-        newStart = new Date(Math.min(newStart.getTime(), Math.max(tlStart.getTime(), tlEnd.getTime() - windowMs)));
-
-        if (Math.abs(newStart.getTime() - ((_selWindowStart || tlEnd) - windowMs)) < 10000) return;
-        _selWindowStart = newStart;
-
-        // Move the selbox directly without full re-render
-        const selbox = _overlay && _overlay.querySelector('#lm-tl-selbox');
-        if (selbox) {
-            const leftPx  = Math.round((newStart.getTime() - tlStart.getTime()) * _tlPxPerMs);
-            const widthPx = Math.max(4, Math.round(Math.min(windowMs, tlEnd.getTime() - newStart.getTime()) * _tlPxPerMs));
-            selbox.style.left  = leftPx  + 'px';
-            selbox.style.width = widthPx + 'px';
-        }
-
-        // Recompute selected set and update dot classes in-place
-        _probedFrames = _computeSelected(_allFrames);
-        const selPaths   = new Set(_probedFrames.map(f => f.path));
-        const latestPath = _probedFrames.length ? _probedFrames[0].path : null;
-        (_overlay ? _overlay.querySelectorAll('.lm-tl-dot') : []).forEach(dot => {
-            const p  = dot.dataset.path;
-            if (!p) return;
-            dot.className = 'lm-tl-dot ' +
-                (p === latestPath ? 'lm-tl-latest' : selPaths.has(p) ? 'lm-tl-included' : 'lm-tl-excluded');
-        });
-        _renderFrameInfo();
-    };
-
-    const _onDragEnd = () => {
-        document.removeEventListener('mousemove', _onDragMove);
-        document.removeEventListener('mouseup',   _onDragEnd);
-    };
 
     // ------------------------------------------------------------------
     // Render the timeline — NMAP2-style proportional axis with three rows:
@@ -1144,6 +851,271 @@ const LayerManager = (() => {
     }
 
     // ------------------------------------------------------------------
+    // Full re-render of all dynamic panels.
+    // Source list and dominant dropdown update synchronously;
+    // timeline / frame-info update asynchronously via _scheduleProbe().
+    // ------------------------------------------------------------------
+    function _renderAll() {
+        _renderSourceList();
+        _renderDominantDropdown();
+        _scheduleProbe();
+    }
+
+    // END RENDERING FUNCTIONS
+
+    // ------------------------------------------------------------------
+    // Probe the data directory for actually-available frames.
+    //
+    // For datasets with has_forecast_hour, candidates span (cycle × fhr)
+    // so the timeline shows *valid* times instead of cycle times.
+    //
+    // Returns an array of { valid, cycle, fhr, path } sorted newest first,
+    // trimmed to _numFrames entries with _frameSkip spacing.
+    // Returns null if this probe was superseded by a newer one.
+    // ------------------------------------------------------------------
+    async function _probeFramesFromStoreCatalog(token, dom) {
+        if (!dom?.data_store_catalog || !dom?.path_template) return [];
+
+        // Keep existing behavior for forecast datasets: require selected cycle.
+        const dominantSrc = _sources.find(s => s.id === _dominantId);
+        const selectedCycle = dominantSrc ? dominantSrc.cycleTime : null;
+        if (dom.has_forecast_hour && !selectedCycle) return [];
+
+        let resp;
+        try {
+            resp = await fetch(dom.data_store_catalog, { cache: 'no-store' });
+        } catch {
+            return [];
+        }
+        if (token !== _probeToken) return null;
+        if (!resp.ok) return [];
+
+        LM.info(`Probing data_store_catalog "${dom.data_store_catalog}" for dominant source "${_dominantId}"`);
+        const text = await resp.text();
+        if (token !== _probeToken) return null;
+
+        const rx = _templateToRegex(dom.path_template);
+        const seen = new Set();
+        const frames = [];
+
+        const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+        LM.info(`Found ${lines.length} files listed in data_store_catalog "${dom.data_store_catalog}"`);
+        for (const raw of lines) {
+            const p = raw.replace(/^\.\//, '');
+            if (seen.has(p)) continue;
+            seen.add(p);
+
+            const fr = _frameFromPath(p, dom, rx);
+            if (!fr) continue;
+
+            // For forecast datasets, only include files from the selected cycle
+            if (dom.has_forecast_hour && selectedCycle) {
+                if (fr.cycle.getTime() !== selectedCycle.getTime()) continue;
+            }
+            
+            // Apply range filter if set (for obs/analysis data)
+            if (_rangeStart && fr.valid < _rangeStart) continue;
+            if (_rangeEnd && fr.valid > _rangeEnd) continue;
+            
+            frames.push(fr);
+        }
+
+        frames.sort((a, b) => b.valid - a.valid);
+        LM.info(`Probed ${frames.length} frames from data_store_catalog "${dom.data_store_catalog}" for dominant source "${_dominantId}"`);
+        return frames;
+    }
+
+    async function _probeFrames(token) {
+        const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
+        if (!dom || !dom.path_template) return [];
+
+        // IMPORTANT:
+        // If data_store_catalog is configured, trust it completely.
+        // Do NOT fall back to interval-based HEAD probing.
+        if (dom.data_store_catalog) {
+            const frames = await _probeFramesFromStoreCatalog(token, dom);
+            if (frames === null) return null;
+            return frames;
+        }
+
+    }
+
+    // Debounce helper: schedule a probe run 400 ms after the last settings change.
+    function _scheduleProbe() {
+        if (_probeTimer) clearTimeout(_probeTimer);
+        _probeTimer = setTimeout(_runProbe, 400);
+    }
+
+    // Find datasets with a data_store_catalog and probe them for available frames.
+    async function _runProbe() {
+        _probeTimer = null;
+        const token = ++_probeToken;
+        _probing = true;
+        const domEntry = _dominantId ? DataCatalog.byId(_dominantId) : null;
+        LM.debug(`Probe #${token} started → dominant="${_dominantId || 'none'}" sources=${_sources.length}`);
+        _renderTimeline();
+        _renderFrameInfo();
+        const frames = await _probeFrames(token);
+        if (frames === null) {
+            LM.debug(`Probe #${token} cancelled (superseded)`);
+            return; // stale — a newer probe is running
+        }
+        _allFrames      = frames;
+        _selWindowStart = null;          // reset selection window to newest end
+        _updateSliderMax();
+        _probedFrames   = _computeSelected(_allFrames);
+        _probing = false;
+        if (_allFrames.length) {
+            const oldest  = _allFrames[_allFrames.length - 1].valid;
+            const newest  = _allFrames[0].valid;
+            const spanHr  = ((newest - oldest) / 3600000).toFixed(1);
+            LM.info(`Probe #${token} complete → ${_allFrames.length} total frames found | span ${spanHr}h | oldest ${oldest.toISOString()} → newest ${newest.toISOString()}`);
+            LM.debug(`  Selected (displayed): ${_probedFrames.length} frame(s) | numFrames=${_numFrames} frameSkip=${_frameSkip}`);
+        } else {
+            LM.warn(`Probe #${token} complete → 0 frames found for dominant="${_dominantId || 'none'}"`);
+        }
+        _renderTimeline();
+        _renderFrameInfo();
+    }
+
+    // Median inter-frame gap from probed data — much more accurate than catalog value
+    // when the actual archive is sparser or denser than the catalog advertises.
+    function _actualFreqMs(allFrames) {
+        if (allFrames.length < 2) {
+            const dom = DataCatalog.byId(_dominantId);
+            const fMin = (dom && dom.has_forecast_hour && dom.forecast_hr_step)
+                ? dom.forecast_hr_step * 60
+                : (dom ? dom.temporal_frequency_min : 60);
+            return fMin * 60000;
+        }
+        const gaps = [];
+        for (let i = 0; i < allFrames.length - 1; i++)
+            gaps.push(allFrames[i].valid.getTime() - allFrames[i+1].valid.getTime());
+        gaps.sort((a, b) => a - b);
+        return gaps[Math.floor(gaps.length / 2)];
+    }
+
+    // Apply the selection window to allFrames.
+    // Auto mode (_selWindowStart===null): walk newest→oldest, no time-window needed
+    //   — box position is derived from the actual selected frames afterward.
+    // Drag mode (_selWindowStart set): pick frames within a time window positioned
+    //   by the user; window width = numFrames × actualFreq.
+    function _computeSelected(allFrames) {
+        if (!Array.isArray(allFrames) || allFrames.length === 0) return [];
+
+        const tlEnd   = _rangeEnd   || allFrames[0].valid;
+        const tlStart = _rangeStart || allFrames[allFrames.length - 1].valid;
+
+        const visible = allFrames.filter(f =>
+            f.valid.getTime() >= tlStart.getTime() &&
+            f.valid.getTime() <= tlEnd.getTime()
+        );
+        if (!visible.length) return [];
+
+        const out = [];
+        const unlimited = (() => {
+            const dom = _dominantId ? DataCatalog.byId(_dominantId) : null;
+            return !!(dom && dom.default_frame_no === -1);
+        })();
+        const maxFrames = unlimited ? Infinity : _numFrames;
+
+        // IMPORTANT:
+        // Always select from ACTUAL visible frames only.
+        // No synthetic stepping by temporal_frequency_min.
+        let idx = 0;
+        for (const f of visible) {
+            if (idx % _frameSkip === 0) {
+                out.push(f);
+                if (out.length >= maxFrames) break;
+            }
+            idx++;
+        }
+        return out;
+    }
+
+    // Update frames slider/numInput max to the count of available frames in the
+    // current visible range.  Clamps _numFrames if it now exceeds the new max.
+    function _updateSliderMax() {
+        if (!_overlay) return;
+        const tlEnd   = _rangeEnd   || (_allFrames.length ? _allFrames[0].valid                   : null);
+        const tlStart = _rangeStart || (_allFrames.length ? _allFrames[_allFrames.length-1].valid : null);
+        const count   = (!tlStart || !tlEnd) ? 0
+            : _allFrames.filter(f => f.valid >= tlStart && f.valid <= tlEnd).length;
+        const maxVal  = Math.max(1, count);
+        const slider  = _overlay.querySelector('#lm-frames-slider');
+        const numInput = _overlay.querySelector('#lm-frames-num');
+        const label    = _overlay.querySelector('#lm-frames-label');
+        slider.max    = maxVal;
+        numInput.max  = maxVal;
+        if (_numFrames > maxVal) {
+            _numFrames = maxVal;
+            slider.value         = maxVal;
+            numInput.value       = maxVal;
+            label.textContent    = maxVal;
+        }
+    }
+
+    // Recompute selection from cached frames and re-render (no server round-trip).
+    function _recomputeSelection() {
+        if (!_allFrames.length) {
+            // No frames cached yet — need a full probe
+            _scheduleProbe();
+            return;
+        }
+        _probedFrames = _computeSelected(_allFrames);
+        _renderTimeline();
+        _renderFrameInfo();
+    }
+
+    // ------------------------------------------------------------------------
+    // Selection-box drag handlers (module-level to allow removeEventListener)
+    // ------------------------------------------------------------------------
+    const _onDragMove = (e) => {
+        if (!_tlPxPerMs) return;
+        const actualFreqMs = _actualFreqMs(_allFrames);
+        const windowMs = _numFrames * actualFreqMs;  // skip never inflates box
+
+        const tlEnd   = _rangeEnd   || (_allFrames.length ? _allFrames[0].valid                   : new Date());
+        const tlStart = _rangeStart || (_allFrames.length ? _allFrames[_allFrames.length-1].valid : new Date());
+
+        const dx  = e.clientX - _dragStartX;
+        const dtMs = dx / _tlPxPerMs;
+        let newStart = new Date(_dragStartWSms + dtMs);
+        // Clamp so box stays within visible range
+        newStart = new Date(Math.max(newStart.getTime(), tlStart.getTime()));
+        newStart = new Date(Math.min(newStart.getTime(), Math.max(tlStart.getTime(), tlEnd.getTime() - windowMs)));
+
+        if (Math.abs(newStart.getTime() - ((_selWindowStart || tlEnd) - windowMs)) < 10000) return;
+        _selWindowStart = newStart;
+
+        // Move the selbox directly without full re-render
+        const selbox = _overlay && _overlay.querySelector('#lm-tl-selbox');
+        if (selbox) {
+            const leftPx  = Math.round((newStart.getTime() - tlStart.getTime()) * _tlPxPerMs);
+            const widthPx = Math.max(4, Math.round(Math.min(windowMs, tlEnd.getTime() - newStart.getTime()) * _tlPxPerMs));
+            selbox.style.left  = leftPx  + 'px';
+            selbox.style.width = widthPx + 'px';
+        }
+
+        // Recompute selected set and update dot classes in-place
+        _probedFrames = _computeSelected(_allFrames);
+        const selPaths   = new Set(_probedFrames.map(f => f.path));
+        const latestPath = _probedFrames.length ? _probedFrames[0].path : null;
+        (_overlay ? _overlay.querySelectorAll('.lm-tl-dot') : []).forEach(dot => {
+            const p  = dot.dataset.path;
+            if (!p) return;
+            dot.className = 'lm-tl-dot ' +
+                (p === latestPath ? 'lm-tl-latest' : selPaths.has(p) ? 'lm-tl-included' : 'lm-tl-excluded');
+        });
+        _renderFrameInfo();
+    };
+
+    const _onDragEnd = () => {
+        document.removeEventListener('mousemove', _onDragMove);
+        document.removeEventListener('mouseup',   _onDragEnd);
+    };
+
+    // ------------------------------------------------------------------
     // Shared date formatters
     // ------------------------------------------------------------------
     function _fmtDateUTC(dt, short) {
@@ -1213,18 +1185,7 @@ const LayerManager = (() => {
     }
 
     // ------------------------------------------------------------------
-    // Full re-render of all dynamic panels.
-    // Source list and dominant dropdown update synchronously;
-    // timeline / frame-info update asynchronously via _scheduleProbe().
-    // ------------------------------------------------------------------
-    function _renderAll() {
-        _renderSourceList();
-        _renderDominantDropdown();
-        _scheduleProbe();
-    }
-
-    // ------------------------------------------------------------------
-    // Open / close
+    // Open / close the layer manager overlay.  The overlay is built once and reused.
     // ------------------------------------------------------------------
     function _close() {
         if (_overlay) _overlay.style.display = 'none';
@@ -1235,6 +1196,8 @@ const LayerManager = (() => {
         const frames = _probedFrames.map(f => f.valid);
         // Log a grouped summary before closing the dialog
         const domEntry = _dominantId ? DataCatalog.byId(_dominantId) : null;
+
+        // Log some information to the console regarding the data.
         console.groupCollapsed('%c[LM]%c Apply — %d source(s), %d frame(s)', 'color:#4a9eff;font-weight:bold', 'color:inherit', _sources.length, frames.length);
         console.info('  Dominant :', _dominantId, domEntry ? `(${domEntry.name})` : '(none)');
         console.info('  Sources  :', _sources.map(s => `uid=${s.uid} "${s.id}" ${s.cycleTime ? '@'+_fmtCycleShort(s.cycleTime) : ''}`.trim()));
@@ -1244,6 +1207,8 @@ const LayerManager = (() => {
             console.info('  Frames (newest→oldest):', frames.map(d => d.toISOString()));
         }
         console.groupEnd();
+
+        // Close the dialog and call the onApply callback with the current state
         _close();
         if (typeof _onApply === 'function') {
             _onApply({

@@ -162,6 +162,7 @@ const DataSelector = (() => {
         return Number.isNaN(cycle.getTime()) ? null : cycle;
     }
 
+    // Figure out what cycles exist from the data store catalog.
     async function _probeCyclesFromStoreCatalog(entry, token) {
         let resp;
         try {
@@ -194,7 +195,7 @@ const DataSelector = (() => {
     }
 
     /**
-     * Probe for available cycle times for a forecast entry.
+     * Find out available cycle times when the user clicks a model forecast data source.
      * Uses data_store_catalog when available; falls back to HEAD probing.
      */
     async function _probeCycles(entry, token) {
@@ -241,6 +242,8 @@ const DataSelector = (() => {
         const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getUTCMonth()];
         return `${pad(dt.getUTCDate())} ${mon} ${dt.getUTCFullYear()} ${pad(dt.getUTCHours())}:00 UTC`;
     }
+
+    // RENDERING FUNCTION SECTION
 
     // ------------------------------------------------------------------
     // Render category list
@@ -495,6 +498,8 @@ ${pathHtml}
             });
         }
     }
+
+    // END RENDERING FUNCTION SECTION
 
     // ------------------------------------------------------------------
     // Open / close

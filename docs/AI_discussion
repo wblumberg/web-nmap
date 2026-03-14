@@ -1,0 +1,1201 @@
+This is exactly what I need to give you really grounded, concrete advice. I can see your current `public/main.js` in full detail — the pattern of separate `makeXxxLayers()` functions, the flat `views` registry, and the monolithic structure that's already starting to strain. Let me give you a thorough architectural analysis and a clear migration plan.
+
+---
+
+## The Core Problem: A Mapping of Concepts
+
+The fundamental challenge is that NMAP2's table-driven architecture and autumnplot-gl's layer/field code model describe the **same things** at different levels of abstraction. Here's the conceptual bridge:
+
+| NMAP2 Concept | What It Controls | Web-NMAP Equivalent |
+|---|---|---|
+| `datatype.tbl` | Data sources, filename templates, time matching | **`DataSource` config object** |
+| `mod_res.tbl` | Links data sources → named "restore" groups | **`ProductSuite` registry** |
+| Restore file (`.nmap2`) | How to visualize one variable (contours, fill, barbs, etc.) | **`LayerDef` config object** |
+| `prmlst.tbl` | Station model layouts per data type | **`StationModelDef` config object** |
+| Colormap tables | Color scales for raster/image data | **`ColorMap` + named colormap registry** |
+| NMAP2 "group" (basic, instability, etc.) | Logical grouping of restore sets | **`group` field on `ProductSuite`** |
+
+The key insight: **in NMAP2, config is in text tables; in web-NMAP, config should be in JavaScript/JSON objects.** The structure is the same — only the format changes.
+
+---
+
+## The Three-Layer Architecture
+
+Your current `main.js` conflates three distinct concerns into one flat file. Here's how to separate them:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Layer 1: Configuration (replaces NMAP2 tables)         │
+│  • datasources.js  (← datatype.tbl)                     │
+│  • products.js     (← mod_res.tbl + restore files)      │
+│  • colormaps.js    (← colormap tables)                   │
+│  • stationmodels.js(← prmlst.tbl)                       │
+└─────────────────────┬───────────────────────────────────┘
+                      │ drives
+┌─────────────────────▼───────────────────────────────────┐
+│  Layer 2: Runtime Engine (translates config → APGL)     │
+│  • DataLoader.js   (fetch + decode binary/JSON data)    │
+│  • LayerBuilder.js (config → PlotLayer/MultiPlotLayer)  │
+│  • ViewManager.js  (manages active layers on the map)   │
+└─────────────────────┬───────────────────────────────────┘
+                      │ renders
+┌─────────────────────▼───────────────────────────────────┐
+│  Layer 3: UI (map + controls)                           │
+│  • main.js         (map init, event wiring only)        │
+│  • index.html                                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Concrete File Designs
+
+### 1. `src/datasources.js` — replaces `datatype.tbl`
+
+This is the single source of truth for *where data comes from* and *what shape it has*.
+
+```javascript name=src/datasources.js
+// Analogous to NMAP2's datatype.tbl
+// Each entry describes a data source: how to fetch it, what grid it lives on, what time model it follows.
+
+const DATA_SOURCES = {
+
+    'GFS': {
+        label: 'GFS',
+        type: 'gridded',
+        // URL template: use {cycle} for model init time, {fhr} for forecast hour
+        url_template: 'data/gfs.{cycle}.f{fhr}.bin.gz',
+        dtype: 'float16',
+        grid: () => new apgl.PlateCarreeGrid(1441, 721, 0, -90, 360, 90),
+        // Time matching: which forecast hours are available
+        available_fhrs: [0, 6, 12, 18, 24, 30, 36, 42, 48],
+        wrap_lon: true,  // flag to trigger the longitude-wrapping pad logic
+    },
+
+    'NAM': {
+        label: 'NAM',
+        type: 'gridded',
+        url_template: 'data/nam.{cycle}.f{fhr}.bin.gz',
+        dtype: 'float16',
+        grid: () => new apgl.LambertGrid.fromLLCornerLonLat(/* NAM params */),
+        available_fhrs: [0, 3, 6, 9, 12, 15, 18, 21, 24, 36, 48, 60],
+        wrap_lon: false,
+    },
+
+    'HRRR': {
+        label: 'HRRR',
+        type: 'gridded',
+        url_template: 'data/hrrr.{cycle}.f{fhr}.bin.gz',
+        dtype: 'float16',
+        grid: () => new apgl.LambertGrid.fromLLCornerLonLat(/* HRRR params */),
+        available_fhrs: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                         13, 14, 15, 16, 17, 18],
+        wrap_lon: false,
+    },
+
+    'MRMS_CREF': {
+        label: 'MRMS Composite Reflectivity',
+        type: 'gridded_raster',
+        url_template: 'data/mrms.{valid_time}.cref.bin.gz',
+        dtype: 'float16',
+        grid: () => new apgl.PlateCarreeGrid(7000, 3500, -129.995, 20.005, -60.005, 54.995),
+        wrap_lon: false,
+    },
+
+    'MRMS_PTYPE': {
+        label: 'MRMS Precip Type',
+        type: 'gridded_mask',
+        url_template: 'data/hrrr.{cycle}.ptype.bin.gz',
+        dtype: 'uint8',
+        grid: null,  // shares grid with MRMS_CREF
+        wrap_lon: false,
+    },
+
+    'HREF': {
+        label: 'HREFv3',
+        type: 'gridded',
+        url_template: 'data/hrefv3.{cycle}.{variable}.bin.gz',
+        dtype: 'float16',
+        grid: () => new apgl.LambertGrid.fromLLCornerLonLat(1799, 1059, -97.5, 38.5,
+                                                            [38.5, 38.5], -122.719528,
+                                                            21.138123, 3000, 3000),
+        wrap_lon: false,
+    },
+
+    'SURFACE_OBS': {
+        label: 'Surface Observations',
+        type: 'point',
+        url_template: 'data/surface_{valid_time}.json',
+        dtype: 'json',
+    },
+};
+
+export default DATA_SOURCES;
+```
+
+---
+
+### 2. `src/colormaps.js` — replaces colormap table files
+
+Centralizes all named colormaps. Separating this from the product definitions means colormaps can be reused across products.
+
+```javascript name=src/colormaps.js
+// Named colormap registry — analogous to NMAP2's colormap table files.
+// Colormaps from autumnplot-gl's built-in library are referenced by name;
+// custom ones are defined here.
+
+const COLORMAPS = {
+
+    // --- Built-in autumnplot-gl colormaps ---
+    'pw_speed500mb': apgl.colormaps.pw_speed500mb,
+    'pw_speed850mb': apgl.colormaps.pw_speed850mb,
+    'pw_cape':       apgl.colormaps.pw_cape,
+    'pw_t2m':        apgl.colormaps.pw_t2m,
+    'pw_td2m':       apgl.colormaps.pw_td2m,
+
+    // --- Custom colormaps (defined here) ---
+    'mrms_cref_rain': new apgl.ColorMap(
+        [10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5, 35, 37.5, 40, 42.5, 45, 47.5, 50],
+        ['#bce8be','#a6d3a8','#93c393','#7fb482','#68a06a','#568e56','#48894d',
+         '#3b8043','#2b7a39','#1f7331','#116c28','#f3ef6f','#f7dd65','#f6c55b',
+         '#f5b24f','#fb9e45'],
+        { overflow_color: '#f88a3f' }
+    ),
+
+    'mrms_cref_snow': new apgl.ColorMap(
+        [5, 7.5, 10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5, 35, 37.5, 40, 42.5, 45, 47.5, 50],
+        ['#bfdeed','#a6cfe6','#92c0db','#7ab0d0','#66a5c9','#5196be','#4089b3',
+         '#347da4','#2a7296','#1e6586','#125877','#074b67','#703579','#b23890',
+         '#c051a2','#c970b2','#d18dbe','#e4add6'],
+        { overflow_color: '#eec9e5' }
+    ),
+
+    // ... add more as needed
+};
+
+export default COLORMAPS;
+```
+
+---
+
+### 3. `src/products.js` — replaces `mod_res.tbl` + restore files
+
+This is the heart of the framework. Each entry is a **Product Suite** — a named, groupable visualization configuration that knows which data source it needs and exactly how to render it. This is the direct analog of a NMAP2 restore file registered in `mod_res.tbl`.
+
+```javascript name=src/products.js
+// Analogous to NMAP2's mod_res.tbl + restore files combined.
+//
+// Structure:
+//   PRODUCT_SUITES[id] = {
+//     label,          — display name
+//     group,          — logical group (like mod_res.tbl's group column: 'basic', 'instability', etc.)
+//     data_sources,   — which DATA_SOURCES entries this needs
+//     available_for,  — which model/source IDs this suite can be used with
+//     make_layers,    — async function(loadedData, grid) → { layers, colorbar, sampler }
+//   }
+
+import COLORMAPS from './colormaps.js';
+
+const PRODUCT_SUITES = {
+
+    // ----------------------------------------------------------------
+    // GROUP: basic
+    // ----------------------------------------------------------------
+
+    'sfc_temp_fill': {
+        label: '2m Temperature (Fill)',
+        group: 'basic',
+        available_for: ['GFS', 'NAM', 'HRRR', 'RAP'],
+        data_keys: ['t2m'],   // logical variable names → resolved to actual files by DataLoader
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.t2m);
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_t2m'] });
+            const cntr  = new apgl.Contour(field, { levels: [32], line_width: 3, color: '#ffffff' });
+            const svg   = apgl.makeColorBar(COLORMAPS['pw_t2m'], {
+                label: '2m Temperature (°F)', orientation: 'horizontal',
+                tick_direction: 'bottom', fontface: 'Trebuchet MS',
+                ticks: [-40, -20, 0, 20, 40, 60, 80, 100, 120]
+            });
+            return {
+                layers: [
+                    new apgl.PlotLayer('t2m_fill', fill),
+                    new apgl.PlotLayer('t2m_32f',  cntr),
+                ],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({ 't2m': field.sampleField(lon, lat) }),
+            };
+        },
+    },
+
+    '500mb_analysis': {
+        label: '500mb Heights / Wind Speed / Barbs',
+        group: 'basic',
+        available_for: ['GFS', 'NAM', 'HRRR', 'RAP'],
+        data_keys: ['hght_500mb', 'ugrd_500mb', 'vgrd_500mb'],
+        make_layers(data, grid) {
+            const hght_field  = new apgl.RawScalarField(grid, data.hght_500mb);
+            const wind_field  = new apgl.RawVectorField(grid, data.ugrd_500mb, data.vgrd_500mb,
+                                                        { relative_to: 'grid' });
+            const wspd_data   = new Float32Array(data.ugrd_500mb.length);
+            for (let i = 0; i < wspd_data.length; i++)
+                wspd_data[i] = Math.hypot(data.ugrd_500mb[i], data.vgrd_500mb[i]);
+            const wspd_field  = new apgl.RawScalarField(grid, wspd_data);
+
+            const cntr  = new apgl.Contour(hght_field, {
+                interval: 6, color: '#000000',
+                line_width: lev => lev % 60 === 0 ? 3 : 1.5,
+            });
+            const fill  = new apgl.ContourFill(wspd_field, { cmap: COLORMAPS['pw_speed500mb'], opacity: 0.8 });
+            const barbs = new apgl.Barbs(wind_field, { color: '#000000', thin_fac: 16 });
+            const labels = new apgl.ContourLabels(cntr, {
+                text_color: '#ffffff', halo: true,
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            });
+
+            const svg = apgl.makeColorBar(COLORMAPS['pw_speed500mb'], {
+                label: 'Wind Speed (kts)', orientation: 'horizontal',
+                tick_direction: 'bottom', fontface: 'Trebuchet MS',
+                ticks: [20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140],
+            });
+            return {
+                layers: [
+                    new apgl.PlotLayer('500_fill',  fill),
+                    new apgl.PlotLayer('500_cntr',  cntr),
+                    new apgl.PlotLayer('500_barbs', barbs),
+                    new apgl.PlotLayer('500_label', labels),
+                ],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({
+                    hght: hght_field.sampleField(lon, lat),
+                    wind: wind_field.sampleField(lon, lat),
+                }),
+            };
+        },
+    },
+
+    // ----------------------------------------------------------------
+    // GROUP: precip / raster
+    // ----------------------------------------------------------------
+
+    'mrms_cref': {
+        label: 'MRMS Composite Reflectivity',
+        group: 'precip',
+        available_for: ['MRMS_CREF'],
+        data_keys: ['cref', 'ptype_mask'],
+        make_layers(data, grid) {
+            const field  = new apgl.RawScalarField(grid, data.cref);
+            const cmaps  = ['mrms_cref_rain','mrms_cref_snow','mrms_cref_ice','mrms_cref_frzr']
+                               .map(k => COLORMAPS[k]);
+            const raster = new apgl.Raster(field, { cmap: cmaps, cmap_mask: data.ptype_mask });
+            // ... build colorbars per ptype
+            return {
+                layers: [new apgl.PlotLayer('mrms_cref', raster)],
+                colorbar: [/* ... */],
+            };
+        },
+    },
+
+    // ----------------------------------------------------------------
+    // GROUP: point data
+    // ----------------------------------------------------------------
+
+    'surface_obs_standard': {
+        label: 'Surface Obs (Standard)',
+        group: 'point',
+        available_for: ['SURFACE_OBS'],
+        data_keys: ['obs_json'],
+        make_layers(data, _grid) {
+            const obs_grid  = new apgl.UnstructuredGrid(data.obs_json.map(o => o.coord));
+            const obs_field = new apgl.RawObsField(obs_grid, data.obs_json.map(o => o.data));
+            const config = {
+                tmpf:   { type: 'number', pos: 'ul', color: '#cc0000', formatter: v => v?.toFixed(0) ?? '' },
+                dwpf:   { type: 'number', pos: 'll', color: '#00aa00', formatter: v => v?.toFixed(0) ?? '' },
+                wind:   { type: 'barb',   pos: 'c'  },
+                preswx: { type: 'symbol', pos: 'cl', color: '#ff00ff' },
+                skyc:   { type: 'symbol', pos: 'c'  },
+            };
+            const splot = new apgl.StationPlot(obs_field, { config, thin_fac: 8, font_size: 14 });
+            return {
+                layers: [new apgl.PlotLayer('sfc_obs', splot)],
+                colorbar: [],
+            };
+        },
+    },
+};
+
+export default PRODUCT_SUITES;
+```
+
+---
+
+### 4. `src/DataLoader.js` — runtime data fetching
+
+This separates the **fetch-and-decode** logic (currently duplicated in each `makeXxxLayers()` function) from the visualization logic.
+
+```javascript name=src/DataLoader.js
+// Handles all data fetching and decoding.
+// Knows about the wrap_lon quirk for global grids, dtype decoding, etc.
+
+import DATA_SOURCES from './datasources.js';
+
+async function fetchBinary(url, dtype = 'float16') {
+    const resp = await fetch(url);
+    const ary  = new Uint8Array(await (await resp.blob()).arrayBuffer());
+    const inflated = pako.inflate(ary);
+    if (dtype === 'uint8') return inflated;
+    return new float16.Float16Array(new Float32Array(inflated.buffer));
+}
+
+async function fetchJSON(url) {
+    return (await fetch(url)).json();
+}
+
+/**
+ * Resolve and load all data_keys required by a product suite for a given
+ * data source + time, returning a plain { key: TypedArray } object.
+ *
+ * @param {string} sourceId     - Key into DATA_SOURCES
+ * @param {string[]} dataKeys   - Logical variable names needed by the product
+ * @param {object} timeParams   - { cycle, fhr, valid_time }
+ * @param {object} varMap       - Maps logical data_keys to file URL fragments
+ *                                e.g. { t2m: 'tmp_2m', hght_500mb: 'hgt_500mb' }
+ */
+async function loadData(sourceId, dataKeys, timeParams, varMap = {}) {
+    const src = DATA_SOURCES[sourceId];
+    if (!src) throw new Error(`Unknown data source: ${sourceId}`);
+
+    const result = {};
+
+    for (const key of dataKeys) {
+        const fragment = varMap[key] ?? key;
+        const url = src.url_template
+            .replace('{cycle}',      timeParams.cycle      ?? '')
+            .replace('{fhr}',        String(timeParams.fhr ?? '').padStart(3, '0'))
+            .replace('{valid_time}', timeParams.valid_time ?? '')
+            .replace('{variable}',   fragment);
+
+        if (src.dtype === 'json') {
+            result[key] = await fetchJSON(url);
+        } else {
+            let data = await fetchBinary(url, src.dtype);
+            // Handle global grid longitude wrapping (GFS-style)
+            if (src.wrap_lon) {
+                const grid = src.grid();
+                const padded = new float16.Float16Array(grid.ni * grid.nj);
+                for (let j = 0; j < grid.nj; j++) {
+                    const s = (grid.ni - 1) * j;
+                    const p = grid.ni * j;
+                    padded.set(data.subarray(s, s + grid.ni - 1), p);
+                    padded[p + grid.ni - 1] = data[s];
+                }
+                data = padded;
+            }
+            result[key] = data;
+        }
+    }
+
+    return result;
+}
+
+export { loadData };
+```
+
+---
+
+### 5. `src/ViewRegistry.js` — replaces the `views` object in `main.js`
+
+This is the highest-level config: it combines a data source + a product suite + time parameters into a "view" the UI can select.
+
+```javascript name=src/ViewRegistry.js
+// Analogous to the combined effect of mod_res.tbl's grouping + NMAP2's panel restore.
+// A "View" = (DataSource) + (ProductSuite) + (TimeParams) → renderable layers.
+
+import DATA_SOURCES  from './datasources.js';
+import PRODUCT_SUITES from './products.js';
+import { loadData } from './DataLoader.js';
+
+const VIEW_REGISTRY = {
+
+    'synthetic_500mb': {
+        label: 'Synthetic 500mb',
+        group: 'basic',
+        source_id: null,          // null = synthetic / no fetch needed
+        product_id: 'synthetic_500mb_anim',
+        maxZoom: 7,
+        async makeLayers() {
+            // Synthetic views can still use the product suite pattern;
+            // they just generate data inline instead of fetching
+            return PRODUCT_SUITES['synthetic_500mb'].make_layers({}, null);
+        },
+    },
+
+    'gfs_t2m': {
+        label: 'GFS 2m Temperature',
+        group: 'basic',
+        source_id: 'GFS',
+        product_id: 'sfc_temp_fill',
+        maxZoom: 7,
+        time: { cycle: '2025030200', fhr: 0 },
+        var_map: { t2m: 'tmp_2m' },
+        async makeLayers() {
+            const src = DATA_SOURCES[this.source_id];
+            const data = await loadData(this.source_id, ['t2m'], this.time, this.var_map);
+            const grid = src.grid();
+            return PRODUCT_SUITES[this.product_id].make_layers(data, grid);
+        },
+    },
+
+    'href_uhmax': {
+        label: 'HREF UH Max Paintball',
+        group: 'precip',
+        source_id: 'HREF',
+        product_id: 'href_paintball',
+        maxZoom: 7,
+        time: { cycle: '2023051100', fhr: 36 },
+        async makeLayers() {
+            const src = DATA_SOURCES[this.source_id];
+            const data = await loadData(this.source_id,
+                ['uh_paintball', 'uh_nh_prob'], this.time,
+                {
+                    uh_paintball: 'mxuphl5000_2000m.086400.pb75',
+                    uh_nh_prob:   'mxuphl5000_2000m.nh_max.086400_p99.85_0040km',
+                });
+            const grid = src.grid();
+            return PRODUCT_SUITES[this.product_id].make_layers(data, grid);
+        },
+    },
+
+    'mrms_cref': {
+        label: 'MRMS Composite Reflectivity',
+        group: 'precip',
+        source_id: 'MRMS_CREF',
+        product_id: 'mrms_cref',
+        maxZoom: 8.5,
+        time: { valid_time: '202112152259' },
+        async makeLayers() {
+            const src  = DATA_SOURCES[this.source_id];
+            const data = await loadData(this.source_id, ['cref', 'ptype_mask'],
+                                        this.time);
+            const grid = src.grid();
+            return PRODUCT_SUITES[this.product_id].make_layers(data, grid);
+        },
+    },
+
+    'surface_obs': {
+        label: 'Surface Observations',
+        group: 'point',
+        source_id: 'SURFACE_OBS',
+        product_id: 'surface_obs_standard',
+        maxZoom: 8.5,
+        time: { valid_time: '20240823_1500' },
+        async makeLayers() {
+            const data = await loadData(this.source_id, ['obs_json'], this.time);
+            return PRODUCT_SUITES[this.product_id].make_layers(data, null);
+        },
+    },
+};
+
+// Helper: get all views in a given group
+function getViewsByGroup(group) {
+    return Object.entries(VIEW_REGISTRY)
+        .filter(([, v]) => v.group === group)
+        .map(([k, v]) => ({ id: k, label: v.label }));
+}
+
+export { VIEW_REGISTRY, getViewsByGroup };
+```
+
+---
+
+### 6. `public/main.js` — now thin, only UI wiring
+
+Once you have the above modules, `main.js` shrinks dramatically to pure UI orchestration:
+
+```javascript name=public/main.js
+import { VIEW_REGISTRY } from '../src/ViewRegistry.js';
+
+window.addEventListener('load', () => {
+    const menu = document.querySelector('#view-select');
+    menu.innerHTML = Object.entries(VIEW_REGISTRY)
+        .map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('');
+
+    const map = new maplibregl.Map({
+        container: 'map',
+        style: 'http://localhost:8080/style.json',
+        center: [-97.5, 38.5],
+        zoom: 4,
+        maxZoom: 7,
+    });
+
+    map.on('load', () => map.setProjection({ type: 'globe' }));
+
+    let current_layers = [];
+    let current_mousemove_handler = null;
+
+    async function updateMap() {
+        const view = VIEW_REGISTRY[menu.value];
+        map.setMaxZoom(view.maxZoom);
+
+        const { layers, colorbar, sampler } = await view.makeLayers();
+
+        current_layers.forEach(lyr => map.removeLayer(lyr.id));
+        layers.forEach(lyr => map.addLayer(lyr, 'coastline'));
+        current_layers = layers;
+
+        // ... colorbar and readout wiring unchanged ...
+    }
+
+    map.on('load', updateMap);
+    menu.addEventListener('change', updateMap);
+});
+```
+
+---
+
+## How `MultiPlotLayer` Fits In: Time Animation
+
+Once your product suites support time-varying data, `MultiPlotLayer` slots cleanly into `make_layers()`. The product suite builds the multi-layer; `main.js` receives a handle to drive `setActiveKey()`:
+
+```javascript name=src/products_timevary_example.js
+// Example of how a time-varying product suite would work
+'gfs_500mb_animated': {
+    label: '500mb Heights (GFS Animated)',
+    group: 'basic',
+    available_for: ['GFS'],
+    async make_layers_multi(dataByFhr, grid) {
+        // dataByFhr = { '000': {hght, u, v}, '006': {hght, u, v}, ... }
+
+        const fill_layer  = new apgl.MultiPlotLayer('500_fill');
+        const cntr_layer  = new apgl.MultiPlotLayer('500_cntr');
+        const barb_layer  = new apgl.MultiPlotLayer('500_barbs');
+
+        for (const [fhr, data] of Object.entries(dataByFhr)) {
+            const hght_field = new apgl.RawScalarField(grid, data.hght);
+            const wind_field = new apgl.RawVectorField(grid, data.u, data.v, { relative_to: 'grid' });
+            // compute wspd...
+            fill_layer.addField(new apgl.ContourFill(wspd_field, { cmap: COLORMAPS['pw_speed500mb'] }), fhr);
+            cntr_layer.addField(new apgl.Contour(hght_field, { interval: 6 }), fhr);
+            barb_layer.addField(new apgl.Barbs(wind_field, { thin_fac: 16 }), fhr);
+        }
+
+        // Return layers AND a controller to set the active time
+        const setTime = (fhr) => {
+            fill_layer.setActiveKey(fhr);
+            cntr_layer.setActiveKey(fhr);
+            barb_layer.setActiveKey(fhr);
+        };
+
+        return {
+            layers: [fill_layer, cntr_layer, barb_layer],
+            colorbar: [/* ... */],
+            setTime,  // UI can call this from a time slider
+        };
+    },
+},
+```
+
+---
+
+## Migration Strategy (Step-by-Step)
+
+1. **Don't break what works yet.** Keep your current `main.js` running while you build the new structure alongside it.
+2. **Start with `colormaps.js`** — extract all colormap definitions, import them in `main.js`. Zero behavior change.
+3. **Extract `datasources.js`** — move grid constructors + URL templates. Replace the inline `new apgl.PlateCarreeGrid(...)` calls with `DATA_SOURCES['GFS'].grid()`.
+4. **Convert one product at a time** — move `makeGFSLayers()` into a `products.js` entry, wire it through `DataLoader.js`. Verify it still works.
+5. **Replace the `views` flat object** with `ViewRegistry.js`. Wire `main.js` to use `VIEW_REGISTRY`.
+6. **Once all views are migrated**, delete the old per-view functions from `main.js`.
+7. **Add `MultiPlotLayer` support** after the static structure is solid.
+
+---
+
+## Summary
+
+The mental model shift is:
+
+> **NMAP2**: Text table rows → program reads and interprets → renders  
+> **web-NMAP**: JS config objects (`datasources`, `products`, `views`) → `LayerBuilder` / `DataLoader` reads and executes → autumnplot-gl renders
+
+Your current `main.js` is doing all three layers at once. Separating **config** (what to show), **loader** (how to get data), and **UI** (how to display it) is exactly the refactor you need — and it maps 1:1 to what NMAP2's table files were doing in C/Fortran land.
+
+Would you like me to open a GitHub issue in `wblumberg/web-nmap` to track this refactoring work, or would you prefer I create a PR that scaffolds out these files with the structure above?
+
+
+Great — this gives me everything I need. Let me give you a thorough refresher on the full model, now updated for both the zarr/compressed-JSON data formats and the `products.js` decomposition problem.
+
+---
+
+## The Updated Mental Model (Full Refresher)
+
+Here is the complete three-layer architecture with all changes incorporated:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  LAYER 1: CONFIGURATION  (replaces NMAP2 text tables)           │
+│                                                                 │
+│  src/config/                                                    │
+│    datasources.js      ← datatype.tbl                          │
+│    colormaps.js        ← colormap table files                   │
+│    stationmodels.js    ← prmlst.tbl                            │
+│    views.js            ← mod_res.tbl (grouping + availability)  │
+│                                                                 │
+│  src/products/         ← restore files (one file per group)    │
+│    index.js            (barrel export)                         │
+│    basic.js            (temperature, heights, dewpoint, etc.)  │
+│    instability.js      (CAPE, LI, STP, SCP, etc.)             │
+│    moisture.js         (PWat, RH, mixing ratio, etc.)          │
+│    shear.js            (0-6km, 0-1km, SRH, etc.)              │
+│    precipitation.js    (QPF, snow, PTYPE, etc.)               │
+│    composite.js        (SPC HREF composites, etc.)             │
+│    raster.js           (MRMS, satellite)                       │
+│    point.js            (surface obs, soundings, etc.)          │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │ drives
+┌─────────────────────▼───────────────────────────────────────────┐
+│  LAYER 2: RUNTIME ENGINE  (translates config → APGL objects)    │
+│                                                                 │
+│  src/                                                           │
+│    DataLoader.js       (fetch + decode zarr / compressed JSON)  │
+│    LayerBuilder.js     (product config → PlotLayer objects)    │
+│    ViewManager.js      (active layers, time stepping)          │
+└─────────────────────┬───────────────────────────────────────────┘
+                      │ renders
+┌─────────────────────▼───────────────────────────────────────────┐
+│  LAYER 3: UI                                                    │
+│                                                                 │
+│  public/                                                        │
+│    main.js             (map init + UI event wiring only)       │
+│    index.html                                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## The Key Change: `products/` becomes a directory, not a file
+
+Instead of one giant `products.js`, you split by **group** — exactly mirroring how NMAP2's `mod_res.tbl` groups restore files. Each file is independently maintainable and maps directly to an operational forecaster's mental model.
+
+```
+src/products/
+├── index.js           ← barrel: imports all groups, re-exports PRODUCT_SUITES
+├── basic.js           ← temperature, heights, winds, dewpoint
+├── instability.js     ← CAPE, CIN, LI, STP, SCP, EHI
+├── moisture.js        ← PWat, RH, specific humidity
+├── shear.js           ← bulk shear, SRH, hodograph-related
+├── precipitation.js   ← QPF, snowfall, PTYPE
+├── lift.js            ← lifted index, K-index, TT
+├── composite.js       ← HREF paintball, SPC composites
+├── raster.js          ← MRMS, satellite imagery
+└── point.js           ← surface obs station models
+```
+
+Each file has the **same shape** — it exports a plain object of product suite definitions — and `index.js` merges them all:
+
+```javascript name=src/products/index.js
+// Barrel file — analogous to the full mod_res.tbl combined.
+// Each imported module is one "group" of NMAP2 restore configurations.
+
+import basic         from './basic.js';
+import instability   from './instability.js';
+import moisture      from './moisture.js';
+import shear         from './shear.js';
+import precipitation from './precipitation.js';
+import lift          from './lift.js';
+import composite     from './composite.js';
+import raster        from './raster.js';
+import point         from './point.js';
+
+// Merge all groups into a single flat registry.
+// Duplicate IDs across files will throw at import time (good — fail loudly).
+const PRODUCT_SUITES = {
+    ...basic,
+    ...instability,
+    ...moisture,
+    ...shear,
+    ...precipitation,
+    ...lift,
+    ...composite,
+    ...raster,
+    ...point,
+};
+
+export default PRODUCT_SUITES;
+```
+
+---
+
+## What Each Product File Looks Like
+
+Every product file exports an object whose keys are product IDs and values are product suite definitions. Here's the pattern — notice how each file is **self-contained and readable**:
+
+```javascript name=src/products/basic.js
+// Products group: BASIC
+// Analogous to the "basic" group entries in NMAP2's mod_res.tbl
+// Covers: temperature, dewpoint, heights, winds
+
+import COLORMAPS from '../config/colormaps.js';
+
+export default {
+
+    'sfc_temp_fill': {
+        label: '2m Temperature (Filled)',
+        group: 'basic',
+        available_for: ['GFS', 'NAM', 'HRRR', 'RAP'],
+        data_keys: ['t2m'],
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.t2m);
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_t2m'] });
+            const cntr  = new apgl.Contour(field, { levels: [32], line_width: 3, color: '#ffffff' });
+            const svg   = apgl.makeColorBar(COLORMAPS['pw_t2m'], {
+                label: '2m Temperature (°F)',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+                ticks: [-40, -20, 0, 20, 40, 60, 80, 100, 120],
+            });
+            return {
+                layers: [
+                    new apgl.PlotLayer('t2m_fill', fill),
+                    new apgl.PlotLayer('t2m_32f',  cntr),
+                ],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({ t2m: field.sampleField(lon, lat) }),
+            };
+        },
+    },
+
+    'sfc_dwpt_fill': {
+        label: '2m Dewpoint (Filled)',
+        group: 'basic',
+        available_for: ['GFS', 'NAM', 'HRRR', 'RAP'],
+        data_keys: ['d2m'],
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.d2m);
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_td2m'] });
+            const svg   = apgl.makeColorBar(COLORMAPS['pw_td2m'], {
+                label: '2m Dewpoint (°F)',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+            });
+            return {
+                layers: [new apgl.PlotLayer('d2m_fill', fill)],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({ d2m: field.sampleField(lon, lat) }),
+            };
+        },
+    },
+
+    '500mb_analysis': {
+        label: '500mb Heights / Wind Speed / Barbs',
+        group: 'basic',
+        available_for: ['GFS', 'NAM', 'HRRR', 'RAP'],
+        data_keys: ['hght_500mb', 'ugrd_500mb', 'vgrd_500mb'],
+        make_layers(data, grid) {
+            const hght  = new apgl.RawScalarField(grid, data.hght_500mb);
+            const wind  = new apgl.RawVectorField(grid, data.ugrd_500mb, data.vgrd_500mb,
+                                                  { relative_to: 'grid' });
+            const wspdData = new Float32Array(data.ugrd_500mb.length);
+            for (let i = 0; i < wspdData.length; i++)
+                wspdData[i] = Math.hypot(data.ugrd_500mb[i], data.vgrd_500mb[i]);
+            const wspd  = new apgl.RawScalarField(grid, wspdData);
+
+            const fill  = new apgl.ContourFill(wspd,  { cmap: COLORMAPS['pw_speed500mb'], opacity: 0.8 });
+            const cntr  = new apgl.Contour(hght, {
+                interval: 6, color: '#000000',
+                line_width: lev => (lev % 60 === 0) ? 3 : 1.5,
+            });
+            const barbs = new apgl.Barbs(wind,  { color: '#000000', thin_fac: 16 });
+            const lbls  = new apgl.ContourLabels(cntr, {
+                text_color: '#ffffff', halo: true,
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            });
+            const svg   = apgl.makeColorBar(COLORMAPS['pw_speed500mb'], {
+                label: '500mb Wind Speed (kts)',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+                ticks: [20, 40, 60, 80, 100, 120, 140],
+            });
+            return {
+                layers: [
+                    new apgl.PlotLayer('500_fill',  fill),
+                    new apgl.PlotLayer('500_cntr',  cntr),
+                    new apgl.PlotLayer('500_barbs', barbs),
+                    new apgl.PlotLayer('500_lbls',  lbls),
+                ],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({
+                    hght: hght.sampleField(lon, lat),
+                    wind: wind.sampleField(lon, lat),
+                }),
+            };
+        },
+    },
+};
+```
+
+```javascript name=src/products/instability.js
+// Products group: INSTABILITY
+// Covers: CAPE, CIN, LI, STP, SCP, EHI, etc.
+
+import COLORMAPS from '../config/colormaps.js';
+
+export default {
+
+    'mlcape_fill': {
+        label: 'MLCAPE (Filled)',
+        group: 'instability',
+        available_for: ['GFS', 'NAM', 'HRRR', 'RAP'],
+        data_keys: ['mlcape'],
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.mlcape);
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_cape'], opacity: 0.85 });
+            const svg   = apgl.makeColorBar(COLORMAPS['pw_cape'], {
+                label: 'MLCAPE (J/kg)',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+            });
+            return {
+                layers: [new apgl.PlotLayer('mlcape_fill', fill)],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({ mlcape: field.sampleField(lon, lat) }),
+            };
+        },
+    },
+
+    'stp_fill': {
+        label: 'Significant Tornado Parameter (Filled)',
+        group: 'instability',
+        available_for: ['GFS', 'NAM', 'HRRR', 'RAP'],
+        data_keys: ['stp'],
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.stp);
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['stp'] });
+            const cntr  = new apgl.Contour(field, { levels: [1, 2, 4, 6, 8], color: '#ffffff', line_width: 2 });
+            const svg   = apgl.makeColorBar(COLORMAPS['stp'], {
+                label: 'STP',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+            });
+            return {
+                layers: [
+                    new apgl.PlotLayer('stp_fill', fill),
+                    new apgl.PlotLayer('stp_cntr', cntr),
+                ],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({ stp: field.sampleField(lon, lat) }),
+            };
+        },
+    },
+};
+```
+
+```javascript name=src/products/raster.js
+// Products group: RASTER
+// Covers: MRMS (multi-sensor QPE, composites), satellite imagery
+
+import COLORMAPS from '../config/colormaps.js';
+
+export default {
+
+    'mrms_cref': {
+        label: 'MRMS Composite Reflectivity',
+        group: 'raster',
+        available_for: ['MRMS'],
+        data_keys: ['cref', 'ptype_mask'],
+        make_layers(data, grid) {
+            const field  = new apgl.RawScalarField(grid, data.cref);
+            const cmaps  = [
+                COLORMAPS['mrms_cref_rain'],
+                COLORMAPS['mrms_cref_snow'],
+                COLORMAPS['mrms_cref_ice'],
+                COLORMAPS['mrms_cref_frzr'],
+            ];
+            const raster = new apgl.Raster(field, { cmap: cmaps, cmap_mask: data.ptype_mask });
+            return {
+                layers: [new apgl.PlotLayer('mrms_cref', raster)],
+                colorbar: cmaps.map((cm, i) =>
+                    apgl.makeColorBar(cm, {
+                        label: ['Rain','Snow','Sleet','Freezing Rain'][i] + ' dBZ',
+                        orientation: 'horizontal', tick_direction: 'bottom',
+                        fontface: 'Trebuchet MS', size_long: 320, size_short: 67,
+                        ticks: [10, 20, 30, 40, 50],
+                    })
+                ),
+            };
+        },
+    },
+};
+```
+
+---
+
+## Updated `DataLoader.js` — Zarr + Compressed JSON
+
+This is the major forward-looking change. The loader becomes format-aware. Zarr handles gridded data; compressed JSON handles point/obs data. The rest of the system doesn't care which format is in use — that's entirely encapsulated here.
+
+```javascript name=src/DataLoader.js
+// Runtime data loader.
+// Supports two formats going forward:
+//   - Zarr (gridded / raster data)         — via zarr.js / zarrita
+//   - Compressed JSON (point / obs data)   — gzip'd JSON, decoded client-side
+//
+// Legacy binary (.bin.gz) is also supported during transition.
+
+import * as zarr from 'zarr';            // https://github.com/gzuidhof/zarr.js
+// OR: import * as zarrita from 'zarrita'; // https://github.com/manzt/zarrita.js
+
+import DATA_SOURCES from './config/datasources.js';
+
+// ─── Zarr loader ────────────────────────────────────────────────────────────
+async function loadZarrVariable(storeUrl, variablePath) {
+    // storeUrl: URL to the zarr store root (e.g. 'data/gfs.2025030200.zarr')
+    // variablePath: path within the store (e.g. 'hgt_500mb')
+    const store = new zarr.HTTPStore(storeUrl);
+    const arr   = await zarr.openArray({ store, path: variablePath, mode: 'r' });
+    const raw   = await arr.getRaw();           // returns a TypedArray (Float32/Int16/etc.)
+    return new Float32Array(raw.data.buffer);   // normalize to Float32 for autumnplot-gl
+}
+
+async function loadZarrStore(storeUrl, variableNames) {
+    // Load multiple variables from one zarr store in parallel
+    const results = await Promise.all(
+        variableNames.map(async v => [v, await loadZarrVariable(storeUrl, v)])
+    );
+    return Object.fromEntries(results);
+}
+
+// ─── Compressed JSON loader ──────────────────────────────────────────────────
+async function loadCompressedJSON(url) {
+    const resp      = await fetch(url);
+    const buffer    = await resp.arrayBuffer();
+    const bytes     = new Uint8Array(buffer);
+    const inflated  = pako.inflate(bytes, { to: 'string' });  // pako decompresses gzip
+    return JSON.parse(inflated);
+}
+
+// ─── Legacy binary loader (kept for transition period) ──────────────────────
+async function loadBinaryGz(url, dtype = 'float16') {
+    const resp     = await fetch(url);
+    const bytes    = new Uint8Array(await (await resp.blob()).arrayBuffer());
+    const inflated = pako.inflate(bytes);
+    if (dtype === 'uint8')   return inflated;
+    return new float16.Float16Array(new Float32Array(inflated.buffer));
+}
+
+// ─── Main entry point ────────────────────────────────────────────────────────
+/**
+ * Load all data variables required by a product suite.
+ *
+ * @param {string}   sourceId   - Key into DATA_SOURCES (e.g. 'GFS')
+ * @param {string[]} dataKeys   - Logical variable names (e.g. ['hght_500mb', 'ugrd_500mb'])
+ * @param {object}   timeParams - { cycle, fhr, valid_time }
+ * @param {object}   varMap     - Maps logical key → store path (e.g. { hght_500mb: 'hgt_500mb' })
+ * @returns {object}            - { key: TypedArray | object[] }
+ */
+async function loadData(sourceId, dataKeys, timeParams, varMap = {}) {
+    const src = DATA_SOURCES[sourceId];
+    if (!src) throw new Error(`Unknown data source: ${sourceId}`);
+
+    const result = {};
+
+    if (src.format === 'zarr') {
+        // Resolve store URL from template
+        const storeUrl = resolveTemplate(src.url_template, timeParams);
+        // Map logical keys to zarr variable paths
+        const storeVars = dataKeys.map(k => varMap[k] ?? k);
+        const loaded    = await loadZarrStore(storeUrl, storeVars);
+        // Re-key back to logical names
+        dataKeys.forEach((k, i) => { result[k] = loaded[storeVars[i]]; });
+
+    } else if (src.format === 'compressed_json') {
+        for (const key of dataKeys) {
+            const url      = resolveTemplate(src.url_template, { ...timeParams, variable: varMap[key] ?? key });
+            result[key]    = await loadCompressedJSON(url);
+        }
+
+    } else if (src.format === 'binary_gz') {
+        // Legacy path — kept during transition
+        for (const key of dataKeys) {
+            const url   = resolveTemplate(src.url_template, { ...timeParams, variable: varMap[key] ?? key });
+            let   data  = await loadBinaryGz(url, src.dtype);
+            if (src.wrap_lon) data = applyLonWrap(data, src.grid());
+            result[key] = data;
+        }
+    }
+
+    return result;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function resolveTemplate(template, params) {
+    return template
+        .replace('{cycle}',      params.cycle      ?? '')
+        .replace('{fhr}',        String(params.fhr ?? '').padStart(3, '0'))
+        .replace('{valid_time}', params.valid_time ?? '')
+        .replace('{variable}',   params.variable   ?? '');
+}
+
+function applyLonWrap(data, grid) {
+    const padded = new float16.Float16Array(grid.ni * grid.nj);
+    for (let j = 0; j < grid.nj; j++) {
+        const s = (grid.ni - 1) * j;
+        const p = grid.ni * j;
+        padded.set(data.subarray(s, s + grid.ni - 1), p);
+        padded[p + grid.ni - 1] = data[s];
+    }
+    return padded;
+}
+
+export { loadData };
+```
+
+---
+
+## Updated `datasources.js` — Format-Aware
+
+```javascript name=src/config/datasources.js
+// Analogous to NMAP2's datatype.tbl.
+// format: 'zarr' | 'compressed_json' | 'binary_gz'
+
+const DATA_SOURCES = {
+
+    'GFS': {
+        label: 'GFS',
+        type: 'gridded',
+        format: 'zarr',
+        // Zarr store per model run; variables live inside the store
+        url_template: 'data/gfs.{cycle}.zarr',
+        grid: () => new apgl.PlateCarreeGrid(1441, 721, 0, -90, 360, 90),
+        wrap_lon: true,
+        available_fhrs: [0, 6, 12, 18, 24, 30, 36, 42, 48],
+    },
+
+    'NAM': {
+        label: 'NAM',
+        type: 'gridded',
+        format: 'zarr',
+        url_template: 'data/nam.{cycle}.zarr',
+        grid: () => new apgl.LambertGrid.fromLLCornerLonLat(/* ... */),
+        wrap_lon: false,
+        available_fhrs: [0, 3, 6, 9, 12, 15, 18, 21, 24, 36, 48, 60],
+    },
+
+    'HRRR': {
+        label: 'HRRR',
+        type: 'gridded',
+        format: 'zarr',
+        url_template: 'data/hrrr.{cycle}.zarr',
+        grid: () => new apgl.LambertGrid.fromLLCornerLonLat(/* ... */),
+        wrap_lon: false,
+        available_fhrs: Array.from({ length: 19 }, (_, i) => i),  // 0–18
+    },
+
+    'MRMS': {
+        label: 'MRMS',
+        type: 'gridded_raster',
+        format: 'zarr',
+        url_template: 'data/mrms.{valid_time}.zarr',
+        grid: () => new apgl.PlateCarreeGrid(7000, 3500, -129.995, 20.005, -60.005, 54.995),
+        wrap_lon: false,
+    },
+
+    'SURFACE_OBS': {
+        label: 'Surface Observations',
+        type: 'point',
+        format: 'compressed_json',
+        // Each file is a gzip-compressed JSON array of obs
+        url_template: 'data/surface_{valid_time}.json.gz',
+    },
+
+    // ── Legacy sources (binary .bin.gz) — kept during transition ──
+    'GFS_LEGACY': {
+        label: 'GFS (legacy binary)',
+        type: 'gridded',
+        format: 'binary_gz',
+        url_template: 'data/gfs.bin.gz',
+        dtype: 'float16',
+        grid: () => new apgl.PlateCarreeGrid(1441, 721, 0, -90, 360, 90),
+        wrap_lon: true,
+    },
+};
+
+export default DATA_SOURCES;
+```
+
+---
+
+## Complete Directory Layout (Updated)
+
+Here is the full picture of where everything lives:
+
+```
+web-nmap/
+├── public/
+│   ├── index.html
+│   ├── main.js               ← thin: map init + UI wiring only
+│   └── data/                 ← served data files
+│       ├── gfs.2025030200.zarr/
+│       ├── hrrr.2025030200.zarr/
+│       ├── mrms.202503021800.zarr/
+│       └── surface_20250302_1800.json.gz
+│
+├── src/
+│   ├── index.js              ← webpack entry point
+│   │
+│   ├── config/               ← LAYER 1: Configuration (replaces NMAP2 tables)
+│   │   ├── datasources.js    ← datatype.tbl
+│   │   ├── colormaps.js      ← colormap table files
+│   │   ├── stationmodels.js  ← prmlst.tbl
+│   │   └── views.js          ← mod_res.tbl grouping + view registry
+│   │
+│   ├── products/             ← LAYER 1: Product definitions (replaces restore files)
+│   │   ├── index.js          ← barrel: merges all groups → PRODUCT_SUITES
+│   │   ├── basic.js          ← temperature, dewpoint, heights, winds
+│   │   ├── instability.js    ← CAPE, CIN, LI, STP, SCP, EHI
+│   │   ├── moisture.js       ← PWat, RH, mixing ratio
+│   │   ├── shear.js          ← bulk shear, SRH, storm-relative winds
+│   │   ├── lift.js           ← K-index, TT, lifted index
+│   │   ├── precipitation.js  ← QPF, snow, PTYPE, precip type
+│   │   ├── composite.js      ← HREF paintball, SPC composite fields
+│   │   ├── raster.js         ← MRMS, satellite
+│   │   └── point.js          ← surface obs station models
+│   │
+│   ├── DataLoader.js         ← LAYER 2: zarr / compressed JSON / legacy binary fetch
+│   ├── LayerBuilder.js       ← LAYER 2: (optional) shared layer construction helpers
+│   └── ViewManager.js        ← LAYER 2: active layers, time stepping, MultiPlotLayer
+│
+├── package.json
+├── webpack.config.js
+└── tsconfig.json
+```
+
+---
+
+## The Concept Map: NMAP2 → web-NMAP
+
+Here is the consolidated, updated translation table:
+
+| NMAP2 File / Concept | web-NMAP Equivalent | Notes |
+|---|---|---|
+| `datatype.tbl` | `src/config/datasources.js` | Format is now `'zarr'` or `'compressed_json'` instead of GEMPAK file paths |
+| `mod_res.tbl` (group + availability columns) | `src/config/views.js` | Maps group names + model availability to product IDs |
+| Restore file (e.g. `gfs_500mb.nmap2`) | One entry in `src/products/basic.js` | One JS object per product; grouped by file |
+| `prmlst.tbl` | `src/config/stationmodels.js` | Named station model configs, referenced by `point.js` products |
+| Colormap table files | `src/config/colormaps.js` | Named `ColorMap` objects, re-used across product files |
+| GEMPAK binary grid file | Zarr store (`.zarr/` directory or URL) | One store per model run; variables are arrays inside |
+| GEMPAK surface file (SFCOA, etc.) | Compressed JSON (`.json.gz`) | Array of obs objects, gzip'd |
+| NMAP2 "restore group" | `products/*.js` file | `basic.js`, `instability.js`, etc. — one file per group |
+| NMAP2 panel | `VIEW_REGISTRY` entry in `views.js` | Combines source + product + time into a renderable unit |
+| `MultiPlotLayer.setActiveKey()` | Time slider in `ViewManager.js` | Drives frame stepping across forecast hours |
+
+---
+
+## One Important Design Rule to Emphasize
+
+The reason this decomposition works cleanly is a strict **separation of concerns** enforced by this rule:
+
+> **Product files (`products/*.js`) know about autumnplot-gl and colormaps, but know NOTHING about data fetching, URLs, or time.**  
+> **`DataLoader.js` knows about URLs and formats, but knows NOTHING about autumnplot-gl rendering.**  
+> **`views.js` connects the two, but contains no rendering or fetching logic itself.**
+
+This is exactly what NMAP2's table separation achieved in C/Fortran — and it's what prevents your codebase from collapsing into one giant `main.js` again as you add dozens of products and data sources.
+
+Would you like me to create a PR in `wblumberg/web-nmap` that sets up this directory skeleton (empty files with JSDoc stubs), so you have the scaffold in place to fill in progressively?

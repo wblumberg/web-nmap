@@ -255,8 +255,8 @@ async function makeObsLayers() {
         tmpf: {type: 'number', pos: 'ul', halo: false, color: '#cc0000', formatter: val => val === null ? '' : val.toFixed(0)},
         dwpf: {type: 'number', pos: 'll', halo: false, color: '#00aa00', formatter: val => val === null ? '' : val.toFixed(0)},
         wind: {type: 'barb', pos: 'c', color: '#ffffff'},
-        preswx: {type: 'symbol', pos: 'cl', halo: false, color: '#ff00ff'},
-        skyc: {type: 'symbol', pos: 'c'},
+        // preswx: {type: 'symbol', pos: 'cl', halo: false, color: '#ff00ff'},
+        // skyc: {type: 'symbol', pos: 'c'},
     };
     const station_plot = new apgl.StationPlot(obs_field, {config: station_plot_locs, thin_fac: 8, font_size: 14, font_url_template: "font/{fontstack}/{range}.pbf"});
     const station_plot_layer = new apgl.PlotLayer('station-plots', station_plot);

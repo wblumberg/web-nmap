@@ -48,5 +48,15 @@ module.exports = {
         },
         compress: true,
         port: 9000,
+        proxy: [
+            {
+                context: ['/api'],
+                target: 'http://localhost:8000',
+            }
+        ]
     },
 };
+
+// Add this inside devServer: {}
+devServer: {
+}
