@@ -186,6 +186,7 @@ MESO_SOURCE.variable_map = {
 # Values: 'gridded_analysis', 'gridded_forecast', 'point_obs',
 #         'point_events', 'geometry_polygon', 'geometry_line'
 MESO_SOURCE.data_category = "gridded_analysis"  # TODO: change this
+MESO_SOURCE.source_type = "ANALYSIS"
 
 
 # ══════════════════════════════════════════════════════════════════════════════

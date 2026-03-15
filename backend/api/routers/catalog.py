@@ -50,6 +50,7 @@ async def list_sources():
                 "source_id"    : src.source_id,
                 "label"        : src.label,
                 "data_category": getattr(src, 'data_category', 'unknown'),
+                "source_type"  : getattr(src, 'source_type', 'unknown'),
                 "has_cycles"   : src.cycle_regex is not None,
                 "has_fhrs"     : src.fhr_regex   is not None,
             }

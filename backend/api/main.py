@@ -8,6 +8,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 from .routers import catalog, lightning, observations, timematch, events, points, gridded, geometries
 from .watcher import start_watching
 
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pathlib import Path
+
 _observer = None
 
 
@@ -56,15 +60,23 @@ app.include_router(points.router,       prefix="/api/v1/points")
 app.include_router(gridded.router,      prefix="/api/v1/gridded")
 app.include_router(geometries.router,   prefix="/api/v1/geometries")
 
+PUBLIC_DIR = Path(__file__).resolve().parents[2] / "frontend" / "public"
+
+print("Serving: ", PUBLIC_DIR)
+# Serve everything in frontend/public at the web root
+app.mount("/", StaticFiles(directory=str(PUBLIC_DIR), html=True), name="public")
+
+# Serve the SPA entrypoint
 @app.get("/")
-def read_root():
-    return {"message": "API is running"}
+async def index():
+    return FileResponse(PUBLIC_DIR / "index.html")
 
 @app.get("/api/v1/health")
 def health():
     return {"status": "ok"}
 
-@app.get("/metrics")
-def get_metrics():
+#@app.get("/metrics")
+#def get_metrics():
     # ... logic to return metrics
-    pass
+#    pass
+

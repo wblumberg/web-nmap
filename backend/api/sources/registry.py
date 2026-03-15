@@ -48,9 +48,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        # Values: 'gridded_analysis', 'gridded_forecast', 'point_obs',
-#         'point_events', 'geometry_polygon', 'geometry_line'
-        #data_category  = "gridded_analysis",
+        source_type = "RADAR_MOSAIC",
+        data_category = "gridded_imagery",
     ),
 
     # ── RAP Analysis (GRIB2) ──────────────────────────────────────────────────
@@ -60,9 +59,6 @@ SOURCES: dict[str, FilesystemSource] = {
         label_        = "RAP Model Analysis/Forecast",
         data_dir      = DATA_ROOT / "grid/rap",
         filename_glob = "rap.t*.wrfprsf*.grib2",
-        # Extract valid time: compute as cycle + fhr
-        # For simplicity here we parse only the cycle and treat fhr=0 as the time.
-        # A real implementation would add fhr hours to cycle time.
         time_regex    = (
             r"rap\.t"
             r"(?P<hour>\d{2})z"
@@ -72,7 +68,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<chour>\d{2})z"
         ),
         fhr_regex     = r"wrfprsf(?P<fhr>\d{2})",
-        #data_category = "gridded_forecast",
+        source_type = "MODEL_DET",
+        data_category = "gridded_forecast",
     ),
 
     # ── Lightning Strikes ─────────────────────────────────────────────────────
@@ -87,9 +84,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})\.(?P<month>\d{2})\.(?P<day>\d{2})"
             r"\.(?P<hour>\d{2})\.(?P<minute>\d{2})"
         ),
-        # Values: 'gridded_analysis', 'gridded_forecast', 'point_obs',
-#         'point_events', 'geometry_polygon', 'geometry_line'
-        #data_category = "point_obs"
+        source_type = "MISC",
+            data_category = "point_obs",
     ),
 
     # ── Surface Observations ─────────────────────────────────────────────────
@@ -104,7 +100,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
+        source_type = "OBS_SURFACE",
+        data_category = "point_obs",
     ),
 
     # ── West Texas Mesonet Observations ─────────────────────────────────────
@@ -119,7 +116,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"\.(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
+        source_type = "OBS_SURFACE",
+        data_category = "point_obs",
     ),
 
 
@@ -135,7 +133,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
+        source_type = "OBS_SURFACE",
+        data_category = "point_obs"
     ),
 
     # ── Ship Observations ─────────────────────────────────────────────────
@@ -150,7 +149,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
+        source_type = "OBS_SURFACE",
+        data_category = "point_obs"
     ),
 
     # ── AQI Observations ─────────────────────────────────────────────────
@@ -165,6 +165,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
+        source_type = "OBS_SURFACE",
+        data_category = "point_obs"
     ),
 
     # ── Synoptic Radiosonde (00/12 UTC) Observations ─────────────────────────────────────────────────
@@ -179,7 +181,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
+        source_type = "OBS_UPPERAIR",
+        data_category = "point_obs"
     ),
 
     # ── NEXRAD VAD Observations ─────────────────────────────────────────────────
@@ -194,7 +197,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
+        source_type = "OBS_UPPERAIR",
+        data_category = "point_obs"
     ),
 
     # ── ACARS Observations ─────────────────────────────────────────────────
@@ -209,7 +213,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
+        source_type = "OBS_UPPERAIR",
+        data_category = "point_obs"
     ),
 
     # ── RECON Observations ─────────────────────────────────────────────────
@@ -224,22 +229,8 @@ SOURCES: dict[str, FilesystemSource] = {
             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
             r"_(?P<hour>\d{2})(?P<minute>\d{2})"
         ),
-        #data_category = "point_obs"
-    ),
-
-    # ── GEMPAK gridded — RAP (one file per cycle, multiple fhrs inside) ───────
-    # Files: rap_2025030218.gem  or  2025030218.gem
-    "GEM_RAP": GempakFilesystemSource(
-        source_id_        = "GEM_RAP",
-        label_            = "RAP (GEMPAK Grid)",
-        data_dir          = "/data/gempak/model/rap",
-        filename_glob     = "*_rap13km.gem",
-        time_regex        = (r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-                             r"(?P<hour>\d{2})_rap13km.gem"),
-        cycle_regex       = (r"(?P<cyear>\d{4})(?P<cmonth>\d{2})(?P<cday>\d{2})"
-                             r"(?P<chour>\d{2})_rap13km.gem"),
-        fhr_regex         = None,           # fhrs read from gdinfo inside the file
-        gempak_file_type  = 'grid',
+        source_type = "OBS_UPPERAIR",
+        data_category = "point_obs"
     ),
 
     # ── GEMPAK gridded — GFS (one fhr per file, NAWIPS naming) ────────────────
@@ -256,48 +247,7 @@ SOURCES: dict[str, FilesystemSource] = {
                              r"(?P<cyear>\d{4})(?P<cmonth>\d{2})(?P<cday>\d{2})\."
                              r"(?P<chour>\d{2})"),
         fhr_regex         = r"f(?P<fhr>\d{3})",
-    ),
-
-    # ── GEMPAK surface — daily files (one day per file, all stations) ─────────
-    # Files: 20250302_sfc.gem  (contains obs every 20-60 min all day)
-    "GEM_SURFACE": GempakFilesystemSource(
-        source_id_        = "GEM_SURFACE",
-        label_            = "Surface Obs (GEMPAK)",
-        data_dir          = "/data/gempak/surface",
-        filename_glob     = "*_sao.gem",
-        time_regex        = (r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-                             r"_sao\.gem"),
-        gempak_file_type  = 'surface',
-        obs_time_step_min = 60,    # typical METAR interval
-        window_minutes    = 30,    # ±30 min window for time matching
-    ),
-
-    # ── GEMPAK surface — hourly files ─────────────────────────────────────────
-    # Files: 2025030218_sfc.gem  (one file per synoptic hour)
-    "GEM_SURFACE_HOURLY": GempakFilesystemSource(
-        source_id_        = "GEM_SURFACE_HOURLY",
-        label_            = "Surface Obs Hourly (GEMPAK)",
-        data_dir          = DATA_ROOT / "gempak" / "surface_hourly",
-        filename_glob     = "*.gem",
-        time_regex        = (r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-                             r"(?P<hour>\d{2})_sfc\.gem"),
-        gempak_file_type  = 'surface',
-        obs_time_step_min = 60,
-        window_minutes    = 30,
-    ),
-
-    # ── GEMPAK sounding — daily files ─────────────────────────────────────────
-    # Files: 20250302_snds.gem  (00Z and 12Z soundings for the day)
-    "GEM_SOUNDING": GempakFilesystemSource(
-        source_id_        = "GEM_SOUNDING",
-        label_            = "Soundings (GEMPAK)",
-        data_dir          = "/data/gempak/upperair",
-        filename_glob     = "*_upa.gem",
-        time_regex        = (r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-                             r"_upa\.gem"),
-        gempak_file_type  = 'sounding',
-        obs_time_step_min = 720,   # 12-hour sounding interval
-        window_minutes    = 60,    # ±60 min window (soundings drift from launch time)
+        source_type = "MODEL_DET",
     ),
 
     "MESOANALYSIS_GRID": MESO_SOURCE,

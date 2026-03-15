@@ -42,6 +42,8 @@ class FilesystemSource(DataSource):
         time_regex    : str,
         cycle_regex   : str | None = None,
         fhr_regex     : str | None = None,
+        source_type   : str = 'unknown',
+        data_category : str = 'unknown',
     ):
         self._source_id    = source_id_
         self._label        = label_
@@ -49,10 +51,6 @@ class FilesystemSource(DataSource):
         self._glob         = filename_glob
 
         # ── Save the raw regex strings as public attributes ───────────────────
-        # These are read by catalog.py to determine whether a source is a
-        # forecast source (has_cycles / has_fhrs flags in /catalog/sources).
-        # Previously only the compiled versions were saved, so src.cycle_regex
-        # raised AttributeError.
         self.time_regex  = time_regex
         self.cycle_regex = cycle_regex   # None for analysis/obs sources
         self.fhr_regex   = fhr_regex     # None for analysis/obs sources
@@ -65,10 +63,10 @@ class FilesystemSource(DataSource):
         # Cache: maps key → Path, populated lazily by list_times()
         self._cache: dict[str, Path] = {}
 
-        # Optional attributes set externally by registry.py or template files
+        # Optional attributes set externally or via constructor
         self.variable_map  : dict[str, str] = {}
-        self.data_category : str            = 'unknown'
-        self.source_type   : str            = 'unknown'
+        self.data_category : str = data_category
+        self.source_type   : str = source_type
 
     # ── DataSource interface ──────────────────────────────────────────────────
 

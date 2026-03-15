@@ -1,9 +1,10 @@
 node_modules/
 dist/
-public/data/surface*
-public/data/mrms*
-public/data/gfs*
-public/data/href*
-public/api_keys.js
+surface*
+mrms*
+gfs*
+href*
+*.pyc
+api_keys.js
 .DS_Store
 *.log

@@ -186,7 +186,7 @@ NEXRAD_VAD.variable_map = {
 # Values: 'gridded_analysis', 'gridded_forecast', 'point_obs',
 #         'point_events', 'geometry_polygon', 'geometry_line'
 NEXRAD_VAD.data_category = "point_obs"  # TODO: change this
-
+NEXRAD_VAD.source_type   = "OBS_UPPERAIR"  # TODO: change this if needed
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECTION 3: Register the source in registry.py
