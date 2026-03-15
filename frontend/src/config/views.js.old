@@ -1,0 +1,362 @@
+/**
+ * views.js — The web-NMAP View Registry
+ *
+ * Analogous to NMAP2's mod_res.tbl, this file is the central registry of
+ * everything the user can select and display. It answers three questions:
+ *
+ *   1. What data source does this view use?         (source_id → datasources.js)
+ *   2. What product/visualization does it use?      (product_id → products/)
+ *   3. What time parameters does it carry?          (time + available_fhrs)
+ *
+ * It does NOT contain rendering code (that's in products/)
+ * It does NOT contain fetch code (that's in DataLoader.js)
+ *
+ * Structure of a View entry:
+ * {
+ *   label       : string       — display name shown in the UI dropdown
+ *   group       : string       — logical group (drives UI grouping/tabs)
+ *   source_id   : string|null  — key into DATA_SOURCES (null = synthetic/no fetch)
+ *   product_id  : string       — key into PRODUCT_SUITES
+ *   maxZoom     : number       — map max zoom level for this view
+ *   time        : object       — current time parameters { cycle, fhr, valid_time }
+ *   var_map     : object       — maps product data_keys → actual store variable names
+ *   available_fhrs: number[]   — forecast hours available for time stepping (if applicable)
+ * }
+ */
+
+import DATA_SOURCES   from './datasources.js';
+import PRODUCT_SUITES from '../products/index.js';
+import { loadData }   from '../DataLoader.js';
+
+// ─── Group metadata ──────────────────────────────────────────────────────────
+// Defines the display order and labels for the UI group selectors.
+// Analogous to the group-name column in mod_res.tbl.
+export const VIEW_GROUPS = {
+    'synthetic':     { label: 'Synthetic / Demo',        order: 0 },
+    'basic':         { label: 'Basic Fields',            order: 1 },
+    'instability':   { label: 'Instability',             order: 2 },
+    'moisture':      { label: 'Moisture',                order: 3 },
+    'lift':          { label: 'Lift Indices',            order: 4 },
+    'shear':         { label: 'Shear / Kinematics',      order: 5 },
+    'precipitation': { label: 'Precipitation',           order: 6 },
+    'composite':     { label: 'Ensemble / Composite',    order: 7 },
+    'raster':        { label: 'Raster / Imagery',        order: 8 },
+    'point':         { label: 'Observations',            order: 9 },
+};
+
+// ─── Helper: build a makeLayers() function from source + product + time ──────
+//
+// This is the glue layer. It reads source_id → DataLoader → ProductSuite.
+// Every gridded view uses this pattern; special cases (synthetic, point) override it.
+//
+function makeGriddedLayersFn(viewDef) {
+    return async function() {
+        const src    = DATA_SOURCES[viewDef.source_id];
+        const suite  = PRODUCT_SUITES[viewDef.product_id];
+
+        if (!src)   throw new Error(`Unknown data source: ${viewDef.source_id}`);
+        if (!suite) throw new Error(`Unknown product suite: ${viewDef.product_id}`);
+
+        const data = await loadData(
+            viewDef.source_id,
+            suite.data_keys,
+            viewDef.time,
+            viewDef.var_map ?? {}
+        );
+
+        const grid = src.grid();
+        return suite.make_layers(data, grid);
+    };
+}
+
+// ─── The View Registry ───────────────────────────────────────────────────────
+export const VIEW_REGISTRY = {
+
+    // ════════════════════════════════════════════════════════════════════════
+    // GROUP: synthetic  (no data files needed — for demo / development)
+    // ════════════════════════════════════════════════════════════════════════
+
+    'synthetic_500mb': {
+        label:       'Synthetic 500mb (Demo)',
+        group:       'synthetic',
+        source_id:   null,          // no data fetch
+        product_id:  'synthetic_500mb',
+        maxZoom:     7,
+        time:        {},
+        // Synthetic views call make_layers directly with no data
+        makeLayers() {
+            return PRODUCT_SUITES['synthetic_500mb'].make_layers({}, null);
+        },
+    },
+
+    // ════════════════════════════════════════════════════════════════════════
+    // GROUP: basic
+    // ════════════════════════════════════════════════════════════════════════
+
+    'gfs_t2m': {
+        label:         'GFS — 2m Temperature',
+        group:         'basic',
+        source_id:     'GFS',
+        product_id:    'sfc_temp_fill',
+        maxZoom:       7,
+        available_fhrs: [0, 6, 12, 18, 24, 30, 36, 42, 48],
+        time:          { cycle: '2025030200', fhr: 0 },
+        // Maps product's logical data_key names → zarr variable paths in the GFS store
+        var_map:       { t2m: 'tmp_2m' },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    'nam_t2m': {
+        label:         'NAM — 2m Temperature',
+        group:         'basic',
+        source_id:     'NAM',
+        product_id:    'sfc_temp_fill',
+        maxZoom:       7,
+        available_fhrs: [0, 3, 6, 9, 12, 18, 24, 36, 48, 60],
+        time:          { cycle: '2025030200', fhr: 0 },
+        var_map:       { t2m: 'tmp_2m' },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    'hrrr_t2m': {
+        label:         'HRRR — 2m Temperature',
+        group:         'basic',
+        source_id:     'HRRR',
+        product_id:    'sfc_temp_fill',
+        maxZoom:       8,
+        available_fhrs: Array.from({ length: 19 }, (_, i) => i),
+        time:          { cycle: '2025030200', fhr: 0 },
+        var_map:       { t2m: 'tmp_2m' },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    'gfs_500mb': {
+        label:         'GFS — 500mb Heights / Wind',
+        group:         'basic',
+        source_id:     'GFS',
+        product_id:    '500mb_analysis',
+        maxZoom:       7,
+        available_fhrs: [0, 6, 12, 18, 24, 30, 36, 42, 48],
+        time:          { cycle: '2025030200', fhr: 0 },
+        var_map:       {
+            hght_500mb: 'hgt_500mb',
+            ugrd_500mb: 'ugrd_500mb',
+            vgrd_500mb: 'vgrd_500mb',
+        },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    'nam_500mb': {
+        label:         'NAM — 500mb Heights / Wind',
+        group:         'basic',
+        source_id:     'NAM',
+        product_id:    '500mb_analysis',
+        maxZoom:       7,
+        available_fhrs: [0, 3, 6, 9, 12, 18, 24, 36, 48, 60],
+        time:          { cycle: '2025030200', fhr: 0 },
+        var_map:       {
+            hght_500mb: 'hgt_500mb',
+            ugrd_500mb: 'ugrd_500mb',
+            vgrd_500mb: 'vgrd_500mb',
+        },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    // ════════════════════════════════════════════════════════════════════════
+    // GROUP: instability
+    // ════════════════════════════════════════════════════════════════════════
+
+    'gfs_mlcape': {
+        label:         'GFS — MLCAPE',
+        group:         'instability',
+        source_id:     'GFS',
+        product_id:    'mlcape_fill',
+        maxZoom:       7,
+        available_fhrs: [0, 6, 12, 18, 24, 30, 36, 42, 48],
+        time:          { cycle: '2025030200', fhr: 0 },
+        var_map:       { mlcape: 'cape_ml' },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    'hrrr_mlcape': {
+        label:         'HRRR — MLCAPE',
+        group:         'instability',
+        source_id:     'HRRR',
+        product_id:    'mlcape_fill',
+        maxZoom:       8,
+        available_fhrs: Array.from({ length: 19 }, (_, i) => i),
+        time:          { cycle: '2025030200', fhr: 0 },
+        var_map:       { mlcape: 'cape_ml' },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    'hrrr_stp': {
+        label:         'HRRR — Significant Tornado Parameter',
+        group:         'instability',
+        source_id:     'HRRR',
+        product_id:    'stp_fill',
+        maxZoom:       8,
+        available_fhrs: Array.from({ length: 19 }, (_, i) => i),
+        time:          { cycle: '2025030200', fhr: 0 },
+        var_map:       { stp: 'stp_fixed' },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    // ════════════════════════════════════════════════════════════════════════
+    // GROUP: composite  (ensemble / multi-model products)
+    // ════════════════════════════════════════════════════════════════════════
+
+    'href_uh_paintball': {
+        label:         'HREF — UH Max Paintball',
+        group:         'composite',
+        source_id:     'HREF',
+        product_id:    'href_uh_paintball',
+        maxZoom:       7,
+        available_fhrs: [12, 24, 36, 48],
+        time:          { cycle: '2023051100', fhr: 36 },
+        // HREF uses per-variable file URLs; var_map fragments get substituted
+        // into the {variable} slot of the url_template in datasources.js
+        var_map:       {
+            uh_paintball: 'mxuphl5000_2000m.086400.pb75',
+            uh_nh_prob:   'mxuphl5000_2000m.nh_max.086400_p99.85_0040km',
+        },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    // ════════════════════════════════════════════════════════════════════════
+    // GROUP: raster  (MRMS, satellite)
+    // ════════════════════════════════════════════════════════════════════════
+
+    'mrms_cref': {
+        label:         'MRMS — Composite Reflectivity',
+        group:         'raster',
+        source_id:     'MRMS',
+        product_id:    'mrms_cref',
+        maxZoom:       8.5,
+        time:          { valid_time: '202503021800' },
+        var_map:       {
+            cref:       'cref',
+            ptype_mask: 'ptype',
+        },
+        get makeLayers() { return makeGriddedLayersFn(this); },
+    },
+
+    // ════════════════════════════════════════════════════════════════════════
+    // GROUP: point  (observations)
+    // ════════════════════════════════════════════════════════════════════════
+
+    'surface_obs_standard': {
+        label:         'Surface Obs — Standard Model',
+        group:         'point',
+        source_id:     'SURFACE_OBS',
+        product_id:    'surface_obs_standard',
+        maxZoom:       8.5,
+        time:          { valid_time: '20250302_1800' },
+        // Point products don't use a grid; var_map maps the data_key
+        // to the JSON file URL template variable
+        var_map:       { obs_json: '' },
+        async makeLayers() {
+            const data  = await loadData(
+                this.source_id,
+                PRODUCT_SUITES[this.product_id].data_keys,
+                this.time,
+                this.var_map
+            );
+            // Point products receive null for grid
+            return PRODUCT_SUITES[this.product_id].make_layers(data, null);
+        },
+    },
+
+    'surface_obs_dewpoint': {
+        label:         'Surface Obs — Dewpoint Model',
+        group:         'point',
+        source_id:     'SURFACE_OBS',
+        product_id:    'surface_obs_dewpoint',  // a different station model from point.js
+        maxZoom:       8.5,
+        time:          { valid_time: '20250302_1800' },
+        var_map:       { obs_json: '' },
+        async makeLayers() {
+            const data = await loadData(
+                this.source_id,
+                PRODUCT_SUITES[this.product_id].data_keys,
+                this.time,
+                this.var_map
+            );
+            return PRODUCT_SUITES[this.product_id].make_layers(data, null);
+        },
+    },
+};
+
+// ─── Query helpers ────────────────────────────────────────────────────────────
+// These are used by the UI (main.js) to build grouped menus and drive
+// time-stepping controls. main.js never needs to read the raw registry directly.
+
+/**
+ * Returns all views in a given group, sorted by label.
+ * Used by the UI to build the grouped dropdown or tabbed selector.
+ *
+ * @param {string} group - e.g. 'basic', 'instability'
+ * @returns {{ id: string, label: string }[]}
+ */
+export function getViewsByGroup(group) {
+    return Object.entries(VIEW_REGISTRY)
+        .filter(([, v]) => v.group === group)
+        .map(([id, v]) => ({ id, label: v.label }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
+ * Returns all views available for a specific data source.
+ * Useful for building a "what can I see for GFS right now?" selector.
+ *
+ * @param {string} sourceId - e.g. 'GFS', 'HRRR'
+ * @returns {{ id: string, label: string, group: string }[]}
+ */
+export function getViewsForSource(sourceId) {
+    return Object.entries(VIEW_REGISTRY)
+        .filter(([, v]) => v.source_id === sourceId)
+        .map(([id, v]) => ({ id, label: v.label, group: v.group }))
+        .sort((a, b) => a.group.localeCompare(b.group) || a.label.localeCompare(b.label));
+}
+
+/**
+ * Returns the available forecast hours for a view, or [] if not applicable.
+ * Used to configure the time-step slider/buttons in the UI.
+ *
+ * @param {string} viewId - key into VIEW_REGISTRY
+ * @returns {number[]}
+ */
+export function getAvailableFhrs(viewId) {
+    return VIEW_REGISTRY[viewId]?.available_fhrs ?? [];
+}
+
+/**
+ * Updates the active forecast hour for a view and returns a new makeLayers
+ * function bound to the new time. Leaves the registry entry's `time` object
+ * mutated (suitable for single-panel use; clone if you need multi-panel).
+ *
+ * @param {string} viewId - key into VIEW_REGISTRY
+ * @param {number} fhr    - forecast hour to activate
+ */
+export function setViewFhr(viewId, fhr) {
+    const view = VIEW_REGISTRY[viewId];
+    if (!view) throw new Error(`Unknown view: ${viewId}`);
+    if (!view.available_fhrs?.includes(fhr))
+        throw new Error(`fhr ${fhr} not available for view ${viewId}`);
+    view.time = { ...view.time, fhr };
+}
+
+/**
+ * Returns all groups that have at least one registered view,
+ * sorted by the order defined in VIEW_GROUPS.
+ * Used to build the group tabs/headers in the UI.
+ *
+ * @returns {{ id: string, label: string }[]}
+ */
+export function getActiveGroups() {
+    const usedGroups = new Set(Object.values(VIEW_REGISTRY).map(v => v.group));
+    return Object.entries(VIEW_GROUPS)
+        .filter(([id]) => usedGroups.has(id))
+        .sort(([, a], [, b]) => a.order - b.order)
+        .map(([id, meta]) => ({ id, label: meta.label }));
+}
