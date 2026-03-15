@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NMAP</title>
+  <link href="https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.css" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles/app.css" />
+  <link rel="stylesheet" href="/styles/mapBuilder.css" />
+  <link rel="stylesheet" href="/styles/dataSelector.css" />
+  <link rel="stylesheet" href="/styles/productGen.css" />
+</head>
+<body>
+  <div id="topbar">
+    <div id="topbar-left">
+      <span class="title">NMAP</span>
+      <div id="toolbar-buttons">
+        <button id="btn-load" class="toolbar-btn" title="Load Data">&#8635;</button>
+        <button id="btn-freeze" class="toolbar-btn" title="Freeze Map Location">&#128204;</button>
+        <button id="btn-autoupdate" class="toolbar-btn" title="Auto-Update">&#9203;</button>
+        <button id="btn-product" class="toolbar-btn" title="Product Generation">&#9998;</button>
+        <button id="btn-template" class="toolbar-btn" title="(Template)">&#9634;</button>
+      </div>
+      <div id="playback-buttons">
+        <button id="btn-goto-first" class="play-btn" title="Go to first frame">&#9198;</button>
+        <button id="btn-loop-back"  class="play-btn" title="Loop backwards">&#9664;&#9664;</button>
+        <button id="btn-step-back"  class="play-btn" title="Step one frame back">&#9664;</button>
+        <button id="btn-step-fwd"   class="play-btn" title="Step one frame forward">&#9654;</button>
+        <button id="btn-loop-fwd"   class="play-btn" title="Loop forwards">&#9654;&#9654;</button>
+        <button id="btn-rock"       class="play-btn" title="Rock the loop">&#9664;&#9654;</button>
+        <button id="btn-goto-last"  class="play-btn" title="Go to last frame">&#9197;</button>
+      </div>
+    </div>
+    <div id="topbar-right">
+      <select id="view-select"></select>
+      <div id="readout"></div>
+    </div>
+  </div>
+  <div id="map"></div>
+  <div id="frame-time-box"><span class="label">Frame</span><span id="frame-time-value">--</span></div>
+  <div id="colorbar-panel" class="hidden">
+    <div id="colorbar"></div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@5.1.0/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/pako@2.1.0/dist/pako.min.js"></script>
+  <script src="https://unpkg.com/@petamoriken/float16@3.8.4/browser/float16.js"></script>
+  <script type="module" src="/src/main.js"></script>
+
+</body>
+</html>

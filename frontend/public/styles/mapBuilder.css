@@ -1,0 +1,489 @@
+
+/* =========================================================
+    LAYER MANAGER  (#lm-*)
+    ========================================================= */
+#lm-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.72);
+    z-index: 3000;
+    justify-content: center;
+    align-items: center;
+}
+#lm-dialog {
+    display: flex;
+    flex-direction: column;
+    background: #0d0d20;
+    border: 1px solid #2a2a4a;
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    color: #c8c8e8;
+    width: 960px;
+    max-height: 90vh;
+    box-shadow: 0 6px 40px rgba(0,0,0,0.8);
+    overflow: hidden;
+}
+#lm-titlebar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 14px;
+    background: #12122a;
+    border-bottom: 1px solid #2a2a4a;
+    user-select: none;
+}
+#lm-title {
+    color: #7788ff;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+    font-size: 14px;
+}
+#lm-close {
+    background: none;
+    border: none;
+    color: #666;
+    cursor: pointer;
+    font-size: 18px;
+    padding: 0 4px;
+    line-height: 1;
+}
+#lm-close:hover { color: #ff5555; }
+
+/* Sources section — full-width row 1 */
+#lm-sources {
+    display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid #1e1e38;
+    flex-shrink: 0;
+}
+/* Settings section — full-width row 2 */
+#lm-settings {
+    border-bottom: 1px solid #1e1e38;
+    flex-shrink: 0;
+}
+
+.lm-section-hdr {
+    padding: 6px 12px;
+    background: #0a0a1a;
+    color: #556;
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border-bottom: 1px solid #1a1a30;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+#lm-timeline-range {
+    color: #4488aa;
+    font-size: 12px;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+/* Source list */
+#lm-source-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    max-height: 140px;
+    overflow-y: auto;
+    min-height: 32px;
+}
+.lm-source-empty {
+    padding: 12px;
+    color: #445;
+    font-size: 13px;
+}
+.lm-source-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    border-bottom: 1px solid #111128;
+}
+.lm-source-item:hover   { background: #14142e; }
+.lm-source-item.selected { background: #1a1a3e; outline: 1px solid #3344aa; }
+
+.lm-src-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.lm-src-name {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 13px;
+}
+.lm-src-dom {
+    font-size: 18px;
+    color: #ffcc44;
+    line-height: 1;
+    flex-shrink: 0;
+    margin-right: 2px;
+}
+.lm-src-cycle {
+    font-size: 10px;
+    color: #88aadd;
+    background: #0d1428;
+    border: 1px solid #2a3a60;
+    padding: 1px 5px;
+    border-radius: 2px;
+    flex-shrink: 0;
+    margin-right: 4px;
+    font-family: monospace;
+}
+.lm-src-up, .lm-src-down {
+    background: none;
+    border: 1px solid #222240;
+    color: #556;
+    font-size: 12px;
+    cursor: pointer;
+    padding: 1px 5px;
+    line-height: 16px;
+    flex-shrink: 0;
+}
+.lm-src-up:hover, .lm-src-down:hover { color: #aac; border-color: #445; }
+
+/* Source action buttons */
+#lm-source-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 10px;
+    border-top: 1px solid #1a1a30;
+}
+.lm-bin-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: #555;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    cursor: not-allowed;
+    user-select: none;
+    margin-left: 4px;
+}
+.lm-bin-label input { cursor: not-allowed; }
+
+/* Generic buttons */
+.lm-btn {
+    background: #0e0e22;
+    border: 1px solid #2a2a50;
+    color: #aab;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 6px 12px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.lm-btn:hover:not(:disabled) { background: #1a1a3e; color: #dde; }
+.lm-btn:disabled { color: #333; border-color: #1a1a2a; cursor: not-allowed; }
+.lm-btn-action { color: #88bbff; border-color: #334488; }
+.lm-btn-action:hover:not(:disabled) { background: #0f1f40; color: #aad4ff; }
+.lm-btn-remove { color: #ff6655; border-color: #552222; }
+.lm-btn-remove:hover:not(:disabled) { background: #2a0f0f; color: #ff9988; }
+.lm-btn-apply  { color: #55cc77; border-color: #2a6e3a; }
+.lm-btn-apply:hover:not(:disabled) { background: #0f2a1a; color: #88ffaa; }
+
+/* Settings panel — horizontal row of groups */
+#lm-settings-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    padding: 8px 14px;
+}
+.lm-setting-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.lm-label {
+    color: #778;
+    font-size: 13px;
+    white-space: nowrap;
+}
+#lm-dominant {
+    min-width: 180px;
+    max-width: 300px;
+    background: #080814;
+    border: 1px solid #2a2a4a;
+    color: #c8c8e8;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 4px 6px;
+}
+#lm-frames-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+}
+#lm-frames-num {
+    width: 52px;
+    background: #080814;
+    border: 1px solid #2a2a4a;
+    color: #c8c8e8;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 4px 5px;
+    text-align: center;
+}
+#lm-frames-slider {
+    flex: 1;
+    accent-color: #4a9eff;
+    cursor: pointer;
+    height: 18px;
+}
+#lm-frames-label {
+    min-width: 28px;
+    text-align: right;
+    color: #7788ff;
+    font-size: 14px;
+}
+#lm-skip {
+    background: #080814;
+    border: 1px solid #2a2a4a;
+    color: #c8c8e8;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 4px 6px;
+}
+#lm-frame-info {
+    padding: 4px 14px 8px;
+    border-top: 1px solid #111128;
+}
+.lm-frameinfo {
+    color: #8899aa;
+    font-size: 13px;
+}
+.lm-fi-key { color: #556; }
+.lm-fi-selected { color: #3acc66; font-weight: bold; }
+
+/* Range/Int button in timeline header */
+.lm-btn-range {
+    font-size: 11px;
+    padding: 3px 8px;
+    color: #88aadd;
+    border-color: #2a3a60;
+}
+.lm-btn-range:hover { background: #0f1f40; color: #aaccff; }
+
+/* Timeline layout */
+#lm-timeline-section {
+    border-top: 1px solid #1e1e38;
+    display: flex;
+    flex-direction: column;
+}
+#lm-timeline-scroll {
+    overflow-x: auto;
+    padding: 6px 10px 8px;
+    background: #060610;
+}
+#lm-timeline {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-height: 80px;
+}
+.lm-tl-empty {
+    color: #334;
+    font-size: 13px;
+    padding-top: 18px;
+}
+.lm-tl-probing {
+    color: #6677aa;
+    font-size: 13px;
+    font-style: italic;
+    padding-top: 18px;
+    animation: lm-pulse 1.2s ease-in-out infinite;
+}
+@keyframes lm-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.4; }
+}
+
+/* ── Row 1: Day labels ─────────────────────────────────────────── */
+.lm-tl-dayrow {
+    position: relative;
+    height: 20px;
+    flex-shrink: 0;
+}
+/* Each day span: fills the width of one UTC calendar day */
+.lm-tl-dayspan {
+    position: absolute;
+    top: 1px;
+    height: 18px;
+    text-align: center;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: 11px;
+    color: #88aacc;
+    letter-spacing: 0.05em;
+    /* show a light bottom border as the "day line" */
+    border-bottom: 1px solid #2a3a5a;
+    box-sizing: border-box;
+    line-height: 17px;
+}
+/* Vertical day-boundary dividers (midnight marks on the day line) */
+.lm-tl-daydiv {
+    position: absolute;
+    top: 0;
+    width: 1px;
+    height: 20px;
+    background: #3a5080;
+}
+
+/* ── Row 2: Hour-axis ──────────────────────────────────────────── */
+.lm-tl-axisrow {
+    position: relative;
+    height: 30px;
+    flex-shrink: 0;
+}
+.lm-tl-axisline {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 1px;
+    background: #2a3a5a;
+}
+/* Each hour tick: a short downward notch + numeric label below */
+.lm-tl-htick {
+    position: absolute;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    transform: translateX(-50%);
+}
+.lm-tl-htick-mark {
+    width: 1px;
+    height: 6px;
+    background: #3a5080;
+    flex-shrink: 0;
+}
+.lm-tl-htick-label {
+    font-size: 10px;
+    color: #4466aa;
+    margin-top: 1px;
+    line-height: 1;
+}
+
+/* ── Row 3: Frame dots ─────────────────────────────────────────── */
+.lm-tl-dotrow {
+    position: relative;
+    height: 14px;
+    flex-shrink: 0;
+    margin-top: 4px;
+    /* allow selbox to overflow upward slightly */
+    overflow: visible;
+}
+/* Each frame: a narrow vertical bar positioned absolutely */
+.lm-tl-dot {
+    position: absolute;
+    top: 2px;
+    width: 3px;
+    height: 8px;
+    cursor: pointer;
+    box-sizing: border-box;
+}
+.lm-tl-dot:hover { filter: brightness(1.6); }
+/* Included (selected) frames — green fill */
+.lm-tl-included { background: #3acc66; }
+/* Excluded (not loaded) frames — dim red fill */
+.lm-tl-excluded { background: #7a2222; }
+/* Newest loaded frame — bright green */
+.lm-tl-latest   { background: #88ffaa; }
+
+/* Draggable selection box */
+#lm-tl-selbox {
+    position: absolute;
+    top: -18px;
+    height: calc(100% + 22px);
+    background: rgba(180, 50, 50, 0.14);
+    border: 1.5px solid rgba(220, 80, 80, 0.75);
+    border-radius: 2px;
+    cursor: grab;
+    box-sizing: border-box;
+    z-index: 2;
+    min-width: 6px;
+}
+#lm-tl-selbox:active { cursor: grabbing; }
+
+/* ── Range / Interval modal ────────────────────────────────────── */
+#lm-ri-modal {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.55);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+}
+#lm-ri-dialog {
+    background: #0c0c1e;
+    border: 1px solid #2a2a50;
+    padding: 16px 20px;
+    min-width: 340px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.lm-ri-title {
+    color: #556;
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border-bottom: 1px solid #1a1a30;
+    padding-bottom: 8px;
+}
+.lm-ri-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.lm-ri-label {
+    min-width: 110px;
+    color: #778;
+    font-size: 13px;
+}
+#lm-ri-date, #lm-ri-time,
+#lm-ri-before, #lm-ri-after, #lm-ri-interval {
+    background: #080814;
+    border: 1px solid #2a2a4a;
+    color: #c8c8e8;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 4px 6px;
+}
+#lm-ri-date  { width: 120px; }
+#lm-ri-time  { width: 80px; }
+#lm-ri-before, #lm-ri-after, #lm-ri-interval { width: 60px; }
+.lm-ri-unit  { color: #556; font-size: 13px; }
+.lm-ri-now-btn { font-size: 11px; padding: 3px 8px; }
+.lm-ri-btns {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    padding-top: 4px;
+    border-top: 1px solid #1a1a30;
+}
+
+/* Footer */
+#lm-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 14px;
+    border-top: 1px solid #1e1e38;
+    background: #090916;
+}
+#lm-footer-status { color: #556; font-size: 13px; }
+#lm-footer-btns { display: flex; gap: 10px; }
