@@ -1,10 +1,9 @@
 node_modules/
 dist/
-surface*
-mrms*
-gfs*
-href*
+backend/data/**
 *.pyc
 api_keys.js
 .DS_Store
 *.log
+*.pbf
+frontend/public/static/**
