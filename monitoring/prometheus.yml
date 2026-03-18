@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 15s      # How often to pull metrics
+  evaluation_interval: 15s  # How often to evaluate alerting rules
+
+scrape_configs:
+  - job_name: webnmap
+    static_configs:
+      # host.docker.internal resolves to the Docker host on Linux (via extra_hosts below).
+      # If your API runs on a non-standard port, change 8000 here.
+      - targets: ['host.docker.internal:8000']
+    metrics_path: /metrics

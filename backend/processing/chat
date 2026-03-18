@@ -1,0 +1,19 @@
+Implemented a full ensemble post-processing module with lazy xarray/dask workflows, source-agnostic Dataset input, and Zarr output support.
+
+What changed
+
+Added a complete toolkit in ens_postprocessing.py for:
+ensemble mean/spread/max/min
+threshold probabilities and percent/fraction exceedance
+decile thresholds and decile-style masks (fraction_exceedance_mask)
+neighborhood probabilities over rolling time windows (e.g., 1h/4h/24h UH logic)
+PMM and LPMM (PMM now computed per time/extra leading slices over member+space)
+spaghetti contour helpers (band probability + optional contour extraction)
+grid metadata attribution + Dataset -> Zarr conversion/writing + end-to-end process_ensemble_to_zarr(...)
+Updated optional dependencies in requirements.txt to include dask[array], zarr, and matplotlib.
+Validation
+
+Syntax check passes for ens_postprocessing.py.
+
+Current workspace reports unresolved imports for numpy, xarray, matplotlib, which indicates environment packages are not installed yet (code is ready once deps are present).
+If you want, I can next wire this into a concrete processing driver (e.g., a script that opens a given ensemble file, runs a standard diagnostic config, and writes a timestamped .zarr product).
