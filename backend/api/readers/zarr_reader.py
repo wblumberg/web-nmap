@@ -71,10 +71,12 @@ class ZarrReader(Reader):
 
         for generic_name, zarr_name in var_map.items():
             if zarr_name not in store:
+                print(f"[DEBUG zarr] Variable '{zarr_name}' NOT found in store. Available: {list(store.keys())}")
                 continue
             
             arr   = store[zarr_name]
             attrs = dict(arr.attrs)
+            print(f"[DEBUG zarr] Reading '{zarr_name}' (generic='{generic_name}'): shape={arr.shape} dtype={arr.dtype} attrs={attrs}")
             
             # Select time step for forecast grids
             data_array = arr[:]
@@ -87,10 +89,18 @@ class ZarrReader(Reader):
                 # Shape: (nj, ni) — analysis grid, no time selection needed
                 pass
 
+            print(f"[DEBUG zarr] data_array after time select: shape={data_array.shape} dtype={data_array.dtype} "
+                  f"min={np.nanmin(data_array):.4f} max={np.nanmax(data_array):.4f} "
+                  f"nan_count={np.isnan(data_array.astype(float)).sum()} "
+                  f"first5={data_array.flatten()[:5].tolist()}")
+
             # Replace fill value with NaN
             fill = attrs.get('_FillValue', attrs.get('missing_value', -9999))
             data_array = data_array.astype(np.float16)
+            print(f"[DEBUG zarr] After float16 cast: min={np.nanmin(data_array):.4f} max={np.nanmax(data_array):.4f}")
             data_array_replaced = np.nan_to_num(data_array, nan=0)
+            print(f"[DEBUG zarr] After nan_to_num: min={data_array_replaced.min():.4f} max={data_array_replaced.max():.4f} "
+                  f"zero_count={(data_array_replaced == 0).sum()} total={data_array_replaced.size}")
 
             #try:
             #    data_array[data_array >= fill * 0.99] = np.nan

@@ -1,18 +1,79 @@
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-
-from .routers import catalog, lightning, observations, timematch, events, points, gridded, geometries
-from .watcher import start_watching
-
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
+from .metrics import REQUEST_COUNT, REQUEST_LATENCY, RESPONSE_SIZE
+from .routers import catalog, lightning, observations, timematch, events, points, gridded, geometries
+from .watcher import start_watching
 
 _observer = None
+_TRACKED_QUERY_PARAMS = ("center", "window_minutes", "level", "bbox", "cycle", "fhr")
+
+
+def _sanitize_label_value(value: str, max_len: int = 48) -> str:
+    value = value.strip()
+    if len(value) > max_len:
+        value = value[:max_len] + "..."
+    return value or "none"
+
+
+def _extract_source_id(request: Request) -> str:
+    """Extract source_id from path params (e.g. /gridded/{source_id}/field)."""
+    raw = request.path_params.get("source_id")
+    if raw is None:
+        return "none"
+    return _sanitize_label_value(str(raw))
+
+
+def _extract_variable_group(request: Request) -> str:
+    """Extract variables/variable query params into a bounded metric label."""
+    raw_chunks = []
+    for key in ("variables", "variable", "var"):
+        raw_chunks.extend(request.query_params.getlist(key))
+
+    if not raw_chunks:
+        return "none"
+
+    values = []
+    seen = set()
+    for chunk in raw_chunks:
+        for token in chunk.split(","):
+            token = _sanitize_label_value(token, max_len=32)
+            if token == "none" or token in seen:
+                continue
+            seen.add(token)
+            values.append(token)
+            if len(values) >= 4:
+                break
+        if len(values) >= 4:
+            break
+
+    return "|".join(values) if values else "none"
+
+
+def _build_query_group(request: Request) -> str:
+    """Build a bounded label for auxiliary (non-source/non-variable) query params."""
+    parts = []
+    for key in _TRACKED_QUERY_PARAMS:
+        values = request.query_params.getlist(key)
+        if not values:
+            continue
+
+        trimmed_values = []
+        for value in values[:3]:
+            value = _sanitize_label_value(value)
+            trimmed_values.append(value)
+
+        parts.append(f"{key}={'|'.join(trimmed_values)}")
+
+    return ",".join(parts) if parts else "none"
 
 
 @asynccontextmanager
@@ -20,13 +81,10 @@ async def lifespan(app: FastAPI):
     """ 
     FastAPI lifespan context manager.
     Code before `yield` runs on startup; code after runs on shutdown.
-    This replaces the deprecated @app.on_event("startup") pattern.
     """
     global _observer
-    # Start watching data directories for new files
     _observer = start_watching()
     yield
-    # Clean shutdown: stop the watchdog observer thread
     if _observer:
         _observer.stop()
         _observer.join()
@@ -45,16 +103,75 @@ app.add_middleware(
     allow_methods = ["GET"],
     allow_headers = ["*"],
 )
-## Add compression to responses larger than 1000 bytes to improve performance and reduce bandwidth usage.
-# https://medium.com/@b.antoine.se/supercharge-your-fastapi-mastering-middlewares-for-robust-and-efficient-apis-e79bece902f3
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-app.add_middleware(GZipMiddleware, minimum_size=1000)  # Compress responses larger than 1000 bytes
 
-# Include routers (added timematch, removed duplicate observations)
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """
+    Record per-endpoint request count, latency, and response size.
+
+    The endpoint label is normalised to the matched route template
+    (e.g. /api/v1/observations/surface) rather than the raw URL so
+    that path parameters don't explode the cardinality of the metrics.
+    """
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+
+    # Prefer the matched route pattern; fall back to the raw path.
+    route = request.scope.get("route")
+    endpoint = route.path if route else request.url.path
+
+    body_chunks: list[bytes] = []
+    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+        body_chunks.append(chunk)
+    body = b"".join(body_chunks)
+
+    status = str(response.status_code)
+    method = request.method
+    source_id = _extract_source_id(request)
+    variable_group = _extract_variable_group(request)
+    query_group = _build_query_group(request)
+
+    # Avoid polluting metrics with Prometheus self-scrapes.
+    if endpoint != "/metrics":
+        REQUEST_COUNT.labels(
+            method=method,
+            endpoint=endpoint,
+            status=status,
+            source_id=source_id,
+            variable_group=variable_group,
+            query_group=query_group,
+        ).inc()
+        REQUEST_LATENCY.labels(
+            method=method,
+            endpoint=endpoint,
+            source_id=source_id,
+            variable_group=variable_group,
+            query_group=query_group,
+        ).observe(duration)
+        RESPONSE_SIZE.labels(
+            method=method,
+            endpoint=endpoint,
+            source_id=source_id,
+            variable_group=variable_group,
+            query_group=query_group,
+        ).observe(len(body))
+
+    return Response(
+        content=body,
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        media_type=response.media_type,
+    )
+
+
+# ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(catalog.router,      prefix="/api/v1/catalog")
 app.include_router(lightning.router,    prefix="/api/v1/lightning")
 app.include_router(observations.router, prefix="/api/v1/observations")
-app.include_router(timematch.router,    prefix="/api/v1/timematch")  # Added missing inclusion
+app.include_router(timematch.router,    prefix="/api/v1/timematch")
 app.include_router(events.router,       prefix="/api/v1/events")
 app.include_router(points.router,       prefix="/api/v1/points")
 app.include_router(gridded.router,      prefix="/api/v1/gridded")
@@ -63,20 +180,26 @@ app.include_router(geometries.router,   prefix="/api/v1/geometries")
 PUBLIC_DIR = Path(__file__).resolve().parents[2] / "frontend" / "public"
 
 print("Serving: ", PUBLIC_DIR)
-# Serve everything in frontend/public at the web root
-app.mount("/", StaticFiles(directory=str(PUBLIC_DIR), html=True), name="public")
 
-# Serve the SPA entrypoint
-@app.get("/")
-async def index():
-    return FileResponse(PUBLIC_DIR / "index.html")
+
+# ── Utility endpoints ─────────────────────────────────────────────────────────
 
 @app.get("/api/v1/health")
 def health():
     return {"status": "ok"}
 
-#@app.get("/metrics")
-#def get_metrics():
-    # ... logic to return metrics
-#    pass
+
+@app.get("/metrics", tags=["metrics"], summary="Prometheus metrics scrape endpoint")
+def prometheus_metrics():
+    """Returns all registered Prometheus metrics in text exposition format."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+# Mount static files LAST so FastAPI routes above are matched first.
+# A Mount at "/" acts as a catch-all and will shadow any routes registered after it.
+@app.get("/")
+async def index():
+    return FileResponse(PUBLIC_DIR / "index.html")
+
+app.mount("/", StaticFiles(directory=str(PUBLIC_DIR), html=True), name="public")
 

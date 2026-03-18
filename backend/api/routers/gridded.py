@@ -37,6 +37,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..sources.registry import get_source
 from ..readers import get_reader
 
+from datetime import datetime
+
 router = APIRouter(tags=["Gridded Data"])
 
 
@@ -91,7 +93,11 @@ async def get_analysis_field(
     var_list = [v.strip() for v in variables.split(",")]
     var_map  = _build_var_map(source, var_list)
 
+    print(f"[DEBUG gridded] source_id={source_id} key={key} var_list={var_list} var_map={var_map} path={path}")
+
     reader  = get_reader(path)
+    print(f"[DEBUG gridded] reader type: {type(reader).__name__}")
+    print(f"Start time for reading variables: {datetime.utcnow().isoformat()}Z")
     try:
         results = await reader.read_gridded(
             path    = path,
@@ -101,14 +107,21 @@ async def get_analysis_field(
     except NotImplementedError:
         raise HTTPException(400, f"Source '{source_id}' does not support gridded reads.")
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(500, f"Read error: {e}")
+    print(f"Finished reading variables: {datetime.utcnow().isoformat()}Z")
 
     fields = {r.variable: r.as_dict() for r in results}
-    #print(source_id)
-    #print(key)
-    #print(len(fields))
-    #print(fields)
+    for vname, fdata in fields.items():
+        d = fdata.get('data', [])
+        g = fdata.get('grid', {})
+        print(f"[DEBUG gridded] field '{vname}': data_len={len(d)} "
+              f"grid_type={g.get('grid_type')} ni={g.get('ni')} nj={g.get('nj')} "
+              f"first5={d[:5]} last5={d[-5:]} "
+              f"min={min(d) if d else 'N/A'} max={max(d) if d else 'N/A'}")
 
+    print(f"Sending JSON Response: {datetime.utcnow().isoformat()}Z")
     return JSONResponse({
         "source_id" : source_id,
         "key"       : key,
@@ -164,6 +177,7 @@ async def get_forecast_field(
     var_list = [v.strip() for v in variables.split(",")]
     var_map  = _build_var_map(source, var_list)
 
+    print(f"Start time for reading forecast variables: {datetime.utcnow().isoformat()}Z")
     print(path, var_map)
     reader  = get_reader(path)
     try:
@@ -175,8 +189,11 @@ async def get_forecast_field(
         )
     except Exception as e:
         raise HTTPException(500, f"Read error: {e}")
+    print(f"Finished reading forecast variables: {datetime.utcnow().isoformat()}Z")
 
     fields = {r.variable: r.as_dict() for r in results}
+
+    print(f"Sending JSON Response: {datetime.utcnow().isoformat()}Z")
     return JSONResponse({
         "source_id" : source_id,
         "cycle"     : cycle,

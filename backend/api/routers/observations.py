@@ -20,15 +20,28 @@ GET /api/v1/observations/surface/window
 
 import gzip
 import json
+import os
+from time import perf_counter
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+from ..services.obs_sql import ObservationSQLStore, parse_time_like
 from ..sources.registry import get_source
 
 router = APIRouter(tags=["Observations"])
+
+OBS_DB_PATH = Path(
+    os.environ.get(
+        "WEBNMAP_OBS_DB",
+        str("/data/store/point/observations.sqlite"),
+    )
+)
+OBS_SQL = ObservationSQLStore(OBS_DB_PATH)
+OBS_SQL.initialize()
 
 
 @router.get("/surface")
@@ -129,6 +142,133 @@ async def get_surface_obs(
         })
 
 
+@router.get("/sql/times")
+async def list_sql_times(
+    obs_types : Optional[str] = Query(
+        None,
+        description="Comma-separated obs types (e.g. METAR,SHIP,RECON,LIGHTNING,AIR_QUALITY).",
+    ),
+    limit: int = Query(200, ge=1, le=5000),
+):
+    """
+    List unique observation datetimes currently available in the SQL store.
+    """
+    t_total_start = perf_counter()
+
+    t_parse_start = perf_counter()
+    parsed_types = _parse_obs_types(obs_types)
+    t_parse_end = perf_counter()
+
+    t_sql_start = perf_counter()
+    rows = OBS_SQL.list_unique_times(obs_types=parsed_types, limit=limit)
+    t_sql_end = perf_counter()
+
+    t_build_start = perf_counter()
+    payload = {
+        "metadata": {
+            "db_path": str(OBS_DB_PATH),
+            "obs_types": parsed_types,
+            "count": len(rows),
+            "limit": limit,
+        },
+        "times": rows,
+    }
+
+    timing = {
+        "parse_obs_types_ms": _elapsed_ms(t_parse_start, t_parse_end),
+        "sql_list_times_ms": _elapsed_ms(t_sql_start, t_sql_end),
+        "response_build_ms": 0.0,
+        "total_ms": 0.0,
+    }
+    payload["metadata"]["timing"] = timing
+
+    t_build_end = perf_counter()
+    timing["response_build_ms"] = _elapsed_ms(t_build_start, t_build_end)
+    timing["total_ms"] = _elapsed_ms(t_total_start, t_build_end)
+
+    headers = {"Server-Timing": _server_timing_header(timing)}
+
+    return JSONResponse(payload, headers=headers)
+
+
+@router.get("/sql/query")
+async def query_sql_observations(
+    obs_types        : Optional[str] = Query(
+        None,
+        description="Comma-separated obs types to include. Omit for all types in DB.",
+    ),
+    center           : Optional[str] = Query(
+        None,
+        description="Reference time (ISO or key like 20260301_1800). Defaults to latest time in DB.",
+    ),
+    minutes_before   : int = Query(0, ge=0, le=10080),
+    minutes_after    : int = Query(0, ge=0, le=10080),
+    latest_only      : bool = Query(False, description="If true, return one snapshot per obs_type."),
+    prefer_most_data : bool = Query(
+        True,
+        description="In latest_only mode, choose the snapshot with the most rows in window and fall back to densest available snapshot.",
+    ),
+    bin_minutes      : int = Query(0, ge=0, le=1440),
+    parameters       : Optional[str] = Query(
+        None,
+        description="Comma-separated payload parameter names to include (e.g. tmpf,dwpf,wind_speed).",
+    ),
+    max_rows         : int = Query(50000, ge=1, le=200000),
+):
+    """
+    Query SQL-backed observations with time windowing, latest-only mode,
+    optional most-data fallback, and optional time binning.
+    """
+    t_total_start = perf_counter()
+
+    t_parse_center_start = perf_counter()
+    center_dt = _parse_any_time(center) if center else None
+    t_parse_center_end = perf_counter()
+    if center is not None and center_dt is None:
+        raise HTTPException(422, f"Cannot parse center time '{center}'")
+
+    t_parse_types_start = perf_counter()
+    parsed_types = _parse_obs_types(obs_types)
+    t_parse_types_end = perf_counter()
+
+    t_parse_params_start = perf_counter()
+    param_names = [p.strip() for p in parameters.split(",") if p.strip()] if parameters else None
+    t_parse_params_end = perf_counter()
+
+    t_sql_start = perf_counter()
+    payload = OBS_SQL.query_observations(
+        obs_types=parsed_types,
+        center_time=center_dt,
+        minutes_before=minutes_before,
+        minutes_after=minutes_after,
+        latest_only=latest_only,
+        prefer_most_data=prefer_most_data,
+        parameter_names=param_names,
+        bin_minutes=bin_minutes,
+        max_rows=max_rows,
+    )
+    t_sql_end = perf_counter()
+
+    t_build_start = perf_counter()
+    metadata = payload.setdefault("metadata", {})
+    timing = {
+        "parse_center_ms": _elapsed_ms(t_parse_center_start, t_parse_center_end),
+        "parse_obs_types_ms": _elapsed_ms(t_parse_types_start, t_parse_types_end),
+        "parse_parameters_ms": _elapsed_ms(t_parse_params_start, t_parse_params_end),
+        "sql_query_ms": _elapsed_ms(t_sql_start, t_sql_end),
+        "response_build_ms": 0.0,
+        "total_ms": 0.0,
+    }
+    metadata["timing"] = timing
+
+    t_build_end = perf_counter()
+    timing["response_build_ms"] = _elapsed_ms(t_build_start, t_build_end)
+    timing["total_ms"] = _elapsed_ms(t_total_start, t_build_end)
+
+    headers = {"Server-Timing": _server_timing_header(timing)}
+    return JSONResponse(payload, headers=headers)
+
+
 async def _load_obs_file(source, key: str) -> list[dict]:
     path = await source.get_path(key)
     if path is None:
@@ -152,3 +292,35 @@ def _parse_key_to_dt(key: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _parse_obs_types(obs_types: str | None) -> list[str] | None:
+    if not obs_types:
+        return None
+    values = [v.strip().upper() for v in obs_types.split(",") if v.strip()]
+    return values or None
+
+
+def _parse_any_time(raw: str | None) -> datetime | None:
+    if raw is None:
+        return None
+
+    dt = parse_time_like(raw)
+    if dt is not None:
+        return dt
+
+    return _parse_key_to_dt(raw)
+
+
+def _elapsed_ms(start: float, end: float) -> float:
+    return round((end - start) * 1000.0, 3)
+
+
+def _server_timing_header(timing: dict[str, float]) -> str:
+    parts: list[str] = []
+    for key, value in timing.items():
+        if not key.endswith("_ms"):
+            continue
+        metric_name = key[:-3].replace("-", "_")
+        parts.append(f"{metric_name};dur={value:.3f}")
+    return ", ".join(parts)
