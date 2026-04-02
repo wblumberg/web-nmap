@@ -28,6 +28,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ..readers import get_reader
 from ..sources.registry import SOURCES, get_source
 
 router = APIRouter(tags=["Catalog"])
@@ -209,6 +210,8 @@ async def list_cycles(
         fhrs = sorted([
             t.fhr for t in by_cycle[cycle_str] if t.fhr is not None
         ])
+        if not fhrs:
+            fhrs = await _infer_fhrs_for_cycle(source, cycle_str, by_cycle[cycle_str])
         cycle_dt = _parse_cycle(cycle_str)
         cycles_out.append({
             "cycle"      : cycle_str,
@@ -311,20 +314,30 @@ async def list_fhrs(
     # The issue here with loading the GEM_RAP dataset is that the forecast hours are None because
     # all of the forecast data is kept in each file
     print(f"All times is: {all_times}")
-    cycle_times = [t for t in all_times if t.cycle == cycle and t.fhr is not None]
+    cycle_entries = [t for t in all_times if t.cycle == cycle]
+    cycle_times = [t for t in cycle_entries if t.fhr is not None]
 
-    if not cycle_times:
-        raise HTTPException(404, f"No data found for '{source_id}' cycle '{cycle}'")
+    if cycle_times:
+        # Apply fhr range filter
+        if fhr_min is not None:
+            cycle_times = [t for t in cycle_times if t.fhr >= fhr_min]
+        if fhr_max is not None:
+            cycle_times = [t for t in cycle_times if t.fhr <= fhr_max]
 
-    # Apply fhr range filter
-    if fhr_min is not None:
-        cycle_times = [t for t in cycle_times if t.fhr >= fhr_min]
-    if fhr_max is not None:
-        cycle_times = [t for t in cycle_times if t.fhr <= fhr_max]
+        cycle_times.sort(key=lambda t: t.fhr)
+        fhrs = [t.fhr for t in cycle_times]
+        keys = [t.key for t in cycle_times]
+    else:
+        fhrs = await _infer_fhrs_for_cycle(source, cycle, cycle_entries)
+        if not fhrs:
+            raise HTTPException(404, f"No data found for '{source_id}' cycle '{cycle}'")
 
-    cycle_times.sort(key=lambda t: t.fhr)
-    fhrs       = [t.fhr for t in cycle_times]
-    keys       = [t.key for t in cycle_times]
+        if fhr_min is not None:
+            fhrs = [h for h in fhrs if h >= fhr_min]
+        if fhr_max is not None:
+            fhrs = [h for h in fhrs if h <= fhr_max]
+
+        keys = [f"{cycle}_f{str(h).zfill(3)}" for h in fhrs]
     cycle_dt   = _parse_cycle(cycle)
 
     return {
@@ -541,3 +554,39 @@ def _parse_cycle(cycle: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+async def _infer_fhrs_for_cycle(source, cycle: str, cycle_entries: list) -> list[int]:
+    """
+    Infer forecast hours for a cycle from file contents when filenames do not
+    encode fhr (e.g. one Zarr store per cycle with a time axis).
+    """
+    path = next((t.path for t in cycle_entries if t.path is not None), None)
+    if path is None:
+        path = await source.get_path(cycle)
+    if path is None:
+        return []
+
+    try:
+        reader = get_reader(path)
+    except Exception:
+        return []
+
+    list_fhrs = getattr(reader, 'list_forecast_hours', None)
+    if list_fhrs is None:
+        return []
+
+    var_map = getattr(source, 'variable_map', None)
+    try:
+        fhrs = await list_fhrs(path, var_map=var_map)
+    except Exception as e:
+        print(f"[catalog] Could not infer fhrs for cycle '{cycle}' from '{path}': {e}")
+        return []
+
+    unique: set[int] = set()
+    for h in fhrs:
+        try:
+            unique.add(int(h))
+        except (TypeError, ValueError):
+            continue
+    return sorted(unique)

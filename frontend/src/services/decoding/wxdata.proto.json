@@ -1,0 +1,123 @@
+{
+  "nested": {
+    "wxdata": {
+      "nested": {
+        "GridInfo": {
+          "fields": {
+            "gridType": {
+              "type": "string",
+              "id": 1
+            },
+            "ni": {
+              "type": "int32",
+              "id": 2
+            },
+            "nj": {
+              "type": "int32",
+              "id": 3
+            },
+            "latMin": {
+              "type": "float",
+              "id": 4
+            },
+            "latMax": {
+              "type": "float",
+              "id": 5
+            },
+            "lonMin": {
+              "type": "float",
+              "id": 6
+            },
+            "lonMax": {
+              "type": "float",
+              "id": 7
+            },
+            "dx": {
+              "type": "float",
+              "id": 8
+            },
+            "dy": {
+              "type": "float",
+              "id": 9
+            },
+            "projParams": {
+              "keyType": "string",
+              "type": "string",
+              "id": 10
+            }
+          }
+        },
+        "GridField": {
+          "fields": {
+            "variable": {
+              "type": "string",
+              "id": 1
+            },
+            "units": {
+              "type": "string",
+              "id": 2
+            },
+            "data": {
+              "type": "bytes",
+              "id": 3
+            },
+            "grid": {
+              "type": "GridInfo",
+              "id": 4
+            },
+            "validTime": {
+              "type": "string",
+              "id": 5
+            },
+            "cycle": {
+              "type": "string",
+              "id": 6
+            },
+            "fhr": {
+              "type": "int32",
+              "id": 7
+            },
+            "fillValue": {
+              "type": "float",
+              "id": 8
+            },
+            "metadata": {
+              "keyType": "string",
+              "type": "string",
+              "id": 9
+            }
+          }
+        },
+        "GridResponse": {
+          "fields": {
+            "sourceId": {
+              "type": "string",
+              "id": 1
+            },
+            "key": {
+              "type": "string",
+              "id": 2
+            },
+            "cycle": {
+              "type": "string",
+              "id": 3
+            },
+            "fhr": {
+              "type": "int32",
+              "id": 4
+            },
+            "fieldCount": {
+              "type": "int32",
+              "id": 5
+            },
+            "fields": {
+              "keyType": "string",
+              "type": "GridField",
+              "id": 6
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -187,6 +187,12 @@ class FilesystemSource(DataSource):
                 key = self._make_key(vt)
             self._cache[key] = path
 
+            # Also cache a cycle alias for one-file-per-cycle forecast stores.
+            # This lets /forecast resolve by cycle even when no fhr appears
+            # in filenames and forecast lead selection happens inside a reader.
+            if cycle is not None and fhr is None:
+                self._cache[cycle] = path
+
             at = AvailableTime(
                 valid_time  = vt,
                 key         = key,

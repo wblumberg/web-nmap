@@ -78,16 +78,26 @@ class ZarrReader(Reader):
             attrs = dict(arr.attrs)
             print(f"[DEBUG zarr] Reading '{zarr_name}' (generic='{generic_name}'): shape={arr.shape} dtype={arr.dtype} attrs={attrs}")
             
-            # Select time step for forecast grids
+            # Select forecast step and normalize to (nj, ni).
+            dims = tuple(attrs.get('_ARRAY_DIMENSIONS', ()))
             data_array = arr[:]
-            if data_array.ndim == 3:
-                # Shape: (time, nj, ni) — select by fhr index
+
+            if data_array.ndim >= 3:
+                if 'time' in dims:
+                    t_axis = dims.index('time')
+                else:
+                    # Common fallback: first axis is time.
+                    t_axis = 0
                 t_idx = fhr if fhr is not None else 0
-                t_idx = min(t_idx, data_array.shape[0] - 1)
-                data_array = data_array[t_idx]
-            elif data_array.ndim == 2:
-                # Shape: (nj, ni) — analysis grid, no time selection needed
-                pass
+                t_idx = min(t_idx, data_array.shape[t_axis] - 1)
+                data_array = np.take(data_array, indices=t_idx, axis=t_axis)
+
+            # If stored as (x, y), transpose to (y, x) so flattening matches
+            # the expected row-major (nj, ni) orientation.
+            if data_array.ndim == 2 and len(dims) >= 2:
+                remaining_dims = tuple(d for d in dims if d != 'time')
+                if remaining_dims[:2] in (('x', 'y'), ('lon', 'lat')):
+                    data_array = data_array.T
 
             print(f"[DEBUG zarr] data_array after time select: shape={data_array.shape} dtype={data_array.dtype} "
                   f"min={np.nanmin(data_array):.4f} max={np.nanmax(data_array):.4f} "
@@ -120,10 +130,63 @@ class ZarrReader(Reader):
                     "long_name"  : attrs.get('long_name', generic_name),
                     "zarr_name"  : zarr_name,
                     "level"      : level,
+                    "array_dims" : list(dims),
                 },
             ))
 
         return results
+
+    async def list_forecast_hours(
+        self,
+        path: Path,
+        var_map: dict[str, str] | None = None,
+    ) -> list[int]:
+        """
+        Infer available forecast-hour indices from a Zarr store.
+
+        This is used for one-file-per-cycle datasets where forecast steps
+        are stored along a time dimension inside the same file/store.
+        """
+        try:
+            import zarr
+        except ImportError:
+            raise ImportError("zarr is not installed. Run: pip install zarr")
+
+        store = zarr.open(str(path), mode='r')
+
+        # Prefer an explicit time coordinate array when present.
+        if 'time' in store:
+            try:
+                return list(range(int(store['time'].shape[0])))
+            except Exception:
+                pass
+
+        candidates: list[str] = []
+        if var_map:
+            candidates.extend(var_map.values())
+        candidates.extend(list(store.keys()))
+
+        seen = set()
+        for name in candidates:
+            if name in seen or name not in store:
+                continue
+            seen.add(name)
+
+            arr = store[name]
+            shape = getattr(arr, 'shape', ())
+            if not shape:
+                continue
+
+            dims = tuple(dict(arr.attrs).get('_ARRAY_DIMENSIONS', ()))
+            if 'time' in dims:
+                t_idx = dims.index('time')
+                return list(range(int(shape[t_idx])))
+
+            # Fallback heuristic for arrays shaped like (time, y, x) or (time, x, y).
+            if len(shape) >= 3:
+                return list(range(int(shape[0])))
+
+        return []
 
     async def read_grid_info(self, path) -> GridInfo:
         """Extract grid metadata from Zarr store attributes."""
@@ -142,16 +205,49 @@ class ZarrReader(Reader):
         print(attrs)
         # TODO: Be able to read in lambert grids
         if attrs.get('grid_type') == 'lambert':
+            lat_min = float(attrs.get('lat_min', attrs.get('ll_lat', -90)))
+            lat_max = float(attrs.get('lat_max', attrs.get('ur_lat', 90)))
+            lon_min = float(attrs.get('lon_min', attrs.get('ll_lon', -180)))
+            lon_max = float(attrs.get('lon_max', attrs.get('ur_lon', 180)))
+
+            # HREF-style stores often provide one spacing field in km.
+            spacing = attrs.get('dx', attrs.get('grid_spacing_km', 1.0))
+            dx = float(spacing)
+            dy = float(attrs.get('dy', spacing))
+
+            proj_params = attrs.get('proj_params')
+            if not isinstance(proj_params, dict):
+                proj_params = {
+                    'lat_0': attrs.get('lat_0'),
+                    'lon_0': attrs.get('lon_0'),
+                    'lat_1': attrs.get('lat_std', attrs.get('lat_1')),
+                    'lat_2': attrs.get('lat_std', attrs.get('lat_2')),
+                }
+
             return GridInfo(
                 grid_type = 'lambert',
                 ni        = int(attrs.get('ni', attrs.get('nx', 0))),
                 nj        = int(attrs.get('nj', attrs.get('ny', 0))),
-                lat_min   = float(attrs.get('lat_min', -90)),
-                lat_max   = float(attrs.get('lat_max',  90)),
-                lon_min   = float(attrs.get('lon_min', -180)),
-                lon_max   = float(attrs.get('lon_max',  180)),
-                dx        = float(attrs.get('dx', 1.0)),
-                dy        = float(attrs.get('dy', 1.0)),
+                lat_min   = lat_min,
+                lat_max   = lat_max,
+                lon_min   = lon_min,
+                lon_max   = lon_max,
+                dx        = dx,
+                dy        = dy,
+                proj_params = proj_params,
+            )
+        elif attrs.get('grid_type') == 'geostationary':
+            print("Detected geostationary grid based on attributes.")
+            print(attrs)
+            return GridInfo(
+                grid_type = 'geostationary',
+                ni        = int(attrs.get('ni', attrs.get('nx', 0))),
+                nj        = int(attrs.get('nj', attrs.get('ny', 0))),
+                ll_y      = float(attrs.get('ll_y', -90)),
+                ur_y      = float(attrs.get('ur_y', 90)),
+                ll_x      = float(attrs.get('ll_x', -180)),
+                ur_x      = float(attrs.get('ur_x', 180)),
+                sat_lon   = float(attrs.get('sat_lon', 0)),
                 proj_params = attrs.get('proj_params', {}),
             )
 
@@ -202,7 +298,7 @@ class ZarrReader(Reader):
         attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
 
         print("Attributes:", attrs)
-        cycle      = attrs.get('init_time') or attrs.get('cycle')
+        cycle      = attrs.get('init_time') or attrs.get('cycle') or attrs.get('run_id')
         valid_time = attrs.get('valid_time')
         fhr_val    = fhr_override
 

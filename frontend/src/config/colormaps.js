@@ -12,7 +12,7 @@ const COLORMAPS = {
     'pw_cape':       apgl.colormaps.pw_cape,
     'pw_t2m':        apgl.colormaps.pw_t2m,
     'pw_td2m':       apgl.colormaps.pw_td2m,
-
+    'wv_cimms':      apgl.colormaps.wv_cimss,
 };
 
 export default COLORMAPS;

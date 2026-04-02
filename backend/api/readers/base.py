@@ -34,7 +34,7 @@ This decouples the frontend naming from the backend file naming.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass
@@ -58,13 +58,20 @@ class GridInfo:
     grid_type   : str
     ni          : int
     nj          : int
-    lat_min     : float
-    lat_max     : float
-    lon_min     : float
-    lon_max     : float
-    dx          : float
-    dy          : float
+    lat_min     : Optional[float] = None
+    lat_max     : Optional[float] = None
+    lon_min     : Optional[float] = None
+    lon_max     : Optional[float] = None
+    dx          : Optional[float] = None
+    dy          : Optional[float] = None
     proj_params : dict = field(default_factory=dict)
+    # Optional geostationary-specific parameters (lower-left / upper-right
+    # coordinates in projected space and satellite latitude).
+    ll_x        : float | None = None
+    ll_y        : float | None = None
+    ur_x        : float | None = None
+    ur_y        : float | None = None
+    sat_lon     : float | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -78,6 +85,11 @@ class GridInfo:
             "dx"         : self.dx,
             "dy"         : self.dy,
             "proj_params": self.proj_params,
+            "ll_x"       : self.ll_x,
+            "ll_y"       : self.ll_y,
+            "ur_x"       : self.ur_x,
+            "ur_y"       : self.ur_y,
+            "sat_lon"    : self.sat_lon,
         }
 
 

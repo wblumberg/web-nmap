@@ -15,6 +15,7 @@
  *                     currently falls back to PlateCarreeGrid with a note
  *   'polar_stereo'  → future: apgl.PolarStereographicGrid
  *   'mercator'      → future: apgl.MercatorGrid
+ *   'geostationary'  → apgl.GeostationaryImage (when autumnplot-gl adds it)
  */
 
 import * as apgl from 'autumnplot-gl';
@@ -28,8 +29,8 @@ import * as apgl from 'autumnplot-gl';
 export function makeApglGrid(gridInfo) {
     if (!gridInfo) throw new Error('makeApglGrid: gridInfo is null or undefined');
 
-    const { grid_type, ni, nj, lat_min, lon_min, lat_max, lon_max, dx, dy, proj_params } = gridInfo;
-    console.warn('[GridFactory] makeApglGrid input:', JSON.stringify({ grid_type, ni, nj, lat_min, lon_min, lat_max, lon_max, dx, dy, proj_params }));
+    const { grid_type, ni, nj, lat_min, lon_min, lat_max, lon_max, dx, dy, ll_x, ll_y, ur_x, ur_y, sat_lon, proj_params } = gridInfo;
+    console.warn('[GridFactory] makeApglGrid input:', JSON.stringify({ grid_type, ni, nj, lat_min, lon_min, lat_max, lon_max, dx, dy, ll_x, ll_y, ur_x, ur_y, sat_lon, proj_params }));
 
     switch (grid_type) {
         case 'plate_carree':
@@ -65,6 +66,17 @@ export function makeApglGrid(gridInfo) {
             console.warn(`[GridFactory] Unknown grid_type '${grid_type}', ` +
                          `using PlateCarreeGrid`);
             return new apgl.PlateCarreeGrid(ni, nj, lon_min, lat_min, dx, dy);
+        
+        case 'geostationary':
+            if (typeof apgl.GeostationaryImage !== 'undefined') {
+                const { sat_lon } = proj_params ?? {};
+                console.warn(`[GridFactory] Creating GeostationaryImage grid with sat_lon=${sat_lon}, ll_x=${ll_x}, ll_y=${ll_y}, ur_x=${ur_x}, ur_y=${ur_y}`);
+                return new apgl.GeostationaryImage(ni, nj, ll_x, ll_y, ur_x, ur_y, -75);
+            }
+            console.warn(`[GridFactory] GeostationaryImage grid not available in autumnplot-gl; ` +
+                         `falling back to PlateCarreeGrid for ${ni}×${nj} grid. ` +
+                         `Projection will be approximate.`);
+            return new apgl.PlateCarreeGrid(ni, nj, lon_min, lat_min, lon_max, lat_max);
     }
 }
 

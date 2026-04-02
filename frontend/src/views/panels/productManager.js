@@ -112,6 +112,7 @@ export const LayerManager = (() => {
             description:      apiSrc.label,
             has_forecast_hour: !!(apiSrc.has_fhrs || apiSrc.has_cycles),
             has_cycles:        !!(apiSrc.has_cycles),
+            has_fhrs:          !!(apiSrc.has_fhrs),
             // Defaults for fields no longer in the API
             temporal_frequency_min: null,
             forecast_hr_step:       null,

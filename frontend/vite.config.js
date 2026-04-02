@@ -31,6 +31,14 @@ function autumnplotWorkerFix() {
 }
 
 export default defineConfig({
+  optimizeDepts: {
+    include: ['autumnplot-gl']
+  },
+  build: {
+    rollupOptions: {
+      external: []
+    }
+  },
   plugins: [autumnplotWorkerFix(), wasm()],
   worker: {
     format: 'es',

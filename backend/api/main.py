@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
+from brotli_asgi import BrotliMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
@@ -103,7 +103,15 @@ app.add_middleware(
     allow_methods = ["GET"],
     allow_headers = ["*"],
 )
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+app.add_middleware(
+    BrotliMiddleware,
+    quality=9,                # fast compression (0–11 scale)
+    minimum_size=1000,
+    gzip_fallback=True,       # fall back to gzip if client doesn't accept br
+    excluded_handlers=[       # don't compress the protobuf stream — it adds
+        r"/api/v1/gridded/.*/forecast_stream",  # latency between frames
+    ],
+)
 
 
 @app.middleware("http")
@@ -114,6 +122,11 @@ async def metrics_middleware(request: Request, call_next):
     The endpoint label is normalised to the matched route template
     (e.g. /api/v1/observations/surface) rather than the raw URL so
     that path parameters don't explode the cardinality of the metrics.
+
+    IMPORTANT: Streaming responses (e.g. forecast_stream) are passed
+    through WITHOUT buffering.  We still record count and latency but
+    skip the body-size metric to avoid consuming the entire stream
+    into memory (which would defeat progressive rendering).
     """
     start = time.perf_counter()
     response = await call_next(request)
@@ -123,16 +136,36 @@ async def metrics_middleware(request: Request, call_next):
     route = request.scope.get("route")
     endpoint = route.path if route else request.url.path
 
-    body_chunks: list[bytes] = []
-    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
-        body_chunks.append(chunk)
-    body = b"".join(body_chunks)
-
     status = str(response.status_code)
     method = request.method
     source_id = _extract_source_id(request)
     variable_group = _extract_variable_group(request)
     query_group = _build_query_group(request)
+
+    # Streaming responses must NOT be consumed — pass them through as-is.
+    content_type = response.headers.get("content-type", "")
+    is_streaming = "protobuf-stream" in content_type
+
+    if is_streaming:
+        # Record count + latency only (no body-size measurement).
+        if endpoint != "/metrics":
+            REQUEST_COUNT.labels(
+                method=method, endpoint=endpoint, status=status,
+                source_id=source_id, variable_group=variable_group,
+                query_group=query_group,
+            ).inc()
+            REQUEST_LATENCY.labels(
+                method=method, endpoint=endpoint,
+                source_id=source_id, variable_group=variable_group,
+                query_group=query_group,
+            ).observe(duration)
+        return response
+
+    # Non-streaming: consume body for size metric (unchanged behaviour).
+    body_chunks: list[bytes] = []
+    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+        body_chunks.append(chunk)
+    body = b"".join(body_chunks)
 
     # Avoid polluting metrics with Prometheus self-scrapes.
     if endpoint != "/metrics":

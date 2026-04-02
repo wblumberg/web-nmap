@@ -67,7 +67,7 @@ import * as CatalogClient from '../services/api/catalogClient.js';
 import * as DataClient    from '../services/api/dataClient.js';
 import { PRODUCT_SUITES, PRODUCT_GROUPS } from '../domain/dataProducts/productIndex.js';
 import { makeApglGrid }   from '../domain/gridFactory.js';
-import { buildMultiLayers } from '../domain/layerBuilder.js';
+import { buildMultiLayers, buildProgressiveMultiLayers } from '../domain/layerBuilder.js';
 import { getState, setState } from '../app/store.js';
 import { LayerManager }    from '../views/panels/productManager.js';
 import { ProductGen }      from '../views/panels/productGenView.js';
@@ -103,7 +103,7 @@ let _currentFrameIdx = -1;      // index into _frameTimes / _frameKeys
 let _playbackTimer   = null;
 let _playbackMode    = 'pause'; // 'pause' | 'loop-fwd' | 'loop-back' | 'rock'
 let _rockDirection   = 1;       // +1 = forward, -1 = backward
-const PLAY_INTERVAL_MS = 900;   // ms between frames during playback
+const PLAY_INTERVAL_MS = 100;   // ms between frames during playback
 
 // ── Cached DOM elements ──
 let _frameTimeEl       = null;
@@ -371,23 +371,35 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
     try {
         // ── 4. For each source, load data and build MultiPlotLayers ──
         //
-        // Each source goes through the full pipeline:
-        //   product → grid → time-match → fetch data → build layers → add to map
+        // Progressive loading: the first frame is added to the map
+        // immediately so the user sees data right away.  Remaining
+        // frames are fetched in batches and appended incrementally.
+        let firstFrameRendered = false;
         for (const src of sources) {
             try {
-                await _loadAndBuildSource(src, sortedFrames);
+                await _loadAndBuildSource(src, sortedFrames, {
+                    onFirstFrame() {
+                        if (!firstFrameRendered) {
+                            firstFrameRendered = true;
+                            _renderColorbars();
+                            _setupReadout();
+                            _setFrame(0);
+                        }
+                    },
+                    onProgress(loaded, total) {
+                        _setFrameDisplayText(`Loading ${loaded}/${total} frames\u2026`);
+                    },
+                });
             } catch (err) {
                 console.error(`[NMAP] Failed to load source "${src.id}":`, err);
             }
         }
 
-        // ── 5. Display colorbars ──
+        // ── 5. Final display refresh ──
         _renderColorbars();
-
-        // ── 6. Set up mouse readout (lat/lon + sampled values) ──
         _setupReadout();
 
-        // ── 7. Jump to the newest frame ──
+        // ── 6. Jump to the newest frame ──
         _setFrame(_frameTimes.length - 1);
 
         console.info('[NMAP] Data load complete — %d MultiPlotLayer(s) active',
@@ -428,7 +440,7 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
  * @param {object} src        - { uid, id, name, color, entry, cycleTime }
  * @param {Date[]} frameTimes - sorted oldest → newest
  */
-async function _loadAndBuildSource(src, frameTimes) {
+async function _loadAndBuildSource(src, frameTimes, { onFirstFrame, onProgress } = {}) {
 
     // ── Step A: Pick a product for this source ──
     //
@@ -490,138 +502,154 @@ async function _loadAndBuildSource(src, frameTimes) {
         return;
     }
 
-    // ── Step E: Fetch field data for each matched frame ──
+    // ── Step E: Progressive frame loading ──
     //
-    // This is the "expensive" step — we're downloading the actual values.
-    // We batch requests (4 at a time) to avoid overwhelming the server.
+    // For forecast sources with a single Zarr store, we use a streaming
+    // batch endpoint that opens the store once and sends all frames over
+    // one HTTP connection.  For analysis/obs sources, we still fetch
+    // frames individually (they're separate files).
     //
-    // The result is dataByKey: { frameKey: { varName: Float32Array, ... } }
-    // which is exactly what buildMultiLayers/make_layers expects.
-    const dataByKey = {};
-    const orderedKeys = [];
-    const BATCH_SIZE = 4;
+    // autumnplot-gl's MultiPlotLayer.addField() works after the layer
+    // has been added to the map — it uploads the new texture and repaints.
+    const namespace = src.uid || src.id;
     const frameEntries = [...frameToKey.entries()];  // [[ms, apiKey], ...]
+    const totalFrames = frameEntries.length;
 
-    for (let i = 0; i < frameEntries.length; i += BATCH_SIZE) {
-        const batch = frameEntries.slice(i, i + BATCH_SIZE);
+    if (isForecast && src.cycleTime && !src.entry?.has_fhrs) {
+        // ── Streaming forecast path (single-store sources only) ──
+        // Sources where all fhrs live in one Zarr store (e.g. HREF).
+        // Per-file sources (has_fhrs=true, e.g. ECMWF_HR) fall through
+        // to the per-frame path below.
+        // Build a fhr→frameKey mapping and use the batch stream endpoint.
+        const cycleStr = _dateToCycleStr(src.cycleTime);
+        const cycleMs  = src.cycleTime.getTime();
 
-        const results = await Promise.all(
-            batch.map(async ([frameMs, apiKey]) => {
-                // Use the standard frame key (YYYYMMDD_HHMM) for MultiPlotLayer indexing
-                const frameKey = _dateToKey(new Date(frameMs));
-                try {
-                    let result;
-                    if (isForecast && src.cycleTime) {
-                        // Forecast: calculate fhr from the difference between
-                        // frame time and cycle time, then use the forecast endpoint
-                        const fhr = Math.round(
-                            (frameMs - src.cycleTime.getTime()) / 3_600_000
-                        );
-                        const cycleStr = _dateToCycleStr(src.cycleTime);
-                        result = await DataClient.fetchForecastFields(
-                            src.id, dataKeys, cycleStr, fhr
-                        );
-                    } else {
-                        // Analysis/obs: use the matched apiKey directly
-                        result = await DataClient.fetchAnalysisFields(
-                            src.id, dataKeys, apiKey
-                        );
-                    }
-                    return { frameKey, fields: result.fields };
-
-                } catch (err) {
-                    console.warn(
-                        `[NMAP] Failed to fetch frame ${frameKey} for "${src.id}":`,
-                        err.message
-                    );
-                    return { frameKey, fields: null };
-                }
-            })
+        // Ordered list of { fhr, frameKey } matching the frameEntries order
+        const fhrMap = frameEntries.map(([frameMs]) => ({
+            fhr:      Math.round((frameMs - cycleMs) / 3_600_000),
+            frameKey: _dateToKey(new Date(frameMs)),
+        }));
+        const fhrs = fhrMap.map(f => f.fhr);
+        // Quick lookup: key from server response → our display key
+        const serverKeyToFrameKey = new Map(
+            fhrMap.map(f => [`${cycleStr}_f${String(f.fhr).padStart(3, '0')}`, f.frameKey])
         );
 
-        // Collect successful results
-        for (const { frameKey, fields } of results) {
-            if (fields) {
-                dataByKey[frameKey] = fields;
-                orderedKeys.push(frameKey);
-                // ── Debug: inspect returned field data ──
-                for (const [varName, arr] of Object.entries(fields)) {
-                    const f32 = arr instanceof Float32Array ? arr : null;
-                    const len = f32 ? f32.length : (arr?.length ?? 'N/A');
-                    const nanCount = f32 ? f32.reduce((c, v) => c + (isNaN(v) ? 1 : 0), 0) : '?';
-                    const zeroCount = f32 ? f32.reduce((c, v) => c + (v === 0 ? 1 : 0), 0) : '?';
-                    const min = f32 ? f32.reduce((m, v) => (isNaN(v) ? m : Math.min(m, v)), Infinity) : '?';
-                    const max = f32 ? f32.reduce((m, v) => (isNaN(v) ? m : Math.max(m, v)), -Infinity) : '?';
-                    console.warn(`[NMAP] Field "${varName}" frame=${frameKey}: ` +
-                        `type=${arr?.constructor?.name} len=${len} ` +
-                        `NaN=${nanCount} zeros=${zeroCount} min=${min} max=${max}`);
+        console.info(`[NMAP] Streaming ${fhrs.length} forecast frames for "${src.id}" cycle=${cycleStr}`);
+
+        let progressive = null;
+        let loaded = 0;
+
+        await DataClient.streamForecastFrames(
+            src.id, dataKeys, cycleStr, fhrs,
+            // onFrame callback — invoked for each frame as it arrives from the stream
+            ({ fields, gridInfo, key: serverKey }) => {
+                const frameKey = serverKeyToFrameKey.get(serverKey) || serverKey;
+                loaded++;
+
+                if (!progressive) {
+                    // First frame: build layers and add to map
+                    console.info(`[NMAP] First streamed frame "${frameKey}" — building layers (namespace="${namespace}")`);
+                    progressive = buildProgressiveMultiLayers(
+                        productSuite, frameKey, fields, grid, namespace
+                    );
+                    for (const ml of progressive.layers) {
+                        try { _map.addLayer(ml, 'coastline'); }
+                        catch (err) { console.error(`[NMAP] FAILED to add layer "${ml.id}":`, err); }
+                    }
+                    _activeMultiLayers.push(...progressive.layers);
+                    _layerControllers.push(progressive.controller);
+                    if (progressive.colorbars?.length) _activeColorbars.push(...progressive.colorbars);
+                    if (progressive.sampler) _activeSampler = progressive.sampler;
+                    onFirstFrame?.();
+                } else {
+                    // Subsequent frame: append to existing layers
+                    progressive.addFrame(frameKey, fields);
                 }
-            } else {
-                console.warn(`[NMAP][DEBUG] Frame ${frameKey} returned null fields`);
+                onProgress?.(loaded, totalFrames);
+            }
+        );
+
+        if (!progressive) {
+            console.warn(`[NMAP] No data loaded for "${src.id}" — skipping layer build`);
+            return;
+        }
+
+        console.info(`[NMAP] Streamed ${loaded}/${totalFrames} frames for "${src.id}/${productId}"`);
+
+    } else {
+        // ── Per-frame path (individual HTTP requests) ──
+        // Used for analysis/obs sources and per-file forecast sources
+        // (e.g. ECMWF_HR which has separate .zarr files per fhr).
+        const fetchOneFrame = async ([frameMs, apiKey]) => {
+            const frameKey = _dateToKey(new Date(frameMs));
+            try {
+                const result = await DataClient.fetchAnalysisFields(
+                    src.id, dataKeys, apiKey
+                );
+                return { frameKey, fields: result.fields };
+            } catch (err) {
+                console.warn(`[NMAP] Failed to fetch frame ${frameKey} for "${src.id}":`, err.message);
+                return { frameKey, fields: null };
+            }
+        };
+
+        // Fetch the first successful frame
+        let firstResult = null;
+        let firstIndex = 0;
+        for (let i = 0; i < frameEntries.length; i++) {
+            const r = await fetchOneFrame(frameEntries[i]);
+            if (r.fields) {
+                firstResult = r;
+                firstIndex = i;
+                break;
             }
         }
-    }
 
-    if (!orderedKeys.length) {
-        console.warn(`[NMAP] No data loaded for "${src.id}" — skipping layer build`);
-        return;
-    }
-
-    console.info(
-        `[NMAP] Loaded ${orderedKeys.length}/${frameTimes.length} frames for "${src.id}"`
-    );
-
-    // ── Step F: Build MultiPlotLayers ──
-    //
-    // buildMultiLayers() from layerBuilder.js does the magic:
-    //   1. Calls productSuite.make_layers(data, grid) for each frame
-    //   2. Wraps the resulting PlotLayers in MultiPlotLayers
-    //   3. Returns a controller with setKey() for frame stepping
-    //
-    // The MultiPlotLayer is the key to flicker-free looping:
-    //   - All frames are pre-loaded as GPU textures
-    //   - setKey() just switches which texture is displayed
-    //   - No layer add/remove needed!
-    const namespace = src.uid || src.id;
-    console.warn(`[NMAP] Building MultiPlotLayers: namespace="${namespace}" keys=[${orderedKeys.join(', ')}]`);
-    console.warn(`[NMAP] dataByKey has ${Object.keys(dataByKey).length} entries, grid =`, grid);
-
-    let result;
-    try {
-        result = buildMultiLayers(
-            productSuite,
-            dataByKey,
-            grid,
-            orderedKeys,
-            namespace
-        );
-    } catch (err) {
-        console.error(`[NMAP] buildMultiLayers THREW:`, err);
-        throw err;
-    }
-
-    // ── Step G: Add MultiPlotLayers to the MapLibre map ──
-    console.warn(`[NMAP] buildMultiLayers returned: ${result.layers.length} layer(s), ` +
-        `${result.colorbars?.length ?? 0} colorbar(s), sampler=${!!result.sampler}`);
-    for (const ml of result.layers) {
-        console.warn(`[NMAP] Adding MultiPlotLayer to map: id="${ml.id}"`, ml);
-        try {
-            _map.addLayer(ml, 'coastline');
-            console.warn(`[NMAP] Successfully added layer "${ml.id}" to map`);
-        } catch (err) {
-            console.error(`[NMAP] FAILED to add layer "${ml.id}" to map:`, err);
+        if (!firstResult) {
+            console.warn(`[NMAP] No data loaded for "${src.id}" — skipping layer build`);
+            return;
         }
+
+        // Build progressive MultiPlotLayers from the first frame
+        console.info(`[NMAP] First frame "${firstResult.frameKey}" arrived — building layers (namespace="${namespace}")`);
+        const progressive = buildProgressiveMultiLayers(
+            productSuite, firstResult.frameKey, firstResult.fields, grid, namespace
+        );
+
+        for (const ml of progressive.layers) {
+            try { _map.addLayer(ml, 'coastline'); }
+            catch (err) { console.error(`[NMAP] FAILED to add layer "${ml.id}":`, err); }
+        }
+
+        _activeMultiLayers.push(...progressive.layers);
+        _layerControllers.push(progressive.controller);
+        if (progressive.colorbars?.length) _activeColorbars.push(...progressive.colorbars);
+        if (progressive.sampler) _activeSampler = progressive.sampler;
+        onFirstFrame?.();
+        let loaded = 1;
+        onProgress?.(loaded, totalFrames);
+
+        // Fetch remaining frames in batches
+        const remaining = [
+            ...frameEntries.slice(0, firstIndex),
+            ...frameEntries.slice(firstIndex + 1),
+        ];
+        const BATCH_SIZE = 4;
+        for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
+            const batch = remaining.slice(i, i + BATCH_SIZE);
+            const results = await Promise.all(batch.map(fetchOneFrame));
+            for (const { frameKey, fields } of results) {
+                if (fields) {
+                    progressive.addFrame(frameKey, fields);
+                    loaded++;
+                }
+            }
+            onProgress?.(loaded, totalFrames);
+        }
+
+        console.info(`[NMAP] Loaded ${loaded}/${totalFrames} frames for "${src.id}/${productId}" (progressive)`);
     }
-
-    // Track everything for cleanup and frame stepping
-    _activeMultiLayers.push(...result.layers);
-    _layerControllers.push(result.controller);
-    if (result.colorbars?.length) _activeColorbars.push(...result.colorbars);
-    if (result.sampler) _activeSampler = result.sampler;
-
-    console.info(
-        `[NMAP] Built ${result.layers.length} MultiPlotLayer(s) for "${src.id}/${productId}"`
-    );
 }
 
 

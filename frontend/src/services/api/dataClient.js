@@ -23,7 +23,15 @@
  *
  *   The `fields` object is then passed to a product suite's make_layers(data, grid)
  *   which creates the autumnplot-gl visualization layers.
+ *
+ * ─── Transport format ──────────────────────────────────────────────────────
+ *
+ *   Gridded endpoints use Protocol Buffers for binary transfer of float32 arrays.
+ *   This is ~4× smaller and much faster than JSON serialization for large 2D grids.
+ *   The Accept header controls the format; JSON fallback is available by removing the header.
  */
+
+import { decodeGridResponse } from '../decoding/protobufGrid.js';
 
 const API_BASE = '/api/v1';
 
@@ -39,7 +47,7 @@ const API_BASE = '/api/v1';
  * @param {string}   sourceId   - e.g. 'MESOANALYSIS_GRID'
  * @param {string[]} variables  - e.g. ['t2m', 'd2m']
  * @param {string}   key        - valid time key, e.g. '20260227_0000'
- * @param {object}   [opts]     - { level?: string, bbox?: string }
+ * @param {object}   [opts]     - { level?: string, bbox?: string, precision?: string }
  * @returns {Promise<{
  *   fields:   Object<string, Float32Array>,  // { varName: Float32Array }
  *   gridInfo: object|null,                   // grid descriptor (first field)
@@ -49,16 +57,30 @@ const API_BASE = '/api/v1';
 export async function fetchAnalysisFields(sourceId, variables, key, opts = {}) {
     const url = new URL(`${API_BASE}/gridded/${sourceId}/field`, window.location.origin);
     url.searchParams.set('variables', variables.join(','));
-    if (key)        url.searchParams.set('key', key);
-    if (opts.level) url.searchParams.set('level', opts.level);
-    if (opts.bbox)  url.searchParams.set('bbox', opts.bbox);
+    if (key)            url.searchParams.set('key', key);
+    if (opts.level)     url.searchParams.set('level', opts.level);
+    if (opts.bbox)      url.searchParams.set('bbox', opts.bbox);
+    if (opts.precision) url.searchParams.set('precision', opts.precision);
 
-    const resp = await fetch(url.toString());
+    const resp = await fetch(url.toString(), {
+        headers: { 'Accept': 'application/x-protobuf' },
+    });
     if (!resp.ok) {
         throw new Error(
             `fetchAnalysisFields(${sourceId}, key=${key}) failed: HTTP ${resp.status}`
         );
     }
+
+    const contentType = resp.headers.get('content-type') || '';
+    if (contentType.includes('application/x-protobuf')) {
+        const buffer = await resp.arrayBuffer();
+        const result = decodeGridResponse(buffer);
+        console.warn(`[DataClient] fetchAnalysisFields(${sourceId}, key=${key}) protobuf:`,
+            { fieldNames: Object.keys(result.fields), key: result.key });
+        return result;
+    }
+
+    // JSON fallback
     const json = await resp.json();
 
     console.warn(`[DataClient] fetchAnalysisFields(${sourceId}, key=${key}) response:`, {
@@ -68,22 +90,12 @@ export async function fetchAnalysisFields(sourceId, variables, key, opts = {}) {
         fieldNames: Object.keys(json.fields || {}),
     });
 
-    // Convert each field's flat JSON array to a Float32Array for autumnplot-gl.
-    // This is like doing np.array(data, dtype=np.float32) in Python.
     const fields = {};
     let gridInfo = null;
     for (const [varName, fieldData] of Object.entries(json.fields)) {
         const rawData = fieldData.data;
         fields[varName] = new Float32Array(rawData);
         if (!gridInfo && fieldData.grid) gridInfo = fieldData.grid;
-
-        console.warn(`[DataClient]   field "${varName}": rawData.length=${rawData?.length ?? 'null'}` +
-            ` F32.length=${fields[varName].length}` +
-            ` grid=${fieldData.grid ? JSON.stringify({grid_type: fieldData.grid.grid_type, ni: fieldData.grid.ni, nj: fieldData.grid.nj}) : 'null'}` +
-            ` fill_value=${fieldData.fill_value}` +
-            ` units=${fieldData.units}` +
-            ` first5=[${rawData?.slice(0,5)}]` +
-            ` last5=[${rawData?.slice(-5)}]`);
     }
 
     return { fields, gridInfo, key: json.key };
@@ -98,7 +110,7 @@ export async function fetchAnalysisFields(sourceId, variables, key, opts = {}) {
  * @param {string[]} variables  - e.g. ['hght_500mb', 'ugrd_500mb', 'vgrd_500mb']
  * @param {string}   cycle      - model init time, e.g. '2025030200'
  * @param {number}   fhr        - forecast hour, e.g. 24
- * @param {object}   [opts]     - { level?: string }
+ * @param {object}   [opts]     - { level?: string, precision?: string }
  * @returns {Promise<{
  *   fields:   Object<string, Float32Array>,
  *   gridInfo: object|null,
@@ -110,14 +122,28 @@ export async function fetchForecastFields(sourceId, variables, cycle, fhr, opts 
     url.searchParams.set('variables', variables.join(','));
     url.searchParams.set('cycle', cycle);
     url.searchParams.set('fhr', String(fhr));
-    if (opts.level) url.searchParams.set('level', opts.level);
+    if (opts.level)     url.searchParams.set('level', opts.level);
+    if (opts.precision) url.searchParams.set('precision', opts.precision);
 
-    const resp = await fetch(url.toString());
+    const resp = await fetch(url.toString(), {
+        headers: { 'Accept': 'application/x-protobuf' },
+    });
     if (!resp.ok) {
         throw new Error(
             `fetchForecastFields(${sourceId}, cycle=${cycle}, fhr=${fhr}) failed: HTTP ${resp.status}`
         );
     }
+
+    const contentType = resp.headers.get('content-type') || '';
+    if (contentType.includes('application/x-protobuf')) {
+        const buffer = await resp.arrayBuffer();
+        const result = decodeGridResponse(buffer);
+        console.warn(`[DataClient] fetchForecastFields(${sourceId}, cycle=${cycle}, fhr=${fhr}) protobuf:`,
+            { fieldNames: Object.keys(result.fields), key: result.key });
+        return result;
+    }
+
+    // JSON fallback
     const json = await resp.json();
 
     const fields = {};
@@ -128,6 +154,73 @@ export async function fetchForecastFields(sourceId, variables, cycle, fhr, opts 
     }
 
     return { fields, gridInfo, key: json.key };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Streaming Forecast Batch
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Stream multiple forecast frames over a single HTTP connection.
+ *
+ * The server sends length-prefixed protobuf GridResponse messages.
+ * Each frame is decoded and passed to `onFrame` as soon as it arrives.
+ *
+ * @param {string}   sourceId   - e.g. 'HREF'
+ * @param {string[]} variables  - e.g. ['mean_TMP_hght_2']
+ * @param {string}   cycle      - model init time, e.g. '2026032712'
+ * @param {number[]} fhrs       - forecast hours, e.g. [0, 1, 2, ..., 48]
+ * @param {function} onFrame    - called with ({ fields, gridInfo, key, fhr }) for each frame
+ * @param {object}   [opts]     - { level?: string, precision?: string }
+ * @returns {Promise<void>}     - resolves when all frames have been streamed
+ */
+export async function streamForecastFrames(sourceId, variables, cycle, fhrs, onFrame, opts = {}) {
+    const url = new URL(`${API_BASE}/gridded/${sourceId}/forecast_stream`, window.location.origin);
+    url.searchParams.set('variables', variables.join(','));
+    url.searchParams.set('cycle', cycle);
+    url.searchParams.set('fhrs', fhrs.join(','));
+    if (opts.level)     url.searchParams.set('level', opts.level);
+    if (opts.precision) url.searchParams.set('precision', opts.precision);
+
+    const resp = await fetch(url.toString());
+    if (!resp.ok) {
+        throw new Error(
+            `streamForecastFrames(${sourceId}, cycle=${cycle}) failed: HTTP ${resp.status}`
+        );
+    }
+
+    const reader = resp.body.getReader();
+    let buffer = new Uint8Array(0);
+
+    for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        // Append new chunk to buffer
+        const next = new Uint8Array(buffer.length + value.length);
+        next.set(buffer);
+        next.set(value, buffer.length);
+        buffer = next;
+
+        // Consume complete length-prefixed messages from the buffer.
+        // Yield to the browser event loop after each frame so the map
+        // can repaint progressively (without this, all frames that arrive
+        // in a single read() chunk are processed synchronously and the
+        // user sees nothing until the stream finishes).
+        while (buffer.length >= 4) {
+            const msgLen = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
+            if (buffer.length < 4 + msgLen) break;  // incomplete message
+
+            const msgBytes = buffer.slice(4, 4 + msgLen);
+            buffer = buffer.slice(4 + msgLen);
+
+            const decoded = decodeGridResponse(msgBytes.buffer);
+            onFrame(decoded);
+
+            // Let the browser repaint between frames
+            await new Promise(r => setTimeout(r, 0));
+        }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -11,8 +11,8 @@ export default {
         available_for: ['MRMS'],
         data_keys: ['cref', 'ptype_mask'],
         make_layers(data, grid) {
-            const field  = new apgl.RawScalarField(grid, data.cref);
-            const cmaps  = [
+            const field = new apgl.RawScalarField(grid, data.cref);
+            const cmaps = [
                 COLORMAPS['mrms_cref_rain'],
                 COLORMAPS['mrms_cref_snow'],
                 COLORMAPS['mrms_cref_ice'],
@@ -23,12 +23,53 @@ export default {
                 layers: [new apgl.PlotLayer('mrms_cref', raster)],
                 colorbar: cmaps.map((cm, i) =>
                     apgl.makeColorBar(cm, {
-                        label: ['Rain','Snow','Sleet','Freezing Rain'][i] + ' dBZ',
+                        label: ['Rain', 'Snow', 'Sleet', 'Freezing Rain'][i] + ' dBZ',
                         orientation: 'horizontal', tick_direction: 'bottom',
                         fontface: 'Trebuchet MS', size_long: 320, size_short: 67,
                         ticks: [10, 20, 30, 40, 50],
                     })
                 ),
+            };
+        },
+    },
+
+    'goes_wv': {
+        label: 'GOES Water Vapor',
+        group: 'raster',
+        available_for: ['GOESE_WVCH8'],
+        data_keys: ['CMI'],
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.CMI);
+            const cmaps = apgl.colormaps.wv_cimss;
+            console.log("CMAPS:", cmaps)
+            const raster = new apgl.Raster(field, { cmap: cmaps });
+            return {
+                layers: [new apgl.PlotLayer('goes_wv', raster)],
+                colorbar: []
+            };
+        },
+    },
+
+    'goes_vis': {
+        label: 'GOES Visible',
+        group: 'raster',
+        available_for: ['GOESE_VISCH2'],
+        data_keys: ['CMI'],
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.CMI);
+            const cmaps = apgl.colormaps.wv_cimss;
+            // Use a simple greyscale colormap for visible imagery
+            //const greyscale = [];
+            ///for (let i = 0; i <= 255; i++) {
+            //    const v = i / 255;
+            //    greyscale.push([v, v, v, 1]);
+            //}
+            //const cmaps = greyscale;
+            console.log("CMAPS:", cmaps)
+            const raster = new apgl.Raster(field, { cmap: cmaps });
+            return {
+                layers: [new apgl.PlotLayer('goes_vis', raster)],
+                colorbar: []
             };
         },
     },

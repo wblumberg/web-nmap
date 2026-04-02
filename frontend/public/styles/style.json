@@ -41,7 +41,7 @@
             "paint": {
                 "line-blur": 0.5,
                 "line-color": "#FFFFFF",
-                "line-width": 2.5
+                "line-width": 4
             },
             "filter": [
                 "all"
@@ -60,7 +60,7 @@
             "id": "secondary_highways_outline",
             "type": "line",
             "paint": {
-                "line-blur": 0.5,
+                "line-blur": 0.1,
                 "line-color": "#ccccff",
                 "line-width": 3.75,
                 "line-opacity": 0
@@ -180,7 +180,7 @@
             "type": "line",
             "paint": {
                 "line-blur": 0.5,
-                "line-color": "#333333",
+                "line-color": "#ffffff",
                 "line-width": {
                     "stops": [
                         [5, 1.5],

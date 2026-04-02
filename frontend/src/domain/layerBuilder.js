@@ -193,4 +193,94 @@ function _namespaceLayer(layer, namespace) {
     });
 }
 
-export { buildStaticLayers, buildMultiLayers };
+// ─── Progressive multi-time build ────────────────────────────────────────────
+//
+//  Creates MultiPlotLayers from a first frame and returns an `addFrame()`
+//  function so additional frames can be added incrementally AFTER the layers
+//  are already on the map.  This lets the first frame appear immediately
+//  while remaining frames stream in.
+//
+//  Usage:
+//    const prog = buildProgressiveMultiLayers(suite, firstKey, firstData, grid, ns);
+//    map.addLayer(prog.layers[0], anchor);   // visible instantly
+//    // … later, as more data arrives …
+//    prog.addFrame('20260328_0600', newData); // appears without rebuilding
+//
+function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, namespace = '') {
+    // Build the template from the first frame's data
+    const templateResult = productSuite.make_layers(firstData, grid);
+    if (!templateResult.layers?.length) {
+        console.error('[LayerBuilder] WARNING: make_layers() returned 0 layers for progressive build!');
+    }
+
+    // Create one MultiPlotLayer per PlotLayer in the template
+    const multiLayers = templateResult.layers.map(plotLayer =>
+        new MultiPlotLayer(nsId(plotLayer.id, namespace))
+    );
+
+    // Add the first frame
+    templateResult.layers.forEach((plotLayer, i) => {
+        multiLayers[i].addField(_namespaceLayer(plotLayer, namespace), firstKey);
+    });
+    multiLayers.forEach(ml => ml.setActiveKey(firstKey));
+
+    // Mutable ordered list of loaded keys
+    const loadedKeys = [firstKey];
+    let currentKey = firstKey;
+
+    /**
+     * Add a new frame to all MultiPlotLayers.
+     * Can be called after the layers are already on the map.
+     */
+    function addFrame(key, data) {
+        let result;
+        try {
+            result = productSuite.make_layers(data, grid);
+        } catch (err) {
+            console.error(`[LayerBuilder] progressive addFrame make_layers THREW for key "${key}":`, err);
+            return;
+        }
+        result.layers.forEach((plotLayer, i) => {
+            try {
+                multiLayers[i].addField(_namespaceLayer(plotLayer, namespace), key);
+            } catch (err) {
+                console.error(`[LayerBuilder] progressive addField THREW for layer[${i}] key "${key}":`, err);
+            }
+        });
+        loadedKeys.push(key);
+    }
+
+    const controller = {
+        // Expose loadedKeys as a live reference so callers always see the latest set
+        get keys() { return loadedKeys; },
+
+        getKey()      { return currentKey; },
+
+        setKey(key) {
+            if (!loadedKeys.includes(key)) return;
+            currentKey = key;
+            multiLayers.forEach(ml => ml.setActiveKey(key));
+        },
+
+        stepForward() {
+            const idx = loadedKeys.indexOf(currentKey);
+            if (idx < loadedKeys.length - 1) this.setKey(loadedKeys[idx + 1]);
+        },
+        stepBackward() {
+            const idx = loadedKeys.indexOf(currentKey);
+            if (idx > 0) this.setKey(loadedKeys[idx - 1]);
+        },
+        hasNext() { return loadedKeys.indexOf(currentKey) < loadedKeys.length - 1; },
+        hasPrev() { return loadedKeys.indexOf(currentKey) > 0; },
+    };
+
+    return {
+        layers:     multiLayers,
+        colorbars:  templateResult.colorbar ?? [],
+        sampler:    templateResult.sampler  ?? null,
+        controller,
+        addFrame,
+    };
+}
+
+export { buildStaticLayers, buildMultiLayers, buildProgressiveMultiLayers };

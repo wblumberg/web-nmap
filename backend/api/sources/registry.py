@@ -250,6 +250,54 @@ SOURCES: dict[str, FilesystemSource] = {
         source_type = "MODEL_DET",
     ),
 
+    # ── HREF Ensemble (single zarr store per cycle) ───────────────────────────
+    # Files: 2026032700.href_ensemble.zarr
+    # Forecast hours are stored along the in-file time axis, not filename fhr.
+    "HREF": FilesystemSource(
+        source_id_        = "HREF",
+        label_            = "HREF Ensemble",
+        data_dir          = DATA_ROOT / "grid/href",
+        filename_glob     = "*.href_ensemble.zarr",
+        time_regex        = (
+            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})(?P<hour>\d{2})"
+            r"\.href_ensemble\.zarr$"
+        ),
+        cycle_regex       = (
+            r"(?P<cyear>\d{4})(?P<cmonth>\d{2})(?P<cday>\d{2})(?P<chour>\d{2})"
+            r"\.href_ensemble\.zarr$"
+        ),
+        source_type       = "MODEL_ENSEMBLE",
+        data_category     = "gridded_forecast",
+    ),
+
+    "GOESE_WVCH8": FilesystemSource(
+        source_id_    = "GOESE_WVCH8",
+        label_        = "GOES-East Water Vapor Channel 8",
+        data_dir      = DATA_ROOT / "grid/satellite/GOES-19/C08/",
+        filename_glob = "CONUS*.zarr",
+        time_regex    = (
+            r"CONUS_GOES-19_C08_"
+            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
+            r"T(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
+        ),
+        source_type = "SATELLITE",
+        data_category = "gridded_imagery",
+    ),
+
+    "GOESE_VISCH2": FilesystemSource(
+        source_id_    = "GOESE_VISCH2",
+        label_        = "GOES-East Visible Channel 2",
+        data_dir      = DATA_ROOT / "grid/satellite/GOES-19/C02/",
+        filename_glob = "CONUS*.zarr",
+        time_regex    = (
+            r"CONUS_GOES-19_C02_"
+            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
+            r"T(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
+        ),
+        source_type = "SATELLITE",
+        data_category = "gridded_imagery",
+    ),
+
     "MESOANALYSIS_GRID": MESO_SOURCE,
     "NEXRAD_VAD": NEXRAD_VAD,
 }

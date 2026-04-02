@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package wxdata;
+
+// Spatial grid descriptor — mirrors backend GridInfo dataclass
+message GridInfo {
+    string grid_type       = 1;   // "plate_carree" or "lambert" or "geostationary"
+    int32  ni              = 2;   // number of x grid points
+    int32  nj              = 3;   // number of y grid points
+    float  lat_min         = 4;
+    float  lat_max         = 5;
+    float  lon_min         = 6;
+    float  lon_max         = 7;
+    float  dx              = 8;   // grid spacing in x
+    float  dy              = 9;   // grid spacing in y
+    map<string, string> proj_params = 10;  // projection parameters
+}
+
+// A single 2-D gridded variable
+message GridField {
+    string   variable   = 1;
+    string   units      = 2;
+    bytes    data       = 3;   // raw little-endian float array (ni*nj*bytes_per_element)
+    GridInfo grid       = 4;
+    string   valid_time = 5;   // ISO 8601 UTC
+    string   cycle      = 6;   // model init time (empty for analysis)
+    int32    fhr        = 7;   // forecast hour (-1 = analysis/not applicable)
+    float    fill_value = 8;
+    map<string, string> metadata = 9;  // includes 'precision' key: "float32"|"float16"
+}
+
+// Envelope wrapping one or more gridded fields
+message GridResponse {
+    string source_id   = 1;
+    string key         = 2;
+    string cycle       = 3;
+    int32  fhr         = 4;    // -1 when not applicable
+    int32  field_count = 5;
+    map<string, GridField> fields = 6;
+}

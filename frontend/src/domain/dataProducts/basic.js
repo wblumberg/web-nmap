@@ -41,7 +41,7 @@ export default {
         make_layers(data, grid) {
             const dwptF = data.dewpoint_2m.map(v => (v - 273.15) * 9/5 + 32);
             const field = new apgl.RawScalarField(grid, dwptF);
-            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_td2m'] });
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_td2m'], opacity: 0.5 });
             const svg   = apgl.makeColorBar(COLORMAPS['pw_td2m'], {
                 label: '2m Dewpoint (°F)',
                 orientation: 'horizontal', tick_direction: 'bottom',
@@ -51,6 +51,37 @@ export default {
                 layers: [new apgl.PlotLayer('d2m_fill', fill)],
                 colorbar: [svg],
                 sampler: (lon, lat) => ({ dewpoint_2m: field.sampleField(lon, lat) }),
+            };
+        },
+    },
+
+    'sfc_dwpt_fill_mean': {
+        label: 'Mean 2m Dewpoint (Filled) and MSLP (Contours)',
+        group: 'basic',
+        available_for: ['HREF'],
+        data_keys: ['mean_DPT_hght_2', 'mean_MSLMA'],
+        make_layers(data, grid) {
+            const field = new apgl.RawScalarField(grid, data.mean_DPT_hght_2);
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_td2m'] });
+            const svg   = apgl.makeColorBar(COLORMAPS['pw_td2m'], {
+                label: 'Mean 2-m Dewpoint (°F)',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+                ticks: [-40, -30, -20, -10, 0, 10, 20, 30, 40, 50, 60, 70, 80]
+            });
+            const cntr = new apgl.Contour(
+                new apgl.RawScalarField(grid, data.mean_MSLMA),
+                { interval: 4, color: '#ffffff', line_width: 3 }
+            );
+            const lbls  = new apgl.ContourLabels(cntr, {
+                text_color: '#ffffff', halo: true, font_size: 16, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            });
+            return {
+                layers: [new apgl.PlotLayer('2m_fill', fill), new apgl.PlotLayer('mslp_cntr', cntr), new apgl.PlotLayer('mslp_lbls', lbls)],
+                //layers: [new apgl.PlotLayer('mslp_cntr', cntr), new apgl.PlotLayer('mslp_lbls', lbls)],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({ mean_DPT_hght_2: field.sampleField(lon, lat) }),
             };
         },
     },
