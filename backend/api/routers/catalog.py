@@ -54,6 +54,9 @@ async def list_sources():
                 "source_type"  : getattr(src, 'source_type', 'unknown'),
                 "has_cycles"   : src.cycle_regex is not None,
                 "has_fhrs"     : src.fhr_regex   is not None,
+                "default_selected": getattr(src, 'default_selected', False),
+                "timeline_hours": getattr(src, 'timeline_hours', None),
+                "regions": getattr(src, 'regions', []),
             }
             for src in SOURCES.values()
         ]

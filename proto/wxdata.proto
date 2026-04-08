@@ -38,3 +38,23 @@ message GridResponse {
     int32  field_count = 5;
     map<string, GridField> fields = 6;
 }
+
+// A single point observation stored in the `points` hypertable.
+// numeric values go in `variables`, string/categorical values in `metadata`.
+message PointObs {
+    float  lat        = 1;
+    float  lon        = 2;
+    string valid_time = 3;                   // ISO 8601 UTC
+    map<string, float>  variables = 4;       // e.g. peak_current_ka, PM25
+    map<string, string> metadata  = 5;       // e.g. station_id, source_id
+}
+
+// Envelope for a time-windowed point query.
+message PointResponse {
+    string source_id  = 1;
+    string start_time = 2;  // ISO 8601 UTC — actual start of returned data
+    string end_time   = 3;  // ISO 8601 UTC — actual end of returned data
+    int32  count      = 4;
+    repeated PointObs points   = 5;
+    map<string, string> metadata = 6;  // e.g. bbox used, window_minutes
+}

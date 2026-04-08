@@ -15,22 +15,23 @@ from pathlib import Path
 from .base import DataSource, AvailableTime
 
 
-class FilesystemSource(DataSource):
+from ...utils.human_regex import human_pattern_to_regex
+
+class RasterSource(DataSource):
     """
-    A DataSource that scans a local directory for files matching a pattern.
+    A RasterSource that contains a directory structure of raster data in Zarr format.
 
     Parameters:
-        source_id_      : The source_id string (e.g. 'MRMS', 'LIGHTNING')
+        source_id_      : The source_id string (e.g. 'MRMS', 'GOES-E')
         label_          : Human-readable name
         data_dir        : Directory to scan
         filename_glob   : Glob pattern to match files (e.g. 'mrms.*.cref.bin.gz')
         time_regex      : Regex string with named groups (year, month, day, hour,
                           minute, second) applied to the filename to extract the
                           valid time.
-        cycle_regex     : Optional regex string to extract cycle time from filename.
-                          Named groups: cyear, cmonth, cday, chour
-        fhr_regex       : Optional regex string to extract forecast hour from filename.
-                          Named group: fhr
+        human_readable  : If True, regex patterns are specified in human-readable format.
+        default_selected: Default number of frames to select on load (int, default 10; if -9999, load all available frames)
+        timeline_hours  : Timeline length in hours to show on load (int, default 12)
     """
 
     def __init__(
@@ -44,6 +45,10 @@ class FilesystemSource(DataSource):
         fhr_regex     : str | None = None,
         source_type   : str = 'unknown',
         data_category : str = 'unknown',
+        human_readable : bool = False,
+        default_selected: int = 10,
+        timeline_hours: int = 12,
+        regions: list[str] | None = None,
     ):
         self._source_id    = source_id_
         self._label        = label_
@@ -51,14 +56,19 @@ class FilesystemSource(DataSource):
         self._glob         = filename_glob
 
         # ── Save the raw regex strings as public attributes ───────────────────
-        self.time_regex  = time_regex
-        self.cycle_regex = cycle_regex   # None for analysis/obs sources
-        self.fhr_regex   = fhr_regex     # None for analysis/obs sources
+        if human_readable:
+            self.time_regex = human_pattern_to_regex(time_regex)
+            self.cycle_regex = human_pattern_to_regex(cycle_regex) if cycle_regex else None
+            self.fhr_regex = human_pattern_to_regex(fhr_regex) if fhr_regex else None
+        else:
+            self.time_regex = time_regex
+            self.cycle_regex = cycle_regex
+            self.fhr_regex = fhr_regex
 
         # ── Compiled regex objects (used internally for matching) ─────────────
-        self._time_re    = re.compile(time_regex)
-        self._cycle_re   = re.compile(cycle_regex)  if cycle_regex  else None
-        self._fhr_re     = re.compile(fhr_regex)    if fhr_regex    else None
+        self._time_re    = re.compile(self.time_regex)
+        self._cycle_re   = re.compile(self.cycle_regex)  if self.cycle_regex  else None
+        self._fhr_re     = re.compile(self.fhr_regex)    if self.fhr_regex    else None
 
         # Cache: maps key → Path, populated lazily by list_times()
         self._cache: dict[str, Path] = {}
@@ -67,6 +77,18 @@ class FilesystemSource(DataSource):
         self.variable_map  : dict[str, str] = {}
         self.data_category : str = data_category
         self.source_type   : str = source_type
+
+        # Data availability window (legacy, can be removed if unused)
+        self.max_history_hours: int | None = None
+
+        # UI/selection defaults
+        self.default_selected: int = default_selected # Number of frames to select by default on load; if -9999, load all available
+        self.timeline_hours: int = timeline_hours # Number of hours to show on timeline by default on load
+        
+        # Regions (optional, for sources that are region-specific and want to advertise that)
+        self.regions: list[str] = regions if regions is not None else []
+        
+        # For example, we can have CONUS, FullDisk, Alaska, Meso1, Meso2, etc.  These are informational tags to help users understand the spatial domain of the data and filter sources by region if desired.  They don't affect any internal logic in this class, but can be used by catalog.py or the frontend to group/filter sources.
 
     # ── DataSource interface ──────────────────────────────────────────────────
 

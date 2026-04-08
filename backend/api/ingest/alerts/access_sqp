@@ -1,0 +1,4 @@
+SELECT id, canonical_key, office, significance, start_utc, end_utc, source, phen, etn, action, updated_at
+FROM alerts
+ORDER BY updated_at DESC
+LIMIT 100;

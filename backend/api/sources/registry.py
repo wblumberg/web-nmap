@@ -24,293 +24,53 @@ Example: mrms.20250302185943.MergedReflectivityQC.00.50.bin.gz
 import os
 from pathlib import Path
 
-from .filesystem import FilesystemSource
-from ..readers.gempak_reader import GempakFilesystemSource
+from .types.filesystem import FilesystemSource
+from .types.db_source import AlertSource
 
-from .mesoanalysis import MESO_SOURCE
-from .nexrad_vad import NEXRAD_VAD
+# Category modules
+from .imagery import MRMS, GOESE, GOESW
+from .observations import (
+    LIGHTNING_DB, AIRNOW_DB,
+)
+from .nwp_forecasts import ECMWF_HR, HREF
+from .gridded_analyses import MESO_SOURCE
 
-# ── Configure your local data directories here ────────────────────────────────
-# These can also be read from environment variables or a config file.
+# Local DATA_ROOT (kept for backward compatibility / external usage)
 DATA_ROOT = Path(os.environ.get("WEBNMAP_DATA_ROOT", "/data/store/"))
 
 SOURCES: dict[str, FilesystemSource] = {
+    # Imagery
+    "MRMS": MRMS,
+    "GOESE": GOESE,
+    "GOESW": GOESW,
 
-    # ── MRMS Composite Reflectivity ───────────────────────────────────────────
-    # Files: mrms.202503021800.cref.bin.gz
-    "MRMS": FilesystemSource(
-        source_id_    = "MRMS",
-        label_        = "Multiple-Radar/Multi-Sensor (MRMS) Mosaic",
-        data_dir      = DATA_ROOT / "grid/mrms",
-        filename_glob = "mrms.*.zarr",
-        time_regex    = (
-            r"mrms\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "RADAR_MOSAIC",
-        data_category = "gridded_imagery",
-    ),
+    # Gridded forecasts / models
+    "ECMWF_HR": ECMWF_HR,
+    "HREF": HREF,
 
-    # ── RAP Analysis (GRIB2) ──────────────────────────────────────────────────
-    # Files: rap.t00z.wrfprsf00.grib2  (cycle=t00z, fhr=f00)
-    "RAP": FilesystemSource(
-        source_id_    = "RAP",
-        label_        = "RAP Model Analysis/Forecast",
-        data_dir      = DATA_ROOT / "grid/rap",
-        filename_glob = "rap.t*.wrfprsf*.grib2",
-        time_regex    = (
-            r"rap\.t"
-            r"(?P<hour>\d{2})z"
-        ),
-        cycle_regex   = (
-            r"rap\.t"
-            r"(?P<chour>\d{2})z"
-        ),
-        fhr_regex     = r"wrfprsf(?P<fhr>\d{2})",
-        source_type = "MODEL_DET",
-        data_category = "gridded_forecast",
-    ),
-
-    # ── Lightning Strikes ─────────────────────────────────────────────────────
-    # Files: lightning.20250302_1800.geojson.gz
-    "LIGHTNING": FilesystemSource(
-        source_id_    = "LIGHTNING",
-        label_        = "Lightning Strikes",
-        data_dir      = "/data/base/lightning",
-        filename_glob = "acad.*.txt",
-        time_regex    = (
-            r"acad\."
-            r"(?P<year>\d{4})\.(?P<month>\d{2})\.(?P<day>\d{2})"
-            r"\.(?P<hour>\d{2})\.(?P<minute>\d{2})"
-        ),
-        source_type = "MISC",
-            data_category = "point_obs",
-    ),
-
-    # ── Surface Observations ─────────────────────────────────────────────────
-    # Files: surface.20250302_1800.json.gz
-    "SURFACE_OBS": FilesystemSource(
-        source_id_    = "SURFACE_OBS",
-        label_        = "Surface Observations (METARs)",
-        data_dir      = DATA_ROOT / "point/surface",
-        filename_glob = "surface.*.json.gz",
-        time_regex    = (
-            r"surface\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_SURFACE",
-        data_category = "point_obs",
-    ),
-
-    # ── West Texas Mesonet Observations ─────────────────────────────────────
-    # Files: surface.20250302_1800.json.gz
-    "WTXMESO_OBS": FilesystemSource(
-        source_id_    = "WTXMESO_OBS",
-        label_        = "West Texas Mesonet Surface Observations",
-        data_dir      = "/data/base/wtxmeso",
-        filename_glob = "wtxmeso_*.json",
-        time_regex    = (
-            r"wtxmeso_"
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"\.(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_SURFACE",
-        data_category = "point_obs",
-    ),
-
-
-    # ── Ship Observations ─────────────────────────────────────────────────
-    # Files: ship.20250302_1800.json.gz
-    "SHIP_OBS": FilesystemSource(
-        source_id_    = "SHIP_OBS",
-        label_        = "Ship Observations",
-        data_dir      = DATA_ROOT / "point/ship",
-        filename_glob = "ship.*.json.gz",
-        time_regex    = (
-            r"ship\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_SURFACE",
-        data_category = "point_obs"
-    ),
-
-    # ── Ship Observations ─────────────────────────────────────────────────
-    # Files: ship.20250302_1800.json.gz
-    "SYNOPTIC_OBS": FilesystemSource(
-        source_id_    = "SYNOPTIC_OBS",
-        label_        = "Synoptic-API Observations",
-        data_dir      = DATA_ROOT / "point/synoptic",
-        filename_glob = "synoptic.*.json.gz",
-        time_regex    = (
-            r"synoptic\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_SURFACE",
-        data_category = "point_obs"
-    ),
-
-    # ── AQI Observations ─────────────────────────────────────────────────
-    # Files: aqi.20250302_1800.json.gz
-    "AQI_OBS": FilesystemSource(
-        source_id_    = "AQI_OBS",
-        label_        = "Air Quality Now Observations",
-        data_dir      = DATA_ROOT / "point/aqi",
-        filename_glob = "aqi.*.json.gz",
-        time_regex    = (
-            r"aqi\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_SURFACE",
-        data_category = "point_obs"
-    ),
-
-    # ── Synoptic Radiosonde (00/12 UTC) Observations ─────────────────────────────────────────────────
-    # Files: raob.20250302_1800.json.gz
-    "RAOB_OBS": FilesystemSource(
-        source_id_    = "RAOB_OBS",
-        label_        = "Radiosonde Observations",
-        data_dir      = DATA_ROOT / "point/upperair",
-        filename_glob = "raob.*.json.gz",
-        time_regex    = (
-            r"raob\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_UPPERAIR",
-        data_category = "point_obs"
-    ),
-
-    # ── NEXRAD VAD Observations ─────────────────────────────────────────────────
-    # Files: vad.20250302_1800.json.gz
-    "VAD_OBS": FilesystemSource(
-        source_id_    = "VAD_OBS",
-        label_        = "NEXRAD VAD Observations",
-        data_dir      = DATA_ROOT / "vad",
-        filename_glob = "vad.*.json.gz",
-        time_regex    = (
-            r"vad\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_UPPERAIR",
-        data_category = "point_obs"
-    ),
-
-    # ── ACARS Observations ─────────────────────────────────────────────────
-    # Files: acars.20250302_1800.json.gz
-    "ACARS_OBS": FilesystemSource(
-        source_id_    = "ACARS_OBS",
-        label_        = "ACARS Observations",
-        data_dir      = DATA_ROOT / "point/acars",
-        filename_glob = "acars.*.json.gz",
-        time_regex    = (
-            r"acars\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_UPPERAIR",
-        data_category = "point_obs"
-    ),
-
-    # ── RECON Observations ─────────────────────────────────────────────────
-    # Files: recon.20250302_1800.json.gz
-    "RECON_OBS": FilesystemSource(
-        source_id_    = "RECON_OBS",
-        label_        = "Aircraft RECON Observations",
-        data_dir      = DATA_ROOT / "point/recon",
-        filename_glob = "recon.*.json.gz",
-        time_regex    = (
-            r"recon\."
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"_(?P<hour>\d{2})(?P<minute>\d{2})"
-        ),
-        source_type = "OBS_UPPERAIR",
-        data_category = "point_obs"
-    ),
-
-    # ── GEMPAK gridded — GFS (one fhr per file, NAWIPS naming) ────────────────
-    # Files: gfs_2025030200_f024.gem
-    "ECMWF_HR": FilesystemSource(
-        source_id_        = "ECMWF_HR",
-        label_            = "ECMWF IFS",
-        data_dir          = "/data/store/grid/ecmwf_hr/",
-        filename_glob     = "ecmwfhr_*.zarr",
-        time_regex        = (r"ecmwfhr_"
-                             r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})\."
-                             r"(?P<hour>\d{2})"),
-        cycle_regex       = (r"ecmwfhr_"
-                             r"(?P<cyear>\d{4})(?P<cmonth>\d{2})(?P<cday>\d{2})\."
-                             r"(?P<chour>\d{2})"),
-        fhr_regex         = r"f(?P<fhr>\d{3})",
-        source_type = "MODEL_DET",
-    ),
-
-    # ── HREF Ensemble (single zarr store per cycle) ───────────────────────────
-    # Files: 2026032700.href_ensemble.zarr
-    # Forecast hours are stored along the in-file time axis, not filename fhr.
-    "HREF": FilesystemSource(
-        source_id_        = "HREF",
-        label_            = "HREF Ensemble",
-        data_dir          = DATA_ROOT / "grid/href",
-        filename_glob     = "*.href_ensemble.zarr",
-        time_regex        = (
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})(?P<hour>\d{2})"
-            r"\.href_ensemble\.zarr$"
-        ),
-        cycle_regex       = (
-            r"(?P<cyear>\d{4})(?P<cmonth>\d{2})(?P<cday>\d{2})(?P<chour>\d{2})"
-            r"\.href_ensemble\.zarr$"
-        ),
-        source_type       = "MODEL_ENSEMBLE",
-        data_category     = "gridded_forecast",
-    ),
-
-    "GOESE_WVCH8": FilesystemSource(
-        source_id_    = "GOESE_WVCH8",
-        label_        = "GOES-East Water Vapor Channel 8",
-        data_dir      = DATA_ROOT / "grid/satellite/GOES-19/C08/",
-        filename_glob = "CONUS*.zarr",
-        time_regex    = (
-            r"CONUS_GOES-19_C08_"
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"T(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
-        ),
-        source_type = "SATELLITE",
-        data_category = "gridded_imagery",
-    ),
-
-    "GOESE_VISCH2": FilesystemSource(
-        source_id_    = "GOESE_VISCH2",
-        label_        = "GOES-East Visible Channel 2",
-        data_dir      = DATA_ROOT / "grid/satellite/GOES-19/C02/",
-        filename_glob = "CONUS*.zarr",
-        time_regex    = (
-            r"CONUS_GOES-19_C02_"
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})"
-            r"T(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
-        ),
-        source_type = "SATELLITE",
-        data_category = "gridded_imagery",
-    ),
-
+    # Gridded analyses
     "MESOANALYSIS_GRID": MESO_SOURCE,
-    "NEXRAD_VAD": NEXRAD_VAD,
+
+    # DB-backed point sources (TimescaleDB `points` hypertable)
+    "LIGHTNING_DB": LIGHTNING_DB,
+    "AIRNOW_DB"   : AIRNOW_DB,
+
+    # DB-backed NWS alert sources (TimescaleDB `alerts` hypertable)
+    # Filter by phenomenon at query time via ?phen=TO (or ?phen=tornado)
+    "WARNINGS"  : AlertSource("WARNINGS",   "Warnings",   sig="W"),
+    "WATCHES"   : AlertSource("WATCHES",    "Watches",    sig="A"),
+    "ADVISORIES": AlertSource("ADVISORIES", "Advisories", sig="Y"),
 }
 
+
 def get_source(source_id: str) -> FilesystemSource:
-    """
-    Look up a source by ID. Raises a clear error if not found.
+    """Look up a source by ID. Raises a clear error if not found.
+
     Call this from routers to get the source object.
     """
     source = SOURCES.get(source_id)
     if source is None:
         raise KeyError(
-            f"Unknown source_id '{source_id}'. "
-            f"Available: {list(SOURCES.keys())}"
+            f"Unknown source_id '{source_id}'. Available: {list(SOURCES.keys())}"
         )
     return source

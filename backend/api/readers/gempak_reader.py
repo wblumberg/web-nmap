@@ -571,8 +571,8 @@ class GempakReader(Reader):
 # GempakFilesystemSource — extends FilesystemSource for GEMPAK's multi-time files
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-from ..sources.filesystem import FilesystemSource
-from ..sources.base import AvailableTime
+from ..sources.types.filesystem import FilesystemSource
+from ..sources.types.base import AvailableTime
 
 
 class GempakFilesystemSource(FilesystemSource):

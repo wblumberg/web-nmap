@@ -19,10 +19,9 @@ GET /api/v1/geometries/{source_id}/features
 GET /api/v1/geometries/{source_id}/by_type
     → Filter by geometry/event type (e.g. only TORNADO WARNING)
 
-GET /api/v1/geometries/spc_outlook/day/{day_number}
-    → SPC convective outlook for day 1, 2, or 3 (specialized endpoint)
 """
 
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Path, Query
@@ -30,17 +29,50 @@ from fastapi.responses import JSONResponse
 
 from ..sources.registry import get_source
 from ..readers import get_reader
+from ..services.alerts_sql import (
+    ALERT_PHEN_LABELS, ALERT_SOURCE_SIG,
+    query_alerts_geojson, resolve_phen,
+)
 
 router = APIRouter(tags=["Geometry Data"])
+
+
+@router.get("/alerts/types", summary="List available alert phenomenon types")
+async def list_alert_types():
+    """Return all VTEC phenomenon codes and their human-readable labels.
+
+    Use the ``phen`` slug or 2-letter code as the ``?phen=`` query parameter
+    on the ``/features`` endpoint to filter a watch/warning/advisory source
+    to a specific phenomenon type.
+
+    Example: ``GET /geometries/alerts_warnings/features?at=...&phen=tornado``
+    """
+    return {
+        code: {
+            "label": label,
+            "slug":  label.lower().replace(" ", "_"),
+        }
+        for code, label in sorted(ALERT_PHEN_LABELS.items())
+    }
 
 
 @router.get("/{source_id}/features")
 async def get_geometry_features(
     source_id    : str,
-    key          : Optional[str] = Query(None, description="Valid time key"),
+    key          : Optional[str] = Query(None, description="Valid time key (filesystem sources)"),
     bbox         : Optional[str] = Query(None, description="lon_min,lat_min,lon_max,lat_max"),
     event_type   : Optional[str] = Query(None,
-                                  description="Filter by event type, e.g. 'Tornado Warning'"),
+                                  description="Filter by event type, e.g. 'Tornado Warning' "
+                                              "(filesystem sources only)"),
+    at           : Optional[str] = Query(None,
+                                  description="ISO-8601 valid time for DB alert sources. "
+                                              "Defaults to current UTC time. "
+                                              "E.g. 2026-04-07T22:00:00Z"),
+    phen         : Optional[str] = Query(None,
+                                  description="Filter alert source by phenomenon type. "
+                                              "Accepts a 2-letter VTEC code (e.g. 'TO') or a "
+                                              "slug (e.g. 'tornado', 'severe_thunderstorm'). "
+                                              "See GET /geometries/alerts/types for the full list."),
     simplify_deg : Optional[float] = Query(None, ge=0.0001, le=1.0,
                                   description="Simplify polygon vertices to this tolerance "
                                               "in degrees. Reduces payload size for small screens."),
@@ -48,18 +80,53 @@ async def get_geometry_features(
     """
     Return a GeoJSON FeatureCollection of polygon/polyline geometries.
 
-    Works for watches/warnings, SPC outlooks, fronts, and any other
-    source registered as a 'geometry' type.
+    **DB-backed alert sources** (``alerts_warnings``, ``alerts_watches``,
+    ``alerts_advisories``): query by valid time and optionally filter to a
+    specific phenomenon type. See ``GET /geometries/alerts/types`` for the
+    list of available phenomenon slugs.
 
-    The `simplify_deg` parameter is useful when serving to mobile devices
-    or when overlaying many polygons at low zoom — it reduces the number
-    of vertices without changing the visual appearance significantly.
-    A value of 0.01 (≈1km) is a good default for most use cases.
+    **Filesystem sources** (SPC outlooks, fronts, etc.): use ``key`` to
+    select a time step, or omit for the most recent.
     """
+    # ── Resolve source ────────────────────────────────────────────────────
     try:
         source = get_source(source_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
+
+    # ── DB-backed alert sources ───────────────────────────────────────────
+    if getattr(source, "source_type", None) == "ALERT":
+        sig = ALERT_SOURCE_SIG[source_id]
+        parsed_bbox = _parse_bbox(bbox)
+
+        if at is not None:
+            try:
+                at_dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(400, f"Invalid 'at' datetime: {at!r}")
+        else:
+            at_dt = datetime.now(timezone.utc)
+
+        try:
+            phen_code = resolve_phen(phen)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        try:
+            fc = await query_alerts_geojson(
+                sig=sig, at=at_dt, phen=phen_code, bbox=parsed_bbox
+            )
+        except Exception as e:
+            raise HTTPException(500, f"DB query error: {e}")
+
+        if simplify_deg is not None:
+            fc["features"] = [
+                _simplify_feature(f, simplify_deg) for f in fc["features"]
+            ]
+
+        return JSONResponse(fc)
+
+    # ── Filesystem-backed sources (existing logic) ────────────────────────
 
     if key is None:
         latest = await source.most_recent()
@@ -108,6 +175,8 @@ async def get_geometries_by_type(
     source_id  : str,
     type_name  : str           = Query(..., description="e.g. 'Tornado Warning', 'moderate'"),
     key        : Optional[str] = Query(None),
+    at         : Optional[str] = Query(None),
+    phen       : Optional[str] = Query(None),
     bbox       : Optional[str] = Query(None),
 ):
     """
@@ -118,46 +187,10 @@ async def get_geometries_by_type(
     return await get_geometry_features(
         source_id  = source_id,
         key        = key,
+        at         = at,
+        phen       = phen,
         bbox       = bbox,
         event_type = type_name,
-    )
-
-
-@router.get("/spc_outlook/day/{day_number}")
-async def get_spc_outlook(
-    day_number : int            = Path(..., ge=1, le=3),
-    risk_type  : Optional[str]  = Query(None,
-                                  description="'categorical','tornado','wind','hail'"),
-    key        : Optional[str]  = Query(None),
-):
-    """
-    Return SPC Convective Outlook polygons for day 1, 2, or 3.
-
-    risk_type options for day 1:
-        categorical: TSTM, MRGL, SLGT, ENH, MDT, HIGH
-        tornado:     0.02, 0.05, 0.10, 0.15, 0.30, 0.45, 0.60, sig (hatching)
-        wind:        0.05, 0.15, 0.25, 0.35, 0.45, 0.60, sig
-        hail:        0.05, 0.15, 0.25, 0.35, 0.45, 0.60, sig
-
-    This is the specialized endpoint for SPC probabilistic forecasts
-    — the kind of products you want to replicate in WebNMAP's product
-    generation system.
-    """
-    source_id = f"SPC_DAY{day_number}_OUTLOOK"
-    try:
-        source = get_source(source_id)
-    except KeyError:
-        raise HTTPException(
-            404,
-            f"SPC Day {day_number} outlook source not configured. "
-            f"Add '{source_id}' to api/sources/registry.py"
-        )
-
-    return await get_geometry_features(
-        source_id  = source_id,
-        key        = key,
-        bbox       = None,
-        event_type = risk_type,
     )
 
 

@@ -10,8 +10,8 @@ from pathlib import Path
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .metrics import REQUEST_COUNT, REQUEST_LATENCY, RESPONSE_SIZE
-from .routers import catalog, lightning, observations, timematch, events, points, gridded, geometries
-from .watcher import start_watching
+from .routers import catalog, lightning, timematch, events, gridded, geometries, points_db
+from .watcher import start_watching, start_db_polling
 
 _observer = None
 _TRACKED_QUERY_PARAMS = ("center", "window_minutes", "level", "bbox", "cycle", "fhr")
@@ -84,17 +84,71 @@ async def lifespan(app: FastAPI):
     """
     global _observer
     _observer = start_watching()
+    _db_tasks = start_db_polling(interval_seconds=30)
     yield
     if _observer:
         _observer.stop()
         _observer.join()
+    for task in _db_tasks:
+        task.cancel()
 
+
+_openapi_tags = [
+    {
+        "name": "Catalog",
+        "description": "List available data sources and their valid time inventories.",
+    },
+    {
+        "name": "Gridded Data",
+        "description": (
+            "Serve 2-D gridded fields (analyses and forecasts) as raw float32/float16 arrays "
+            "consumable by autumnplot-gl. Supports single-time analysis, cycle+fhr forecast, "
+            "and batch streaming endpoints."
+        ),
+    },
+    {
+        "name": "DB Points",
+        "description": (
+            "Query point observations stored in the TimescaleDB `points` hypertable "
+            "(e.g. lightning strikes, AirNow air-quality readings). Returns protobuf or GeoJSON."
+        ),
+    },
+    {
+        "name": "Lightning",
+        "description": (
+            "Lightning strike data. Defaults to the TimescaleDB source; "
+            "pass `?source=file` to fall back to file-based ingestion."
+        ),
+    },
+    {
+        "name": "Geometry Data",
+        "description": (
+            "GeoJSON polygon/line geometries for NWS watches and warnings, surface fronts, "
+            "SPC convective outlooks, and other vector products. "
+            "DB-backed alert types (e.g. `tornado_warning`, `severe_thunderstorm_watch`) are "
+            "accessible via the same endpoint using an `at` timestamp parameter; see "
+            "`GET /geometries/alerts/variables` for the full list of supported names."
+        ),
+    },
+    {
+        "name": "Time Matching",
+        "description": "Utilities for finding the closest available time step across one or more sources.",
+    },
+    {
+        "name": "Events",
+        "description": (
+            "Server-Sent Events (SSE) stream that pushes real-time notifications to the frontend "
+            "whenever new data arrives (filesystem or database)."
+        ),
+    },
+]
 
 app = FastAPI(
-    title       = "WebNMAP Data API",
-    description = "Serves meteorological data products to the WebNMAP frontend.",
-    version     = "0.1.0",
-    lifespan    = lifespan,
+    title        = "WebNMAP Data API",
+    description  = "Serves meteorological data products to the WebNMAP frontend.",
+    version      = "0.1.0",
+    lifespan     = lifespan,
+    openapi_tags = _openapi_tags,
 )
 
 app.add_middleware(
@@ -203,12 +257,11 @@ async def metrics_middleware(request: Request, call_next):
 # ── Routers ───────────────────────────────────────────────────────────────────
 app.include_router(catalog.router,      prefix="/api/v1/catalog")
 app.include_router(lightning.router,    prefix="/api/v1/lightning")
-app.include_router(observations.router, prefix="/api/v1/observations")
 app.include_router(timematch.router,    prefix="/api/v1/timematch")
 app.include_router(events.router,       prefix="/api/v1/events")
-app.include_router(points.router,       prefix="/api/v1/points")
 app.include_router(gridded.router,      prefix="/api/v1/gridded")
 app.include_router(geometries.router,   prefix="/api/v1/geometries")
+app.include_router(points_db.router,    prefix="/api/v1/db-points")
 
 PUBLIC_DIR = Path(__file__).resolve().parents[2] / "frontend" / "public"
 

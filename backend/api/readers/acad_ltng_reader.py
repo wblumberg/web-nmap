@@ -55,10 +55,24 @@ class AcadLtngReader(Reader):
                 if not (lo_min <= lon <= lo_max and la_min <= lat <= la_max):
                     continue
 
-            # Map output fields
+            # Map output fields: always include all source columns (except coords)
             pt = {'lat': lat, 'lon': lon}
+            # Include raw columns as properties when var_map isn't provided
+            for col in COLUMNS:
+                if col in ('lat', 'lon'):
+                    continue
+                # skip missing values
+                try:
+                    val = row[col]
+                except Exception:
+                    continue
+                # pandas may use NaN for missing; skip those
+                if pd.isna(val):
+                    continue
+                pt[col] = val
+            # Apply var_map overrides (if provided) to map into generic names
             for generic, col in var_map.items():
-                if col in row:
+                if col in row and not pd.isna(row[col]):
                     pt[generic] = row[col]
             points.append(pt)
 
