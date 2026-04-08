@@ -58,6 +58,7 @@ class FilesystemSource(DataSource):
         self._data_dir     = Path(data_dir)
         self._glob         = filename_glob
 
+        print(f"Initializing FilesystemSource with source_id: {source_id_}, data_dir: {data_dir}, filename_glob: {filename_glob}, time_regex: {time_regex}, cycle_regex: {cycle_regex}, fhr_regex: {fhr_regex}, human_readable: {human_readable}")
         # ── Save the raw regex strings as public attributes ───────────────────
         if human_readable:
             self.time_regex = human_pattern_to_regex(time_regex)
@@ -68,6 +69,7 @@ class FilesystemSource(DataSource):
             self.cycle_regex = cycle_regex
             self.fhr_regex = fhr_regex
 
+        print(f"Initialized FilesystemSource {self._source_id} with time_regex: {self.time_regex}, cycle_regex: {self.cycle_regex}, fhr_regex: {self.fhr_regex}")
         # ── Compiled regex objects (used internally for matching) ─────────────
         self._time_re    = re.compile(self.time_regex)
         self._cycle_re   = re.compile(self.cycle_regex)  if self.cycle_regex  else None
@@ -140,9 +142,12 @@ class FilesystemSource(DataSource):
 
     def _extract_fhr(self, filename: str) -> int | None:
         """Extract the forecast hour integer from a filename."""
+        print(filename)
         if not self._fhr_re:
             return None
+        print(self._fhr_re.pattern)
         m = self._fhr_re.search(filename)
+        print(m)
         if not m:
             return None
         try:

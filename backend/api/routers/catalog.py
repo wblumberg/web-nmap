@@ -57,6 +57,7 @@ async def list_sources():
                 "default_selected": getattr(src, 'default_selected', False),
                 "timeline_hours": getattr(src, 'timeline_hours', None),
                 "regions": getattr(src, 'regions', []),
+                "source_group": getattr(src, 'source_group', src.source_id),  # for UI grouping, defaults to source_id
             }
             for src in SOURCES.values()
         ]
@@ -197,11 +198,13 @@ async def list_cycles(
 
     # Get all available times — we'll group them by cycle
     all_times = await source.list_times(after=after_dt, before=before_dt, limit=5000)
+    print(f"Found {len(all_times)} times for source '{source_id}'")
 
     # Group by cycle string
     from collections import defaultdict
     by_cycle: dict[str, list] = defaultdict(list)
     for t in all_times:
+        print(f"Time {t.key}: cycle={t.cycle}, fhr={t.fhr}")
         if t.cycle is not None:
             by_cycle[t.cycle].append(t)
 

@@ -28,7 +28,7 @@ from .types.filesystem import FilesystemSource
 from .types.db_source import AlertSource
 
 # Category modules
-from .imagery import MRMS, GOESE, GOESW
+from .imagery import MRMS_SOURCES, GOES_SOURCES
 from .observations import (
     LIGHTNING_DB, AIRNOW_DB,
 )
@@ -40,9 +40,8 @@ DATA_ROOT = Path(os.environ.get("WEBNMAP_DATA_ROOT", "/data/store/"))
 
 SOURCES: dict[str, FilesystemSource] = {
     # Imagery
-    "MRMS": MRMS,
-    "GOESE": GOESE,
-    "GOESW": GOESW,
+    **GOES_SOURCES,
+    **MRMS_SOURCES,
 
     # Gridded forecasts / models
     "ECMWF_HR": ECMWF_HR,

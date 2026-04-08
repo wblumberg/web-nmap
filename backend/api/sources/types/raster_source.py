@@ -45,6 +45,7 @@ class RasterSource(DataSource):
         fhr_regex     : str | None = None,
         source_type   : str = 'unknown',
         data_category : str = 'unknown',
+        source_group  : str | None = None,
         human_readable : bool = False,
         default_selected: int = 10,
         timeline_hours: int = 12,
@@ -77,6 +78,7 @@ class RasterSource(DataSource):
         self.variable_map  : dict[str, str] = {}
         self.data_category : str = data_category
         self.source_type   : str = source_type
+        self.source_group  : str = source_group or source_id_
 
         # Data availability window (legacy, can be removed if unused)
         self.max_history_hours: int | None = None

@@ -39,6 +39,15 @@ export const PRODUCT_GROUPS = {
     raster: "8.) Raster Products",
     point: "9.) Point Products",
     misc: "10.) Miscellaneous Products",
+    
+    goes_conus: "GOES CONUS Products",
+    goes_fdisk: "GOES Full Disk Products",
+    goes_meso1: "GOES Mesoscale Sector 1 Products",
+    goes_meso2: "GOES Mesoscale Sector 2 Products",
+    mrms_conus: "MRMS CONUS",
+    mrms_alaska: "MRMS Alaska",
+    mrms_hawaii: "MRMS Hawaii",
+    mrms_guam: "MRMS Guam"
 };
 
 /**

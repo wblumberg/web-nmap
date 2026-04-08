@@ -33,10 +33,10 @@ export default {
         },
     },
 
-    'goes_wv': {
-        label: 'GOES Water Vapor',
-        group: 'raster',
-        available_for: ['GOESE_WVCH8'],
+    'goes_conus_wv': {
+        label: 'GOES CONUS Water Vapor (Channel 8)',
+        group: 'goes_conus',
+        available_for: ['GOES-E_CONUS_C08'],
         data_keys: ['CMI'],
         make_layers(data, grid) {
             const field = new apgl.RawScalarField(grid, data.CMI);
@@ -44,7 +44,7 @@ export default {
             console.log("CMAPS:", cmaps)
             const raster = new apgl.Raster(field, { cmap: cmaps });
             return {
-                layers: [new apgl.PlotLayer('goes_wv', raster)],
+                layers: [new apgl.PlotLayer('goes_conus_wv', raster)],
                 colorbar: []
             };
         },

@@ -27,9 +27,13 @@ def human_pattern_to_regex(pattern: str) -> str:
     import re
     regex = pattern
     for key in sorted(HUMAN_TO_REGEX.keys(), key=len, reverse=True):
-        # Replace only when the token is not part of a larger lowercase word
-        # This allows adjacent token sequences like 'HHmm' while preventing
-        # accidental replacement inside words such as 'summary'.
-        token_re = re.compile(rf"(?<![a-z]){re.escape(key)}(?![a-z])")
+        # For lowercase-starting tokens (e.g. 'mm'), guard against accidental
+        # matches inside ordinary words like 'summary'.  Uppercase tokens
+        # (e.g. 'FHR', 'YYYY') are safe without the lookbehind — and need it
+        # removed so they match after a literal lowercase prefix (e.g. 'fFHR').
+        if key[0].islower():
+            token_re = re.compile(rf"(?<![a-z]){re.escape(key)}(?![a-z])")
+        else:
+            token_re = re.compile(rf"{re.escape(key)}(?![a-z])")
         regex = token_re.sub(HUMAN_TO_REGEX[key], regex)
     return regex
