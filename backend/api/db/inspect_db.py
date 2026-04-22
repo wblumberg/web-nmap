@@ -54,6 +54,8 @@ Environment
     python backend/api/db/inspect_db.py tables
     python backend/api/db/inspect_db.py schema alerts
     python backend/api/db/inspect_db.py sources
+    python backend/api/db/inspect_db.py keys --source SHIP
+    python backend/api/db/inspect_db.py keys --source AIRNOW --sample-rows 500
     python backend/api/db/inspect_db.py points --source LIGHTNING --limit 10
     python backend/api/db/inspect_db.py points --source AIRNOW --start "2026-04-07" --bbox "-100,25,-80,40"
     python backend/api/db/inspect_db.py alerts --phen SV --sig W --limit 20
@@ -248,7 +250,7 @@ async def cmd_points(args) -> None:
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
-    props_col = "properties" if args.props else "LEFT(properties::text, 80) AS properties"
+    props_col = "properties" if args.props else "LEFT(properties::text, 200) AS properties"
 
     sql = f"""
         SELECT
@@ -372,6 +374,53 @@ async def cmd_geometries(args) -> None:
     finally:
         await conn.close()
     _print_rows(rows, title=f"geometries — {args.source or 'all sources'}")
+
+
+async def cmd_keys(args) -> None:
+    """Show all distinct property keys for a source, with occurrence counts and a sample value."""
+    source = args.source
+    sample = int(args.sample_rows)
+
+    # Use a CTE to sample rows, then unnest jsonb_object_keys to get key-level stats.
+    # For each key we count how many rows carry it (rows_with_key), how many of those
+    # have a non-null value (non_null_count), and pull one sample value so you can
+    # see what the data actually looks like.
+    sql = f"""
+        WITH sampled AS (
+            SELECT properties
+            FROM   points
+            WHERE  source_id = $1
+            ORDER  BY valid_time DESC
+            LIMIT  {sample}
+        ),
+        keys AS (
+            SELECT key,
+                   COUNT(*)                                              AS rows_with_key,
+                   COUNT(*) FILTER (WHERE (s.properties->>key) IS NOT NULL
+                                      AND  s.properties->>key <> 'null') AS non_null_count
+            FROM   sampled s,
+                   jsonb_object_keys(s.properties) AS key
+            GROUP  BY key
+        )
+        SELECT k.key,
+               k.rows_with_key,
+               k.non_null_count,
+               round(k.non_null_count * 100.0 / NULLIF(k.rows_with_key, 0), 1) AS pct_non_null,
+               (SELECT s.properties->>k.key
+                FROM   sampled s
+                WHERE  s.properties->>k.key IS NOT NULL
+                  AND  s.properties->>k.key <> 'null'
+                LIMIT  1) AS sample_value
+        FROM   keys k
+        ORDER  BY k.non_null_count DESC, k.key;
+    """
+
+    conn = await _connect()
+    try:
+        rows = await conn.fetch(sql, source)
+    finally:
+        await conn.close()
+    _print_rows(rows, title=f"property keys — {source} (sampled {sample} rows)")
 
 
 async def cmd_recent(args) -> None:
@@ -500,6 +549,12 @@ def _build_parser() -> argparse.ArgumentParser:
     geo.add_argument("--end",    default=None)
     geo.add_argument("--limit",  default=25,  type=int)
 
+    # keys
+    kys = sub.add_parser("keys", help="List all property keys for a source with occurrence counts")
+    kys.add_argument("--source", required=True, help="source_id to inspect (e.g. SHIP, AIRNOW)")
+    kys.add_argument("--sample-rows", default=1000, type=int,
+                     help="Number of most-recent rows to sample (default 1000)")
+
     # recent
     rec = sub.add_parser("recent", help="Most-recent N rows from any table")
     rec.add_argument("table", help="Table name")
@@ -525,6 +580,7 @@ _HANDLERS = {
     "points":     cmd_points,
     "alerts":     cmd_alerts,
     "geometries": cmd_geometries,
+    "keys":       cmd_keys,
     "recent":     cmd_recent,
     "count":      cmd_count,
     "sql":        cmd_sql,

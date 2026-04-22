@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 _engine: AsyncEngine | None = None
 
 
-TIMESCALE_CONN='postgresql+asyncpg://webnmap:@localhost:5432/wxdata'
+TIMESCALE_CONN='postgresql+asyncpg://webnmap:SH%40RPpyFunt1m3z@localhost:5432/wxdata'
 
 def get_db_dsn() -> str:
     dsn = os.environ.get("TIMESCALE_CONN")
