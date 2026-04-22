@@ -231,3 +231,92 @@ async def query_alerts_geojson(
             })
 
     return {"type": "FeatureCollection", "features": features}
+
+
+# ── Union query (for by_type endpoint) ───────────────────────────────────────
+
+_UNIONED_SELECT = """
+    SELECT
+        etn,
+        phen,
+        significance,
+        array_agg(DISTINCT office ORDER BY office) AS offices,
+        min(start_utc)  AS start_utc,
+        CASE
+            WHEN bool_and(end_utc IS NOT NULL) THEN max(end_utc)
+            ELSE NULL
+        END               AS end_utc,
+        ST_AsGeoJSON(
+            ST_MakeValid(ST_Union(geom))
+        )                 AS geom_json
+    FROM alerts
+    WHERE
+        significance = :sig
+        AND start_utc  <= :at
+        AND (end_utc IS NULL OR end_utc >= :at)
+        AND geom        IS NOT NULL
+"""
+
+_UNIONED_GROUP = "    GROUP BY etn, phen, significance\n    ORDER BY min(start_utc)\n"
+
+
+def _build_unioned_query(phen: Optional[str], bbox: Optional[tuple]) -> text:
+    sql = _UNIONED_SELECT
+    if phen:
+        sql += _PHEN_CLAUSE
+    if bbox:
+        sql += _BBOX_CLAUSE
+    sql += _UNIONED_GROUP
+    return text(sql)
+
+
+async def query_alerts_geojson_unioned(
+    sig:  str,
+    at:   datetime,
+    phen: Optional[str] = None,
+    bbox: Optional[tuple[float, float, float, float]] = None,
+    engine=None,
+) -> dict:
+    """Query the ``alerts`` hypertable, grouping by ``(etn, phen)`` and
+    unioning all CWA geometries with ``ST_MakeValid(ST_Union(geom))``.
+
+    Returns one GeoJSON Feature per watch/warning event number.  Using
+    PostGIS for the union avoids self-touching rings that break JavaScript
+    ear-clipping triangulators (autumnplot-gl).
+
+    Properties per feature
+    ----------------------
+    etn, phen, significance, offices (list), start_utc, end_utc
+    """
+    if engine is None:
+        engine = get_engine()
+
+    params: dict = {"sig": sig, "at": at}
+    if phen:
+        params["phen"] = phen
+    if bbox:
+        xmin, ymin, xmax, ymax = bbox
+        params.update({"xmin": xmin, "ymin": ymin, "xmax": xmax, "ymax": ymax})
+
+    sql = _build_unioned_query(phen, bbox)
+
+    features = []
+    async with engine.begin() as conn:
+        result = await conn.execute(sql, params)
+        for row in result.mappings():
+            geom  = json.loads(row["geom_json"])
+            props = {
+                "etn":          row["etn"],
+                "phen":         row["phen"],
+                "significance": row["significance"],
+                "offices":      list(row["offices"]) if row["offices"] else [],
+                "start_utc":    row["start_utc"].isoformat() if row["start_utc"] else None,
+                "end_utc":      row["end_utc"].isoformat()   if row["end_utc"]   else None,
+            }
+            features.append({
+                "type":       "Feature",
+                "geometry":   geom,
+                "properties": props,
+            })
+
+    return {"type": "FeatureCollection", "features": features}

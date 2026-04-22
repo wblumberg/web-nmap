@@ -23,6 +23,8 @@ async def query_points(
     end: datetime,
     bbox: Optional[tuple[float, float, float, float]] = None,
     limit: int = _DEFAULT_LIMIT,
+    most_recent: bool = False,
+    fields: Optional[list[str]] = None,
 ) -> list[dict]:
     """Query the `points` hypertable and return a list of dicts.
 
@@ -30,11 +32,19 @@ async def query_points(
         lat, lon, valid_time (datetime), properties (dict)
 
     Args:
-        source_id: Matches the ``source_id`` column (e.g. "LIGHTNING", "AIRNOW").
-        start:     Inclusive start of the valid_time window (timezone-aware).
-        end:       Inclusive end of the valid_time window (timezone-aware).
-        bbox:      Optional spatial filter (lon_min, lat_min, lon_max, lat_max).
-        limit:     Maximum rows to return.
+        source_id:   Matches the ``source_id`` column (e.g. "LIGHTNING", "AIRNOW").
+        start:       Inclusive start of the valid_time window (timezone-aware).
+        end:         Inclusive end of the valid_time window (timezone-aware).
+        bbox:        Optional spatial filter (lon_min, lat_min, lon_max, lat_max).
+        limit:       Maximum rows to return.
+        most_recent: If True, return only the most recent observation per unique
+                     station location (uses DISTINCT ON geom).  Suitable for
+                     stationary observation networks where each location has
+                     exactly one active reading (e.g. AirNow).
+        fields:      Optional list of property keys to include in each point's
+                     ``properties`` dict.  When None, all properties are returned.
+                     Filtering is applied in Python after the DB query so the SQL
+                     stays portable across JSON and JSONB column types.
     """
     limit = min(limit, _HARD_LIMIT)
 
@@ -59,24 +69,45 @@ async def query_points(
         )
         params.update(lon_min=lon_min, lat_min=lat_min, lon_max=lon_max, lat_max=lat_max)
 
-    sql = text(f"""
-        SELECT
-            ST_Y(geom)   AS lat,
-            ST_X(geom)   AS lon,
-            valid_time,
-            properties
-        FROM points
-        WHERE source_id = :source_id
-          AND valid_time BETWEEN :start AND :end
-          {bbox_clause}
-        ORDER BY valid_time DESC
-        LIMIT :limit
-    """)
+    if most_recent:
+        # Return the single most-recent observation per station location.
+        # DISTINCT ON requires ORDER BY to lead with the DISTINCT expression;
+        # the secondary `valid_time DESC` picks the newest row per geometry.
+        sql = text(f"""
+            SELECT DISTINCT ON (geom)
+                ST_Y(geom)   AS lat,
+                ST_X(geom)   AS lon,
+                valid_time,
+                properties
+            FROM points
+            WHERE source_id = :source_id
+              AND valid_time BETWEEN :start AND :end
+              {bbox_clause}
+            ORDER BY geom, valid_time DESC
+            LIMIT :limit
+        """)
+    else:
+        sql = text(f"""
+            SELECT
+                ST_Y(geom)   AS lat,
+                ST_X(geom)   AS lon,
+                valid_time,
+                properties
+            FROM points
+            WHERE source_id = :source_id
+              AND valid_time BETWEEN :start AND :end
+              {bbox_clause}
+            ORDER BY valid_time DESC
+            LIMIT :limit
+        """)
 
     engine = get_engine()
     async with engine.connect() as conn:
         res = await conn.execute(sql, params)
         rows = res.fetchall()
+
+    # Build a set of requested field names for O(1) lookup
+    _fields_set: Optional[frozenset] = frozenset(fields) if fields else None
 
     result = []
     for row in rows:
@@ -84,11 +115,14 @@ async def query_points(
         if isinstance(props, str):
             import json
             props = json.loads(props)
+        props = props or {}
+        if _fields_set is not None:
+            props = {k: v for k, v in props.items() if k in _fields_set}
         result.append({
             "lat": float(lat),
             "lon": float(lon),
             "valid_time": valid_time,
-            "properties": props or {},
+            "properties": props,
         })
     return result
 
@@ -98,10 +132,13 @@ async def list_source_times(
     limit: int = 200,
 ) -> list[datetime]:
     """Return distinct valid_times for a source, newest first."""
+    # Truncate to the second to collapse microsecond-level duplicates
+    # (lightning inserts can create many rows with nearly-identical timestamps).
     sql = text("""
-        SELECT DISTINCT valid_time
+        SELECT time_bucket('1 minute', valid_time) AS valid_time
         FROM points
         WHERE source_id = :source_id
+        GROUP BY time_bucket('1 minute', valid_time)
         ORDER BY valid_time DESC
         LIMIT :limit
     """)
@@ -109,6 +146,7 @@ async def list_source_times(
     async with engine.connect() as conn:
         res = await conn.execute(sql, {"source_id": source_id, "limit": limit})
         rows = res.fetchall()
+    print(rows)
     return [r[0] for r in rows]
 
 
