@@ -169,6 +169,44 @@ body {
     display: none;
 }
 
+/* ── Data-sampler cursor popup ─────────────────────────────────────────────── */
+#sampler-popup {
+    position: fixed;
+    z-index: 500;
+    pointer-events: none;
+    background: rgba(9, 9, 22, 0.88);
+    border: 1px solid #2a2a6a;
+    color: #d7d7ef;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+    padding: 5px 9px;
+    white-space: pre;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.55);
+    /* offset so the popup doesn't sit under the cursor tip */
+    transform: translate(14px, -50%);
+    top: 0;
+    left: 0;
+}
+
+#sampler-popup.hidden {
+    display: none;
+}
+
+#sampler-popup .sp-row {
+    display: flex;
+    gap: 6px;
+}
+
+#sampler-popup .sp-key {
+    color: #778;
+    flex-shrink: 0;
+}
+
+#sampler-popup .sp-val {
+    color: #c8f0a8;
+}
+
 #colorbar {
     display: flex;
     align-items: center;

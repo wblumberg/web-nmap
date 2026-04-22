@@ -2,14 +2,18 @@
  * protobufGrid.js — Decode GridResponse protobuf messages
  *
  * Decodes the binary protobuf payload from /api/v1/gridded/… endpoints
- * and returns the same { fields, gridInfo, key } shape that the JSON
- * path produces, so downstream consumers (gridFactory, layerBuilder, etc.)
- * don't need any changes.
+ * and returns { fields, gridInfo, key } where each field value is a
+ * descriptor object carrying the raw typed array plus quantization params:
  *
- * Supports both float32 (default) and float16 precision transport.
- * When the server sends float16 data, it sets metadata.precision = "float16"
- * on the GridField message.  This halves the payload size with negligible
- * precision loss for visualization.
+ *   fields[varName] = { int16Data: Int16Array, scale_factor, add_offset, data_type }
+ *
+ * The dataClient layer is responsible for dequantizing these into
+ * RawScalarField objects using the APgL operator API.
+ *
+ * Supported data_type values on the wire:
+ *   "int16"   — quantized integers; physical = data * scale_factor + add_offset
+ *   "float32" — legacy float32 path (pass-through)
+ *   "float16" — legacy float16 path (half-float decode)
  */
 
 import protobuf from 'protobufjs';
@@ -40,10 +44,8 @@ function float16ToFloat32(raw) {
 
         let f;
         if (exponent === 0) {
-            // Subnormal or zero
             f = (sign ? -1 : 1) * Math.pow(2, -14) * (mantissa / 1024);
         } else if (exponent === 0x1f) {
-            // Infinity or NaN
             f = mantissa ? NaN : ((sign ? -1 : 1) * Infinity);
         } else {
             f = (sign ? -1 : 1) * Math.pow(2, exponent - 15) * (1 + mantissa / 1024);
@@ -54,11 +56,14 @@ function float16ToFloat32(raw) {
 }
 
 /**
- * Decode a GridResponse protobuf ArrayBuffer into the standard
- * { fields, gridInfo, key } format used by the rest of the frontend.
+ * Decode a GridResponse protobuf ArrayBuffer.
  *
  * @param {ArrayBuffer} buffer - raw protobuf bytes from fetch()
- * @returns {{ fields: Object<string, Float32Array>, gridInfo: object|null, key: string }}
+ * @returns {{
+ *   fields:   Object<string, { rawData: Int16Array|Float32Array, scale_factor: number, add_offset: number, data_type: string }>,
+ *   gridInfo: object|null,
+ *   key:      string
+ * }}
  */
 export function decodeGridResponse(buffer) {
     const msg = GridResponse.decode(new Uint8Array(buffer));
@@ -67,18 +72,30 @@ export function decodeGridResponse(buffer) {
     let gridInfo = null;
 
     for (const [varName, pbField] of Object.entries(msg.fields)) {
-        const raw = pbField.data;
-        const precision = (pbField.metadata && pbField.metadata.precision) || 'float32';
+        const raw      = pbField.data;
+        const dataType = pbField.dataType || (pbField.metadata && pbField.metadata.precision) || 'float32';
 
-        if (precision === 'float16') {
-            // Float16 transport: each value is 2 bytes
-            fields[varName] = float16ToFloat32(raw);
-        } else {
-            // Float32 transport (default): create aligned copy
+        let rawData;
+        if (dataType === 'int16') {
+            // Quantized int16: re-interpret bytes as a signed Int16Array.
             const aligned = new ArrayBuffer(raw.byteLength);
             new Uint8Array(aligned).set(raw);
-            fields[varName] = new Float32Array(aligned);
+            rawData = new Int16Array(aligned);
+        } else if (dataType === 'float16') {
+            rawData = float16ToFloat32(raw);
+        } else {
+            // float32 (default / legacy)
+            const aligned = new ArrayBuffer(raw.byteLength);
+            new Uint8Array(aligned).set(raw);
+            rawData = new Float32Array(aligned);
         }
+
+        fields[varName] = {
+            rawData,
+            scale_factor: pbField.scaleFactor ?? 1.0,
+            add_offset:   pbField.addOffset   ?? 0.0,
+            data_type:    dataType,
+        };
 
         if (!gridInfo && pbField.grid) {
             const g = pbField.grid;
@@ -93,6 +110,11 @@ export function decodeGridResponse(buffer) {
                 dx:          g.dx,
                 dy:          g.dy,
                 proj_params: _convertProjParams(g.projParams),
+                ll_x:        g.llX,
+                ll_y:        g.llY,
+                ur_x:        g.urX,
+                ur_y:        g.urY,
+                sat_lon:     g.satLon,
             };
         }
     }

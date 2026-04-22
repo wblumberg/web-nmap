@@ -2,7 +2,7 @@
 /* ===================== Dataset Selector Dialog ===================== */
 
 #ds-overlay {
-    z-index: 4000;  /* must exceed #lm-overlay (3000) so it renders on top */
+    z-index: 4000;
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.72);
@@ -14,8 +14,8 @@
 #ds-dialog {
     background: #0d0d1c;
     border: 1px solid #3a3a6e;
-    width: min(900px, 95vw);
-    height: min(540px, 88vh);
+    width: min(960px, 96vw);
+    height: min(580px, 90vh);
     display: flex;
     flex-direction: column;
     font-family: monospace;
@@ -23,6 +23,8 @@
     color: #d0d0e8;
     box-shadow: 0 8px 40px rgba(0,0,0,0.8);
 }
+
+/* ── Title bar ─────────────────────────────────────────────────────── */
 
 #ds-titlebar {
     display: flex;
@@ -51,6 +53,8 @@
     line-height: 1;
 }
 #ds-close:hover { color: #ff6060; }
+
+/* ── Search bar ────────────────────────────────────────────────────── */
 
 #ds-search-bar {
     display: flex;
@@ -84,6 +88,8 @@
 }
 #ds-search-clear:hover { color: #ff6060; }
 
+/* ── Three-column panel area ───────────────────────────────────────── */
+
 #ds-panels {
     display: flex;
     flex: 1;
@@ -102,9 +108,11 @@
     text-transform: uppercase;
 }
 
+/* ── Column 1: Data Source ─────────────────────────────────────────── */
+
 #ds-cat-panel {
-    width: 180px;
-    min-width: 140px;
+    width: 210px;
+    min-width: 160px;
     border-right: 1px solid #2a2a4e;
     display: flex;
     flex-direction: column;
@@ -115,61 +123,102 @@
     list-style: none;
     overflow-y: auto;
     flex: 1;
+    padding: 0;
+    margin: 0;
 }
 
-.ds-cat-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 6px 10px;
-    cursor: pointer;
-    border-bottom: 1px solid #1a1a30;
-    gap: 6px;
+/* Category section header (non-interactive) */
+.ds-cat-header {
+    padding: 5px 8px 3px;
+    font-size: 0.65rem;
+    font-weight: bold;
+    letter-spacing: 0.12em;
+    color: #6666aa;
+    background: #111126;
+    border-bottom: 1px solid #1e1e38;
+    text-transform: uppercase;
+    margin-top: 2px;
 }
-.ds-cat-item:hover { background: #1e1e3a; }
-.ds-cat-item.selected {
+.ds-cat-header:first-child { margin-top: 0; }
+
+.ds-cat-header-label { pointer-events: none; }
+
+/* Source group row */
+.ds-group-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 10px 5px 14px;
+    cursor: pointer;
+    border-bottom: 1px solid #171728;
+}
+.ds-group-item:hover { background: #1c1c36; }
+.ds-group-item.selected {
     background: #1e2d4e;
     color: #80c8ff;
     border-left: 3px solid #4488dd;
+    padding-left: 11px;
 }
-.ds-cat-all { font-style: italic; }
 
-.ds-cat-label { flex: 1; }
+.ds-group-label { flex: 1; }
 
-.ds-cat-badge {
-    font-size: 0.7rem;
-    color: #666699;
-    white-space: nowrap;
+/* Expanded sub-source rows (indented under a group) */
+.ds-source-sub-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 4px 10px 4px 26px;
+    cursor: pointer;
+    border-bottom: 1px solid #141424;
+    background: #0f0f20;
+    font-size: 0.78rem;
+    color: #9999bb;
 }
-.ds-cat-item.selected .ds-cat-badge { color: #6699cc; }
+.ds-source-sub-item:hover { background: #181830; color: #aaaacc; }
+.ds-source-sub-item.selected {
+    background: #172240;
+    color: #6ab4ff;
+    border-left: 3px solid #3377cc;
+    padding-left: 23px;
+}
 
-#ds-list-panel {
-    width: 240px;
-    min-width: 180px;
+.ds-source-sub-label { flex: 1; }
+
+/* ── Column 2: Products ──────────────────────────────────────────────*/
+
+#ds-prod-panel {
+    width: 250px;
+    min-width: 190px;
     border-right: 1px solid #2a2a4e;
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
 }
 
-#ds-dataset-list {
+#ds-prod-list {
     list-style: none;
     overflow-y: auto;
     flex: 1;
+    padding: 0;
+    margin: 0;
 }
 
-.ds-subcat-header {
-    padding: 3px 10px;
-    font-size: 0.68rem;
+/* Product group sub-header */
+.ds-prod-group-header {
+    padding: 4px 10px;
+    font-size: 0.67rem;
     font-weight: bold;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.09em;
     color: #556;
     background: #111128;
     border-bottom: 1px solid #1e1e38;
     text-transform: uppercase;
+    margin-top: 2px;
 }
+.ds-prod-group-header:first-child { margin-top: 0; }
 
-.ds-dataset-item {
+/* Individual product row */
+.ds-prod-item {
     display: flex;
     align-items: center;
     gap: 7px;
@@ -177,17 +226,24 @@
     cursor: pointer;
     border-bottom: 1px solid #171728;
 }
-.ds-dataset-item:hover { background: #1c1c36; }
-.ds-dataset-item.selected {
+.ds-prod-item:hover { background: #1c1c36; }
+.ds-prod-item.selected {
     background: #1e2d4e;
     color: #80c8ff;
     border-left: 3px solid #4488dd;
+    padding-left: 7px;
 }
-.ds-dataset-item.ds-unimplemented {
-    color: #444466;
-}
-.ds-dataset-item.ds-unimplemented:hover { color: #666699; }
 
+.ds-prod-indicator {
+    font-size: 0.55rem;
+    color: #334466;
+    flex-shrink: 0;
+}
+.ds-prod-item.selected .ds-prod-indicator { color: #4488dd; }
+
+.ds-prod-label { flex: 1; }
+
+/* Shared implemented/unimplemented dot */
 .ds-ds-indicator {
     font-size: 0.6rem;
     flex-shrink: 0;
@@ -195,13 +251,13 @@
 .ds-implemented   .ds-ds-indicator { color: #44bb66; }
 .ds-unimplemented .ds-ds-indicator { color: #334; }
 
-.ds-ds-name { flex: 1; }
-
 .ds-no-results {
     padding: 12px 10px;
     color: #444466;
     font-style: italic;
 }
+
+/* ── Column 3: Info panel ────────────────────────────────────────────*/
 
 #ds-info-panel {
     flex: 1;
@@ -238,13 +294,6 @@
     letter-spacing: 0.05em;
 }
 
-.ds-info-desc {
-    color: #9999bb;
-    margin-bottom: 10px;
-    font-size: 0.80rem;
-    line-height: 1.45;
-}
-
 .ds-info-table {
     width: 100%;
     border-collapse: collapse;
@@ -259,18 +308,42 @@
     color: #6666aa;
     white-space: nowrap;
     padding-right: 12px;
-    width: 96px;
+    width: 80px;
+}
+.ds-info-table code {
+    color: #88aadd;
+    font-size: 0.74rem;
 }
 
-.ds-info-path-label {
-    font-size: 0.70rem;
+.ds-info-section-label {
+    font-size: 0.68rem;
     color: #5566aa;
-    margin-bottom: 3px;
+    margin-bottom: 4px;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.09em;
+    border-top: 1px solid #1e1e3a;
+    padding-top: 6px;
 }
 
-/* Cycle-time picker (forecast datasets) */
+.ds-info-prod-name {
+    font-size: 0.88rem;
+    font-weight: bold;
+    color: #a0d0ff;
+    margin-bottom: 4px;
+}
+
+.ds-info-prod-meta {
+    font-size: 0.76rem;
+    color: #8899bb;
+    margin-bottom: 3px;
+}
+.ds-info-prod-group { color: #aaaacc; }
+.ds-info-prod-meta code {
+    color: #88aadd;
+    font-size: 0.74rem;
+}
+
+/* Cycle-time picker */
 #ds-cycle-row {
     display: flex;
     align-items: center;
@@ -288,32 +361,7 @@
 }
 #ds-cycle-sel:disabled { opacity: 0.5; }
 
-code.ds-path {
-    display: block;
-    background: #0a0a18;
-    border: 1px solid #1e1e3a;
-    padding: 4px 8px;
-    font-size: 0.75rem;
-    color: #88aadd;
-    word-break: break-all;
-    margin-bottom: 10px;
-}
-
-.ds-info-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin-top: 4px;
-}
-
-.ds-tag {
-    background: #141428;
-    border: 1px solid #2a2a50;
-    color: #5566aa;
-    padding: 1px 6px;
-    font-size: 0.68rem;
-    border-radius: 2px;
-}
+/* ── Footer ──────────────────────────────────────────────────────────*/
 
 #ds-footer {
     display: flex;
@@ -365,3 +413,4 @@ code.ds-path {
     border-color: #1a1a2e;
     cursor: not-allowed;
 }
+

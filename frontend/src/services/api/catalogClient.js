@@ -243,3 +243,37 @@ export async function fetchGridInfoCached(sourceId, opts = {}) {
     _gridInfoCache.set(cacheKey, info);
     return info;
 }
+
+// ─── Server-side time matching ────────────────────────────────────────────────
+
+/**
+ * Ask the backend to build a complete dominant→secondary time-match map.
+ *
+ * This replaces N separate /catalog/{source}/times/nearest calls with a
+ * single POST that the server resolves from its full directory listings.
+ *
+ * @param {string}   dominantSourceId     - e.g. 'MRMS_CONUS_MergedBaseReflectivityQC'
+ * @param {string[]} secondarySourceIds   - e.g. ['LIGHTNING', 'SURFACE_OBS']
+ * @param {string[]} dominantKeys         - e.g. ['20260418_1926']
+ * @param {number}   [windowHours=3]      - match tolerance (±hours)
+ * @returns {Promise<{
+ *   dominant_source_id: string,
+ *   secondary_source_ids: string[],
+ *   dominant_key_count: number,
+ *   map: Record<string, Record<string, string|null>>
+ * }>}
+ */
+export async function buildTimemap(dominantSourceId, secondarySourceIds, dominantKeys, windowHours = 3) {
+    const resp = await fetch('/api/v1/timematch/build_map', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            dominant_source_id:   dominantSourceId,
+            secondary_source_ids: secondarySourceIds,
+            dominant_keys:        dominantKeys,
+            window_hours:         windowHours,
+        }),
+    });
+    if (!resp.ok) throw new Error(`buildTimemap failed: ${resp.status}`);
+    return resp.json();
+}
