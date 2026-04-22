@@ -68,10 +68,15 @@ def _resolve_precision(precision: str | None) -> str:
     return p
 
 
-def _pack_data(data_array: np.ndarray, precision: str) -> bytes:
-    """Cast a numpy array to the requested precision and return raw bytes."""
-    dtype = np.float16 if precision == "float16" else np.float32
-    return np.nan_to_num(data_array.astype(dtype), nan=0.0).tobytes()
+def _pack_data(data_array: np.ndarray, data_type: str = "float32") -> bytes:
+    """Cast a numpy array to the requested data type and return raw little-endian bytes."""
+    if data_type == "int16":
+        # Caller is responsible for pre-quantizing; just ensure int16 dtype and serialise.
+        return data_array.astype(np.int16).tobytes()
+    elif data_type == "float16":
+        return np.nan_to_num(data_array.astype(np.float16), nan=0.0).tobytes()
+    else:
+        return np.nan_to_num(data_array.astype(np.float32), nan=0.0).tobytes()
 
 
 # ─── Content negotiation ──────────────────────────────────────────────────────
@@ -123,8 +128,7 @@ def _check_etag(request: Request, etag: str) -> Response | None:
 
 # ─── Protobuf serialization ───────────────────────────────────────────────────
 def _results_to_protobuf(results, source_id: str, key: str,
-                          cycle: str = "", fhr: int = -1,
-                          precision: str = "float32") -> bytes:
+                          cycle: str = "", fhr: int = -1) -> bytes:
     """Serialize a list of GriddedResult objects into a GridResponse protobuf."""
     def safe_float(val, default=-9999.0):
         try:
@@ -152,10 +156,20 @@ def _results_to_protobuf(results, source_id: str, key: str,
             dx=safe_float(getattr(gi, "dx", None)),
             dy=safe_float(getattr(gi, "dy", None)),
             proj_params={k: str(v) for k, v in (getattr(gi, "proj_params", {}) or {}).items()},
+            ll_x=safe_float(getattr(gi, "ll_x", None), default=0.0),
+            ll_y=safe_float(getattr(gi, "ll_y", None), default=0.0),
+            ur_x=safe_float(getattr(gi, "ur_x", None), default=0.0),
+            ur_y=safe_float(getattr(gi, "ur_y", None), default=0.0),
+            sat_lon=safe_float(getattr(gi, "sat_lon", None), default=0.0),
         )
-        # Pack data at the requested precision
-        data_array = np.asarray(r.data, dtype=np.float32)
-        raw_bytes = _pack_data(data_array, precision)
+        data_type = getattr(r, 'data_type', None) or 'float32'
+        data_array = r.data if isinstance(r.data, np.ndarray) else np.asarray(
+            r.data, dtype=np.int16 if data_type == 'int16' else np.float32
+        )
+        raw_bytes = _pack_data(data_array, data_type)
+
+        scale_factor = float(r.scale_factor) if r.scale_factor is not None else 1.0
+        add_offset   = float(r.add_offset)   if r.add_offset   is not None else 0.0
 
         pb_field = GridField(
             variable=r.variable,
@@ -165,9 +179,11 @@ def _results_to_protobuf(results, source_id: str, key: str,
             valid_time=r.valid_time or "",
             cycle=r.cycle or "",
             fhr=r.fhr if r.fhr is not None else -1,
-            fill_value=safe_float(r.fill_value, float('nan')),
-            metadata={**{k: str(v) for k, v in (r.metadata or {}).items()},
-                      'precision': precision},
+            fill_value=safe_float(r.fill_value, -32768.0),
+            scale_factor=scale_factor,
+            add_offset=add_offset,
+            data_type=data_type,
+            metadata={k: str(v) for k, v in (r.metadata or {}).items()},
         )
         resp.fields[r.variable].CopyFrom(pb_field)
 
@@ -268,7 +284,7 @@ async def get_analysis_field(
 
     # ── Content negotiation: protobuf or JSON ──
     if _wants_protobuf(request):
-        pb_bytes = _results_to_protobuf(results, source_id, key, precision=prec)
+        pb_bytes = _results_to_protobuf(results, source_id, key)
         grid_cache.put(cache_key, pb_bytes)
         resp = Response(content=pb_bytes, media_type="application/x-protobuf")
         return _add_cache_headers(resp, etag, nocache)
@@ -372,7 +388,7 @@ async def get_forecast_field(
 
     # ── Content negotiation: protobuf or JSON ──
     if _wants_protobuf(request):
-        pb_bytes = _results_to_protobuf(results, source_id, key, cycle=cycle, fhr=fhr, precision=prec)
+        pb_bytes = _results_to_protobuf(results, source_id, key, cycle=cycle, fhr=fhr)
         grid_cache.put(cache_key, pb_bytes)
         resp = Response(content=pb_bytes, media_type="application/x-protobuf")
         return _add_cache_headers(resp, etag, nocache)
@@ -465,10 +481,15 @@ async def stream_forecast_fields(
         pb_grid = GridInfo(
             grid_type=grid.grid_type or "",
             ni=grid.ni, nj=grid.nj,
-            lat_min=float(grid.lat_min), lat_max=float(grid.lat_max),
-            lon_min=float(grid.lon_min), lon_max=float(grid.lon_max),
-            dx=float(grid.dx), dy=float(grid.dy),
+            lat_min=float(grid.lat_min or 0), lat_max=float(grid.lat_max or 0),
+            lon_min=float(grid.lon_min or 0), lon_max=float(grid.lon_max or 0),
+            dx=float(grid.dx or 0), dy=float(grid.dy or 0),
             proj_params={k: str(v) for k, v in (grid.proj_params or {}).items()},
+            ll_x=float(grid.ll_x or 0),
+            ll_y=float(grid.ll_y or 0),
+            ur_x=float(grid.ur_x or 0),
+            ur_y=float(grid.ur_y or 0),
+            sat_lon=float(grid.sat_lon or 0),
         )
 
         var_info = {}
@@ -509,7 +530,21 @@ async def stream_forecast_fields(
                     if remaining[:2] in (('x', 'y'), ('lon', 'lat')):
                         slice_2d = slice_2d.T
                 t_pack0 = time.perf_counter()
-                raw_bytes = _pack_data(slice_2d, prec)
+                # Quantize to int16
+                data_f32 = slice_2d.astype(np.float32)
+                valid_mask = np.isfinite(data_f32)
+                valid_vals = data_f32[valid_mask]
+                if valid_vals.size > 0:
+                    data_min, data_max = float(valid_vals.min()), float(valid_vals.max())
+                    scale_factor = (data_max - data_min) / 65534.0 if data_max > data_min else 1.0
+                    add_offset   = data_min + 32767.0 * scale_factor
+                else:
+                    scale_factor, add_offset = 1.0, 0.0
+                packed = np.full(data_f32.shape, -32768, dtype=np.int16)
+                if scale_factor != 0.0:
+                    q = np.clip(np.round((data_f32 - add_offset) / scale_factor).astype(np.int32), -32767, 32767)
+                    packed[valid_mask] = q[valid_mask].astype(np.int16)
+                raw_bytes = _pack_data(packed, 'int16')
                 t_pack1 = time.perf_counter()
                 pb_field = GridField(
                     variable=generic_name,
@@ -519,8 +554,11 @@ async def stream_forecast_fields(
                     valid_time="",
                     cycle=cycle,
                     fhr=fhr,
-                    fill_value=0.0,
-                    metadata={'precision': prec},
+                    fill_value=-32768.0,
+                    scale_factor=scale_factor,
+                    add_offset=add_offset,
+                    data_type='int16',
+                    metadata={k: str(v) for k, v in (attrs.get('metadata', {}) or {}).items()},
                 )
                 resp.fields[generic_name].CopyFrom(pb_field)
                 print(f"[STREAM][{key}] {generic_name}: zarr_read={t_zarr1-t_zarr0:.3f}s pack={t_pack1-t_pack0:.3f}s shape={slice_2d.shape}")
@@ -564,6 +602,105 @@ async def stream_forecast_fields(
     )
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# STREAMING BATCH ANALYSIS ENDPOINT
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+@router.get("/{source_id}/analysis_stream")
+async def stream_analysis_fields(
+    source_id : str,
+    variables : str           = Query(..., description="Comma-separated variable list"),
+    keys      : str           = Query(..., description="Comma-separated valid-time keys, e.g. '20260316_1800,20260316_1900'"),
+    level     : Optional[str] = Query(None, description="Vertical level"),
+    precision : Optional[str] = Query(None, description="Transport precision: 'float32' or 'float16'"),
+    nocache   : Optional[str] = Query(None, description="Set to '1' to bypass cache"),
+):
+    """
+    Stream multiple analysis frames over a single HTTP connection.
+
+    Accepts a list of valid-time keys (one per desired frame) and streams each
+    frame as a length-prefixed protobuf GridResponse message — the same wire
+    format used by the forecast_stream endpoint:
+
+        [4-byte big-endian length][GridResponse protobuf bytes] ...repeated...
+
+    Each key resolves to a separate file on disk (e.g. one Zarr per MRMS scan,
+    one per GOES image).  Missing keys are silently skipped so the stream is
+    not interrupted by a gap in the archive.
+
+    The server-side LRU grid_cache is checked before reading from disk; already-
+    cached frames are re-serialized and forwarded without touching storage.
+    """
+    prec = _resolve_precision(precision)
+    bypass_cache = (nocache == "1")
+
+    try:
+        source = get_source(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+    key_list = [k.strip() for k in keys.split(",") if k.strip()]
+    if not key_list:
+        raise HTTPException(400, "keys must contain at least one valid-time key")
+
+    var_list = [v.strip() for v in variables.split(",")]
+    var_map  = _build_var_map(source, var_list)
+
+    print(f"[ANALYSIS_STREAM] {source_id} keys={key_list[:3]}{'…' if len(key_list)>3 else ''} "
+          f"vars={var_list} precision={prec}")
+
+    def _read_and_serialize_frame(path, key):
+        """Blocking: read one analysis frame from disk and serialize to protobuf bytes."""
+        import asyncio
+        reader = get_reader(path)
+        # read_gridded is async, but the underlying zarr I/O is sync.
+        # Run the coroutine on the current thread's event loop via asyncio.run_coroutine_threadsafe
+        # — except we're already on a thread worker, so just use a new event loop.
+        loop = asyncio.new_event_loop()
+        try:
+            results = loop.run_until_complete(
+                reader.read_gridded(path=path, var_map=var_map, level=level)
+            )
+        finally:
+            loop.close()
+        return _results_to_protobuf(results, source_id, key)
+
+    async def _generate():
+        for key in key_list:
+            cache_key = (source_id, key, variables, level, prec)
+
+            # ── Server-side cache hit ──
+            if not bypass_cache:
+                cached = grid_cache.get(cache_key)
+                if cached is not None:
+                    frame = struct.pack('>I', len(cached)) + cached
+                    yield frame
+                    continue
+
+            # ── Resolve file path for this key ──
+            path = await source.get_path(key)
+            if path is None:
+                print(f"[ANALYSIS_STREAM] key '{key}' not found — skipping")
+                continue
+
+            # ── Read and serialize on a thread so the event loop stays free ──
+            try:
+                pb_bytes = await asyncio.to_thread(_read_and_serialize_frame, path, key)
+            except Exception as e:
+                print(f"[ANALYSIS_STREAM] read error for '{source_id}' key='{key}': {e}")
+                continue
+
+            if not bypass_cache:
+                grid_cache.put(cache_key, pb_bytes)
+
+            frame = struct.pack('>I', len(pb_bytes)) + pb_bytes
+            yield frame
+
+    return StreamingResponse(
+        _generate(),
+        media_type="application/x-protobuf-stream",
+    )
 
 
 @router.get("/{source_id}/available_levels")

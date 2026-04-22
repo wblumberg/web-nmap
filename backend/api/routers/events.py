@@ -40,7 +40,7 @@ from typing import AsyncGenerator
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
-from ..watcher import get_event_queue
+from ..watcher import register_client_queue, unregister_client_queue
 
 router = APIRouter(tags=["Events"])
 
@@ -82,29 +82,31 @@ async def _event_generator(request: Request) -> AsyncGenerator[str, None]:
 
     The double newline marks the end of one event.
     """
-    queue = get_event_queue()
+    queue = register_client_queue()
+    try:
+        # Send an initial connected confirmation
+        yield _sse_event("connected", {"status": "ok", "message": "WebNMAP event stream connected"})
 
-    # Send an initial connected confirmation
-    yield _sse_event("connected", {"status": "ok", "message": "WebNMAP event stream connected"})
+        while True:
+            # Check if the client disconnected (browser closed tab, etc.)
+            if await request.is_disconnected():
+                break
 
-    while True:
-        # Check if the client disconnected (browser closed tab, etc.)
-        if await request.is_disconnected():
-            break
+            try:
+                # Wait up to 30 seconds for a new event.
+                # If nothing arrives, send a heartbeat to keep the connection alive.
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                yield _sse_event("new_data", event)
 
-        try:
-            # Wait up to 30 seconds for a new event.
-            # If nothing arrives, send a heartbeat to keep the connection alive.
-            event = await asyncio.wait_for(queue.get(), timeout=30.0)
-            yield _sse_event("new_data", event)
+            except asyncio.TimeoutError:
+                # No new data in 30s — send a heartbeat so the browser knows
+                # the connection is still open
+                yield _sse_event("heartbeat", {"time": datetime.now(timezone.utc).isoformat()})
 
-        except asyncio.TimeoutError:
-            # No new data in 30s — send a heartbeat so the browser knows
-            # the connection is still open
-            yield _sse_event("heartbeat", {"time": datetime.now(timezone.utc).isoformat()})
-
-        except asyncio.CancelledError:
-            break
+            except asyncio.CancelledError:
+                break
+    finally:
+        unregister_client_queue(queue)
 
 
 def _sse_event(event_type: str, data: dict) -> str:

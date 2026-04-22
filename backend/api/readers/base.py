@@ -34,7 +34,8 @@ This decouples the frontend naming from the backend file naming.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
+import numpy as np
 
 
 @dataclass
@@ -99,38 +100,48 @@ class GriddedResult:
     A single 2-D gridded variable read from a file.
 
     Fields:
-        variable    : The generic variable name (from var_map key)
-        units       : Physical units string (e.g. 'K', 'm/s', 'Pa')
-        data        : Flat float32 array, row-major order, shape (nj, ni)
-                      This is what gets passed to RawScalarField in autumnplot-gl.
-        grid        : The spatial grid descriptor
-        valid_time  : UTC datetime of this field
-        cycle       : Model init time (None for analysis/obs)
-        fhr         : Forecast hour (None for analysis/obs)
-        fill_value  : Value used for missing data (typically NaN or 9.999e20)
-        metadata    : Extra key/value pairs (level, ensemble member, etc.)
+        variable     : The generic variable name (from var_map key)
+        units        : Physical units string (e.g. 'K', 'm/s', 'Pa')
+        data         : Flat int16 (or float32) array, row-major order, shape (nj, ni)
+                       When quantized, apply: physical = data * scale_factor + add_offset
+        grid         : The spatial grid descriptor
+        valid_time   : UTC datetime of this field
+        cycle        : Model init time (None for analysis/obs)
+        fhr          : Forecast hour (None for analysis/obs)
+        fill_value   : Value used for missing data (sentinel int16 = -32768 when quantized)
+        metadata     : Extra key/value pairs (level, ensemble member, etc.)
+        scale_factor : CF-convention scale factor; physical = data * scale_factor + add_offset
+        add_offset   : CF-convention offset; physical = data * scale_factor + add_offset
+        data_type    : 'int16' | 'float32' | 'float16'
     """
-    variable    : str
-    units       : str
-    data        : list[float]   # JSON-serializable; JS converts to Float32Array
-    grid        : GridInfo
-    valid_time  : str           # ISO 8601 UTC
-    cycle       : str | None    = None
-    fhr         : int | None    = None
-    fill_value  : float         = float('nan')
-    metadata    : dict          = field(default_factory=dict)
+    variable     : str
+    units        : str
+    data         : Union[np.ndarray, list]  # numpy array preferred; list also accepted
+    grid         : GridInfo
+    valid_time   : str           # ISO 8601 UTC
+    cycle        : str | None    = None
+    fhr          : int | None    = None
+    fill_value   : float         = float('nan')
+    metadata     : dict          = field(default_factory=dict)
+    scale_factor : float | None  = None
+    add_offset   : float | None  = None
+    data_type    : str           = 'float32'
 
     def as_dict(self) -> dict:
+        data = self.data.tolist() if isinstance(self.data, np.ndarray) else self.data
         return {
-            "variable"  : self.variable,
-            "units"     : self.units,
-            "data"      : self.data,
-            "grid"      : self.grid.as_dict(),
-            "valid_time": self.valid_time,
-            "cycle"     : self.cycle,
-            "fhr"       : self.fhr,
-            "fill_value": self.fill_value,
-            "metadata"  : self.metadata,
+            "variable"    : self.variable,
+            "units"       : self.units,
+            "data"        : data,
+            "grid"        : self.grid.as_dict(),
+            "valid_time"  : self.valid_time,
+            "cycle"       : self.cycle,
+            "fhr"         : self.fhr,
+            "fill_value"  : self.fill_value,
+            "metadata"    : self.metadata,
+            "scale_factor": self.scale_factor,
+            "add_offset"  : self.add_offset,
+            "data_type"   : self.data_type,
         }
 
 

@@ -26,55 +26,142 @@ This is a standard Python pattern for bridging threads and asyncio.
 """
 
 import asyncio
+import json
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from watchdog.events import FileSystemEventHandler, FileCreatedEvent
+from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from .sources.registry import SOURCES
 
-# The shared asyncio Queue that SSE clients read from.
-# It's a "broadcast" queue — all connected clients share the same queue,
-# so every connected browser gets notified about every new file.
+# --------------------------------------------------------------------------
+# Event broadcast infrastructure
+# --------------------------------------------------------------------------
+# Each connected SSE client registers a private asyncio.Queue here.  When a
+# new-data event arrives from watchdog (running in a background thread) it is
+# copied into *every* registered queue so all clients receive it.
+
+_client_queues: list[asyncio.Queue] = []
+_client_queues_lock = threading.Lock()
+
+
+def register_client_queue() -> asyncio.Queue:
+    """Create a per-client queue and add it to the broadcast list."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    with _client_queues_lock:
+        _client_queues.append(q)
+    return q
+
+
+def unregister_client_queue(q: asyncio.Queue) -> None:
+    """Remove a client queue when the SSE connection closes."""
+    with _client_queues_lock:
+        try:
+            _client_queues.remove(q)
+        except ValueError:
+            pass
+
+
+# Kept for backwards compatibility (db-poller uses it to emit events).
 _event_queue: asyncio.Queue | None = None
 _loop: asyncio.AbstractEventLoop | None = None
-
-
-def get_event_queue() -> asyncio.Queue:
-    """Return the shared event queue, creating it if necessary."""
-    global _event_queue
-    if _event_queue is None:
-        _event_queue = asyncio.Queue(maxsize=500)
-    return _event_queue
 
 
 class NewFileHandler(FileSystemEventHandler):
     """
     Handles file system events from watchdog.
     Runs in a background thread — must not call async functions directly.
+
+    Zarr stores are *directories*, so a DirCreatedEvent fires as soon as the
+    store directory is first created — well before data chunks are written.
+    Using recursive=True to catch the nested zarr.json has a race condition on
+    Linux/inotify: the watch on the new sub-directory may not be registered in
+    time to see events inside it.
+
+    Instead we use recursive=False and *poll* the root zarr.json after directory
+    creation.  The zarr.json gets a ``consolidated_metadata`` key only after
+    zarr.consolidate_metadata() is called at the very end of the write.  We
+    check every 2 s and give up after 30 s.
     """
 
     def __init__(self, source_id: str, source):
         super().__init__()
-        self.source_id = source_id
-        self.source    = source
+        self.source_id     = source_id
+        self.source        = source
+        self._emitted_stores: set[Path] = set()
+        self._stores_lock  = threading.Lock()
 
-    def on_created(self, event: FileCreatedEvent):
-        """Called by watchdog (in its thread) when a new file appears."""
+    def on_created(self, event):
+        path = Path(event.src_path)
+        print(f"[watcher] on_created: is_dir={event.is_directory} suffix={path.suffix!r} name={path.name!r} src={self.source_id}")
+
+        # Zarr stores are directories.  Schedule a completion poll.
+        if event.is_directory and path.suffix == ".zarr":
+            vt = self.source._extract_time(path.name)
+            print(f"[watcher] zarr dir detected, _extract_time={vt}")
+            if vt is not None:
+                self._schedule_zarr_check(path, vt)
+            return
+
+        # Skip all other directory events.
         if event.is_directory:
             return
 
-        path = Path(event.src_path)
-
-        # Check that the filename matches this source's pattern
-        times = []  # We'll do a quick regex check without the full async scan
+        # Regular flat-file source: emit immediately.
         vt = self.source._extract_time(path.name)
         if vt is None:
-            return  # Doesn't match this source's pattern
+            return
+        self._emit(path, vt)
 
-        key   = self.source._make_key(vt)
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _schedule_zarr_check(self, store_path: Path, vt, attempt: int = 0):
+        """
+        Poll store_path/zarr.json every 2 s until it contains
+        ``consolidated_metadata`` (written last), then fire the SSE event.
+        Gives up after 15 attempts (~30 s).
+        """
+        def check():
+            print(f"[watcher] Polling zarr check attempt={attempt} store={store_path.name}")
+            with self._stores_lock:
+                if store_path in self._emitted_stores:
+                    print(f"[watcher] Already emitted for {store_path.name}, skipping")
+                    return  # Already fired for this store
+
+            ready = False
+            zarr_json = store_path / "zarr.json"
+            print(f"[watcher] zarr.json exists={zarr_json.exists()}")
+            if zarr_json.exists():
+                try:
+                    with open(zarr_json) as f:
+                        meta = json.load(f)
+                    ready = "consolidated_metadata" in meta
+                    print(f"[watcher] consolidated_metadata present={ready}")
+                except Exception as exc:
+                    print(f"[watcher] Error reading zarr.json: {exc}")
+
+            if ready:
+                print(f"[watcher] READY — emitting event for {store_path.name}")
+                with self._stores_lock:
+                    self._emitted_stores.add(store_path)
+                self._emit(store_path, vt)
+            elif attempt < 14:  # 15 checks × 2 s = 30 s max
+                threading.Timer(
+                    2.0,
+                    lambda: self._schedule_zarr_check(store_path, vt, attempt + 1),
+                ).start()
+            else:
+                print(f"[watcher] Timed out waiting for zarr store to be ready: {store_path}")
+
+        threading.Timer(2.0, check).start()
+
+    def _emit(self, path: Path, vt):
+        key = self.source._make_key(vt)
         event_data = {
             "source_id"  : self.source_id,
             "key"        : key,
@@ -82,10 +169,16 @@ class NewFileHandler(FileSystemEventHandler):
             "filename"   : path.name,
             "size_bytes" : path.stat().st_size if path.exists() else None,
         }
-
-        # Thread-safe: put the event onto the asyncio queue from this thread
-        if _loop is not None and _event_queue is not None:
-            _loop.call_soon_threadsafe(_event_queue.put_nowait, event_data)
+        if _loop is None:
+            return
+        # Fan-out: deliver to every connected client's private queue.
+        with _client_queues_lock:
+            queues = list(_client_queues)
+        for q in queues:
+            try:
+                _loop.call_soon_threadsafe(q.put_nowait, event_data)
+            except asyncio.QueueFull:
+                pass  # Slow client; drop rather than block the watcher thread
 
 
 def start_watching():
@@ -122,7 +215,6 @@ async def _poll_db_source(source_id: str, source, interval_seconds: int) -> None
 
     engine = get_engine()
     last_seen: datetime | None = None
-    queue = get_event_queue()
 
     print(f"[db-watcher] Polling {source_id} every {interval_seconds}s")
 
@@ -153,11 +245,14 @@ async def _poll_db_source(source_id: str, source, interval_seconds: int) -> None
                     "filename"  : None,   # no file — DB row
                     "size_bytes": None,
                 }
-                try:
-                    queue.put_nowait(event_data)
-                    print(f"[db-watcher] {source_id} new time: {key}")
-                except asyncio.QueueFull:
-                    pass   # drop silently; clients will catch up on next poll
+                with _client_queues_lock:
+                    queues = list(_client_queues)
+                for q in queues:
+                    try:
+                        q.put_nowait(event_data)
+                    except asyncio.QueueFull:
+                        pass
+                print(f"[db-watcher] {source_id} new time: {key}")
         except Exception as exc:
             # Non-fatal: log and continue polling
             print(f"[db-watcher] {source_id} poll error: {exc}")

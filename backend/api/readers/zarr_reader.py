@@ -104,29 +104,51 @@ class ZarrReader(Reader):
                   f"nan_count={np.isnan(data_array.astype(float)).sum()} "
                   f"first5={data_array.flatten()[:5].tolist()}")
 
-            # Replace fill value with NaN
-            fill = attrs.get('_FillValue', attrs.get('missing_value', -9999))
-            data_array = data_array.astype(np.float16)
-            print(f"[DEBUG zarr] After float16 cast: min={np.nanmin(data_array):.4f} max={np.nanmax(data_array):.4f}")
-            data_array_replaced = np.nan_to_num(data_array, nan=0)
-            print(f"[DEBUG zarr] After nan_to_num: min={data_array_replaced.min():.4f} max={data_array_replaced.max():.4f} "
-                  f"zero_count={(data_array_replaced == 0).sum()} total={data_array_replaced.size}")
+            # Quantize to int16 using CF-convention scale_factor / add_offset.
+            # physical = packed * scale_factor + add_offset
+            # Sentinel fill value: -32768 (int16 minimum)
+            data_f32 = data_array.astype(np.float32)
+            valid_mask = np.isfinite(data_f32)
+            valid_vals = data_f32[valid_mask]
 
-            #try:
-            #    data_array[data_array >= fill * 0.99] = np.nan
-            #except:
-            #    print("Cannot multiply")
-            
+            if valid_vals.size > 0:
+                data_min = float(valid_vals.min())
+                data_max = float(valid_vals.max())
+                # Map the valid data range into int16 range [-32767, 32767]
+                # (reserve -32768 as the fill/missing sentinel)
+                int16_range = 65534.0  # = 32767 - (-32767)
+                if data_max > data_min:
+                    scale_factor = (data_max - data_min) / int16_range
+                else:
+                    scale_factor = 1.0
+                add_offset = data_min + 32767.0 * scale_factor
+            else:
+                scale_factor = 1.0
+                add_offset   = 0.0
+
+            packed = np.full(data_f32.shape, -32768, dtype=np.int16)
+            if scale_factor != 0.0:
+                quantized = np.round((data_f32 - add_offset) / scale_factor).astype(np.int32)
+                quantized = np.clip(quantized, -32767, 32767)
+                packed[valid_mask] = quantized[valid_mask].astype(np.int16)
+
+            print(f"[DEBUG zarr] int16 quantize '{generic_name}': "
+                  f"scale={scale_factor:.6g} offset={add_offset:.6g} "
+                  f"fill_count={(~valid_mask).sum()} total={data_f32.size}")
+
             results.append(GriddedResult(
-                variable   = generic_name,
-                units      = attrs.get('units', 'unknown'),
-                data       = data_array_replaced.flatten().tolist(),
-                grid       = grid,
-                valid_time = valid_time,
-                cycle      = cycle,
-                fhr        = fhr_val,
-                fill_value = 0,
-                metadata   = {
+                variable     = generic_name,
+                units        = attrs.get('units', 'unknown'),
+                data         = packed.flatten(),
+                grid         = grid,
+                valid_time   = valid_time,
+                cycle        = cycle,
+                fhr          = fhr_val,
+                fill_value   = -32768,
+                scale_factor = scale_factor,
+                add_offset   = add_offset,
+                data_type    = 'int16',
+                metadata     = {
                     "long_name"  : attrs.get('long_name', generic_name),
                     "zarr_name"  : zarr_name,
                     "level"      : level,

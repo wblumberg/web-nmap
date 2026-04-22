@@ -29,9 +29,10 @@ from fastapi.responses import JSONResponse
 
 from ..sources.registry import get_source
 from ..readers import get_reader
+from ..utils.time_helper import _parse_key_to_dt
 from ..services.alerts_sql import (
-    ALERT_PHEN_LABELS, ALERT_SOURCE_SIG,
-    query_alerts_geojson, resolve_phen,
+    ALERT_PHEN_LABELS,
+    query_alerts_geojson, query_alerts_geojson_unioned, resolve_phen,
 )
 
 router = APIRouter(tags=["Geometry Data"])
@@ -95,8 +96,8 @@ async def get_geometry_features(
         raise HTTPException(404, str(e))
 
     # ── DB-backed alert sources ───────────────────────────────────────────
-    if getattr(source, "source_type", None) == "ALERT":
-        sig = ALERT_SOURCE_SIG[source_id]
+    if getattr(source, "source_type", None) == "MISC":
+        sig = source.sig
         parsed_bbox = _parse_bbox(bbox)
 
         if at is not None:
@@ -104,11 +105,18 @@ async def get_geometry_features(
                 at_dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
             except ValueError:
                 raise HTTPException(400, f"Invalid 'at' datetime: {at!r}")
+        elif key is not None:
+            at_dt = _parse_key_to_dt(key)
+            if at_dt is None:
+                raise HTTPException(400, f"Cannot parse 'key' as a datetime: {key!r}")
         else:
             at_dt = datetime.now(timezone.utc)
 
+        # For DB alert sources, event_type (forwarded from by_type's type_name)
+        # is the same concept as phen.  Fall back to it when phen isn't set.
+        phen_effective = phen if phen is not None else event_type
         try:
-            phen_code = resolve_phen(phen)
+            phen_code = resolve_phen(phen_effective)
         except ValueError as e:
             raise HTTPException(400, str(e))
 
@@ -123,7 +131,7 @@ async def get_geometry_features(
             fc["features"] = [
                 _simplify_feature(f, simplify_deg) for f in fc["features"]
             ]
-
+        print(fc)
         return JSONResponse(fc)
 
     # ── Filesystem-backed sources (existing logic) ────────────────────────
@@ -172,18 +180,70 @@ async def get_geometry_features(
 
 @router.get("/{source_id}/by_type")
 async def get_geometries_by_type(
-    source_id  : str,
-    type_name  : str           = Query(..., description="e.g. 'Tornado Warning', 'moderate'"),
-    key        : Optional[str] = Query(None),
-    at         : Optional[str] = Query(None),
-    phen       : Optional[str] = Query(None),
-    bbox       : Optional[str] = Query(None),
+    source_id    : str,
+    type_name    : str            = Query(..., description="e.g. 'Tornado Warning', 'moderate'"),
+    key          : Optional[str]  = Query(None),
+    at           : Optional[str]  = Query(None),
+    phen         : Optional[str]  = Query(None),
+    bbox         : Optional[str]  = Query(None),
+    simplify_deg : Optional[float] = Query(None, ge=0.0001, le=1.0,
+                                   description="Simplify tolerance in degrees."),
 ):
     """
     Return only geometries matching a specific type.
 
-    Shortcut for: GET /features?event_type={type_name}
+    For DB-backed alert sources (WATCHES, WARNINGS, ADVISORIES), all CWA
+    polygons sharing the same event number (etn) are unioned via PostGIS
+    ``ST_MakeValid(ST_Union(geom))``, returning one clean feature per event.
+    This avoids self-touching rings that break WebGL ear-clip triangulation.
+
+    For filesystem sources (SPC outlooks, fronts, etc.) the call falls back
+    to the standard ``/features?event_type=`` filter.
     """
+    try:
+        source = get_source(source_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+    # ── DB-backed alert sources: union in PostGIS ─────────────────────────
+    if getattr(source, "source_type", None) == "MISC":
+        sig         = source.sig
+        parsed_bbox = _parse_bbox(bbox)
+
+        if at is not None:
+            try:
+                at_dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+            except ValueError:
+                raise HTTPException(400, f"Invalid 'at' datetime: {at!r}")
+        elif key is not None:
+            at_dt = _parse_key_to_dt(key)
+            if at_dt is None:
+                raise HTTPException(400, f"Cannot parse 'key' as a datetime: {key!r}")
+        else:
+            at_dt = datetime.now(timezone.utc)
+
+        # type_name doubles as the phen filter for alert sources
+        phen_effective = phen if phen is not None else type_name
+        try:
+            phen_code = resolve_phen(phen_effective)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        try:
+            fc = await query_alerts_geojson_unioned(
+                sig=sig, at=at_dt, phen=phen_code, bbox=parsed_bbox,
+            )
+        except Exception as e:
+            raise HTTPException(500, f"DB query error: {e}")
+
+        if simplify_deg is not None:
+            fc["features"] = [
+                _simplify_feature(f, simplify_deg) for f in fc["features"]
+            ]
+
+        return JSONResponse(fc)
+
+    # ── Filesystem sources: delegate to /features with event_type filter ──
     return await get_geometry_features(
         source_id  = source_id,
         key        = key,

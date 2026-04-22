@@ -58,6 +58,7 @@ async def list_sources():
                 "timeline_hours": getattr(src, 'timeline_hours', None),
                 "regions": getattr(src, 'regions', []),
                 "source_group": getattr(src, 'source_group', src.source_id),  # for UI grouping, defaults to source_id
+                "endpoint_type": getattr(src, 'endpoint_type', 'gridded'),
             }
             for src in SOURCES.values()
         ]
@@ -88,7 +89,6 @@ async def list_times(
     after_dt  = _parse_datetime(after)  if after  else None
     before_dt = _parse_datetime(before) if before else None
     times     = await source.list_times(after=after_dt, before=before_dt, limit=limit)
-
     return {
         "source_id": source_id,
         "count"    : len(times),

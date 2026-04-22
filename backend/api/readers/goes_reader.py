@@ -126,7 +126,7 @@ class GOESReader(Reader):
             results.append(GriddedResult(
                 variable   = generic_name,
                 units      = attrs.get('units', 'unknown'),
-                data       = data_array_replaced.flatten().tolist(),
+                data       = data_array_replaced.flatten(),
                 grid       = grid,
                 valid_time = valid_time,
                 cycle      = cycle,
