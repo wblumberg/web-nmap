@@ -228,6 +228,11 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
     const loadedKeys = [firstKey];
     let currentKey = firstKey;
 
+    // Track per-key samplers so the active sampler can be swapped when the
+    // displayed frame changes (important for geometry / alert products).
+    const samplerByKey = new Map();
+    if (templateResult.sampler) samplerByKey.set(firstKey, templateResult.sampler);
+
     /**
      * Add a new frame to all MultiPlotLayers.
      * Can be called after the layers are already on the map.
@@ -247,6 +252,7 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
                 console.error(`[LayerBuilder] progressive addField THREW for layer[${i}] key "${key}":`, err);
             }
         });
+        if (result.sampler) samplerByKey.set(key, result.sampler);
         loadedKeys.push(key);
     }
 
@@ -260,6 +266,15 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
             if (!loadedKeys.includes(key)) return;
             currentKey = key;
             multiLayers.forEach(ml => ml.setActiveKey(key));
+        },
+
+        /**
+         * Return the sampler for the currently-displayed key, or null if
+         * this product has no sampler.  appController calls this after
+         * setKey() so _activeSampler always matches the visible frame.
+         */
+        getSampler() {
+            return samplerByKey.get(currentKey) ?? null;
         },
 
         stepForward() {

@@ -11,6 +11,10 @@ import composite     from './composite.js';
 import raster        from './raster.js';
 import point         from './point.js';
 import misc          from './misc.js';
+import paintball     from './paintball.js';
+import winter        from './winter.js';
+import overlays      from './overlays.js';
+import alerts        from './alerts.js';
 
 // Merge all groups into a single flat registry.
 // Duplicate IDs across files will throw at import time (good — fail loudly).
@@ -24,21 +28,29 @@ export const PRODUCT_SUITES = {
     ...composite,
     ...raster,
     ...point,
+    ...paintball,
+    ...overlays,
     ...misc,
+    ...winter,
+    ...alerts,
 };
 
 // Define the order of product groups for display in the UI.
 export const PRODUCT_GROUPS = {
-    basic: "1.) Basic Products",
-    moisture: "2.) Moisture Products",
-    instability: "3.) Instability Products",
-    shear: "4.) Shear Products",
-    lift: "5.) Lift Products",
-    precipitation: "6.) Precipitation Products",
-    composite: "7.) Composite Products",
-    raster: "8.) Raster Products",
-    point: "9.) Point Products",
-    misc: "10.) Miscellaneous Products",
+    basic: "Basic",
+    moisture: "Moisture",
+    instability: "Instability",
+    shear: "Shear",
+    lift: "Lift",
+    precipitation: "Precipitation",
+    composite: "Composite Indices",
+    raster: "Raster Images",
+    point: "Station Plots",
+    overlays: "Contour Overlays",
+    winter: "Winter Weather",
+    misc: "Miscellaneous Products",
+    paintball: "Paintball Products",
+    alerts: "Watches, Warnings & Advisories",
     
     goes_conus: "GOES CONUS Products",
     goes_fdisk: "GOES Full Disk Products",

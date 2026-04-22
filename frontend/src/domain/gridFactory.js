@@ -69,9 +69,8 @@ export function makeApglGrid(gridInfo) {
         
         case 'geostationary':
             if (typeof apgl.GeostationaryImage !== 'undefined') {
-                const { sat_lon } = proj_params ?? {};
                 console.warn(`[GridFactory] Creating GeostationaryImage grid with sat_lon=${sat_lon}, ll_x=${ll_x}, ll_y=${ll_y}, ur_x=${ur_x}, ur_y=${ur_y}`);
-                return new apgl.GeostationaryImage(ni, nj, ll_x, ll_y, ur_x, ur_y, -75);
+                return new apgl.GeostationaryImage(ni, nj, ll_x, ll_y, ur_x, ur_y, sat_lon);
             }
             console.warn(`[GridFactory] GeostationaryImage grid not available in autumnplot-gl; ` +
                          `falling back to PlateCarreeGrid for ${ni}×${nj} grid. ` +
