@@ -16,25 +16,26 @@ DATA_ROOT = Path(os.environ.get("WEBNMAP_DATA_ROOT", "/data/store/"))
 # MRMS Products to include in the catalog, with corresponding zarr variable names and labels
 _MRMS_PRODUCTS = {
     "MergedBaseReflectivityQC_00.50": ("CREF_low", "Base Refl QC 0.5°"),
-    "CompositeReflectivity":          ("CREF",     "Composite Reflectivity"),
+    "MergedBaseReflectivityQC":       ("MergedBaseReflectivityQC", "Reflectivity QC"),
     "MergedReflectivityQCComposite":  ("CREF_qc",  "Merged Refl QC Composite"),
 }
 
-_MRMS_REGIONS = ["CONUS", "Alaska", "Hawaii", "Guam"]
+_MRMS_REGIONS = ["CONUS"]
 
 def _mrms_source(region: str, product_dir: str, zarr_var: str, label: str) -> RasterSource:
     return RasterSource(
         source_id_    = f"MRMS_{region}_{zarr_var}",
         label_        = f"MRMS {region} — {label}",
         data_dir      = DATA_ROOT / f"raster/mrms/{region}/{product_dir}",
-        filename_glob = f"mrms_{region}_{product_dir}_*.zarr",
+        filename_glob = f"data_*.zarr",
         time_regex    = (
-            rf"mrms_{region}_{re.escape(product_dir)}_"
-            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})T"
+            rf"data_"
+            r"(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})."
             r"(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})\.zarr"
         ),
         source_type    = "RADAR_MOSAIC",
         data_category  = "gridded_imagery",
+        source_group   = "MRMS",
         default_selected = 10,
         timeline_hours = 12,
         regions        = [region],

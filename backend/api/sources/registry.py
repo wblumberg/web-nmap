@@ -30,9 +30,9 @@ from .types.db_source import AlertSource
 # Category modules
 from .imagery import MRMS_SOURCES, GOES_SOURCES
 from .observations import (
-    LIGHTNING_DB, AIRNOW_DB,
+    LIGHTNING_DB, AIRNOW_DB, SHIP_DB, SAO_DB, LSR_DB
 )
-from .nwp_forecasts import ECMWF_HR, HREF
+from .nwp_forecasts import ECMWF_HR, HREF, NCEP_GEFS, NCEP_GFS, ECMWF_ENS, NCEP_RRFS, REFS, NSSL_GEFS
 from .gridded_analyses import MESO_SOURCE
 
 # Local DATA_ROOT (kept for backward compatibility / external usage)
@@ -44,16 +44,26 @@ SOURCES: dict[str, FilesystemSource] = {
     **MRMS_SOURCES,
 
     # Gridded forecasts / models
+    "NCEP_RRFS": NCEP_RRFS,
     "ECMWF_HR": ECMWF_HR,
+    "NCEP_GFS": NCEP_GFS,
+
     "HREF": HREF,
+    "REFS": REFS,
+    "NCEP_GEFS": NCEP_GEFS,
+    "ECMWF_ENS": ECMWF_ENS,
+    "NSSL_GEFS": NSSL_GEFS,
 
     # Gridded analyses
     "MESOANALYSIS_GRID": MESO_SOURCE,
 
     # DB-backed point sources (TimescaleDB `points` hypertable)
-    "LIGHTNING_DB": LIGHTNING_DB,
-    "AIRNOW_DB"   : AIRNOW_DB,
-
+    "LIGHTNING": LIGHTNING_DB,
+    "LSR"      : LSR_DB,
+    "AIRNOW"   : AIRNOW_DB,
+    "SHIP"     : SHIP_DB,
+    "SAO"      : SAO_DB,
+    
     # DB-backed NWS alert sources (TimescaleDB `alerts` hypertable)
     # Filter by phenomenon at query time via ?phen=TO (or ?phen=tornado)
     "WARNINGS"  : AlertSource("WARNINGS",   "Warnings",   sig="W"),

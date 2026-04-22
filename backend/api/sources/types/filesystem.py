@@ -236,9 +236,10 @@ class FilesystemSource(DataSource):
     async def get_path(self, key: str) -> Path | None:
         """Return the filesystem path for a given key, populating cache if needed."""
         if not self._cache:
-            print(self.list_times())
             await self.list_times()
-        print(self._cache.get(key))
+        if key not in self._cache:
+            # Cache may be stale (new file arrived since last scan) — rescan once
+            await self.list_times()
         return self._cache.get(key)
 
     async def most_recent(self) -> AvailableTime | None:

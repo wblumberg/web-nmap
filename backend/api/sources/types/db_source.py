@@ -134,8 +134,9 @@ class PointDBSource(DataSource):
 
     # These attributes shadow FilesystemSource so that catalog/timematch
     # code using getattr(src, 'cycle_regex', None) gets None gracefully.
-    cycle_regex: None = None
-    fhr_regex:   None = None
+    cycle_regex:   None = None
+    fhr_regex:     None = None
+    endpoint_type: str  = 'point_obs'
 
     def __init__(
         self,
@@ -185,10 +186,10 @@ class PointDBSource(DataSource):
         before = before or datetime.now(tz=timezone.utc)
 
         sql = text(f"""
-            SELECT DISTINCT valid_time
+            SELECT DISTINCT time_bucket('1 minute', valid_time) AS valid_time
             FROM {self.table}
             WHERE source_id = :source_id
-              AND valid_time BETWEEN :after AND :before
+            AND valid_time BETWEEN :after AND :before
             ORDER BY valid_time DESC
             LIMIT :limit
         """)
@@ -255,8 +256,9 @@ class AlertSource(DataSource):
         How many hours of history to surface in the catalog timeline.
     """
 
-    cycle_regex: None = None
-    fhr_regex:   None = None
+    cycle_regex:   None = None
+    fhr_regex:     None = None
+    endpoint_type: str  = 'geometry'
 
     def __init__(
         self,
@@ -268,7 +270,7 @@ class AlertSource(DataSource):
         self._source_id     = source_id_
         self._label         = label_
         self.sig            = sig
-        self.source_type    = "ALERT"
+        self.source_type    = "MISC"
         self.data_category  = "alerts"
         self.default_selected = 1
         self.timeline_hours = timeline_hours

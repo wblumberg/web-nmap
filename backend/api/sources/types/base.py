@@ -65,6 +65,11 @@ class DataSource(ABC):
     on top of these two primitives.
     """
 
+    #: Which API endpoint family serves data for this source.
+    #: Values: 'gridded' | 'point_obs' | 'geometry'
+    #: Subclasses override this as a class attribute where needed.
+    endpoint_type: str = 'gridded'
+
     @property
     @abstractmethod
     def source_id(self) -> str:
