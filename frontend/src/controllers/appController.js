@@ -91,7 +91,9 @@ let _map = null;
 let _activeMultiLayers = [];    // MultiPlotLayer instances added to the map
 let _layerControllers  = [];    // controller objects from buildMultiLayers()
 let _activeColorbars   = [];    // SVG colorbar elements
-let _activeSampler     = null;  // function(lon, lat) → { varName: value }
+/** @deprecated — use _layerControllers + getSampler() instead */ 
+let _activeSampler     = null;  // kept only for legacy non-progressive paths
+let _samplerEnabled    = false; // whether the cursor popup is active
 let _mousemoveHandler  = null;  // current map mousemove handler
 
 // ── Frame timeline ──
@@ -103,13 +105,30 @@ let _currentFrameIdx = -1;      // index into _frameTimes / _frameKeys
 let _playbackTimer   = null;
 let _playbackMode    = 'pause'; // 'pause' | 'loop-fwd' | 'loop-back' | 'rock'
 let _rockDirection   = 1;       // +1 = forward, -1 = backward
-const PLAY_INTERVAL_MS = 100;   // ms between frames during playback
+let PLAY_INTERVAL_MS = 100;   // ms between frames during playback
 
 // ── Cached DOM elements ──
 let _frameTimeEl       = null;
 let _colorbarPanel     = null;
 let _colorbarContainer = null;
 let _readoutEl         = null;
+let _samplerPopupEl    = null;
+
+// ── Auto-update state ──
+//
+// _currentLoadConfig  — snapshot of the last LayerManager apply ({sources, dominantId, numFrames})
+//                       so we know which source is dominant and how many frames to keep.
+// _sourceUpdateState  — one entry per loaded source; each entry holds enough context to
+//                       append a new frame without reloading everything:
+//                         { srcId, addFrame(key,data), controller, isPointObs, dataKeys }
+// _autoUpdateSse      — the live EventSource connection to /api/v1/events/data
+// _autoUpdateActive   — whether auto-update is currently enabled by the user
+// _autoUpdatePending  — keys currently in-flight to stop duplicate fetches
+let _currentLoadConfig  = null;
+let _sourceUpdateState  = [];
+let _autoUpdateSse      = null;
+let _autoUpdateActive   = false;
+let _autoUpdatePending  = new Set();
 
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -133,13 +152,14 @@ export async function init() {
     // ── Pre-initialize the autumnplot-gl WASM module ──
     // The marchingsquares.wasm binary (used for contour computation) must be
     // loaded from a known URL.  We ship it in public/ so Vite serves it at '/'.
-    apgl.initAutumnPlot({ wasm_base_url: '/' });
+    apgl.initAutumnPlot({ wasm_base_url: '/', contour_workers: Math.max(2, Math.min(navigator.hardwareConcurrency ?? 4, 8)) });
 
     // Cache DOM elements so we don't re-query the DOM on every frame step
     _frameTimeEl       = document.querySelector('#frame-time-value');
     _colorbarPanel     = document.querySelector('#colorbar-panel');
     _colorbarContainer = document.querySelector('#colorbar');
     _readoutEl         = document.querySelector('#readout');
+    _samplerPopupEl    = document.querySelector('#sampler-popup');
 
     // ── Step 1: Fetch the catalog of available data sources from the API ──
     //
@@ -229,6 +249,51 @@ function _wireToolbar() {
     wire('#btn-loop-fwd',   () => _togglePlayback('loop-fwd'));
     wire('#btn-rock',       () => _togglePlayback('rock'));
 
+    const slider = document.getElementById('loop_speed');
+    // Map slider range → milliseconds per frame. Read slider min/max so
+    // the mapping remains robust if the HTML is edited.
+    const MIN_MS = 10;
+    const MAX_MS = 1000;
+    const _sliderToMs = (v, minV, maxV) => {
+        const vv = Number(v);
+        const lo = Number.isFinite(Number(minV)) ? Number(minV) : 1;
+        const hi = Number.isFinite(Number(maxV)) ? Number(maxV) : 50;
+        if (!Number.isFinite(vv)) return Math.round((MAX_MS + MIN_MS) / 2);
+        const clamped = Math.min(hi, Math.max(lo, Math.round(vv)));
+        // Interpolate linearly from [lo,hi] → [MAX_MS, MIN_MS]
+        const t = (clamped - lo) / Math.max(1, (hi - lo));
+        const ms = Math.round(MAX_MS - t * (MAX_MS - MIN_MS));
+        return Math.max(MIN_MS, Math.min(MAX_MS, ms));
+    };
+
+    // Initialize PLAY_INTERVAL_MS to match the slider default value so UI and
+    // runtime are consistent. Fall back to a sane default if the slider is
+    // missing or malformed.
+    if (slider) {
+        const minV = slider.min ?? 1;
+        const maxV = slider.max ?? 50;
+        const valV = slider.value ?? ((Number(minV) + Number(maxV)) / 2);
+        PLAY_INTERVAL_MS = _sliderToMs(valV, minV, maxV);
+    } else {
+        PLAY_INTERVAL_MS = 500;
+    }
+
+    if (slider) slider.addEventListener('input', (ev) => {
+        const target = ev?.target || {};
+        const val = target.value;
+        const minV = target.min ?? slider.min ?? 1;
+        const maxV = target.max ?? slider.max ?? 50;
+        const prevMode = _playbackMode;
+        const wasPlaying = !!_playbackTimer;
+        PLAY_INTERVAL_MS = _sliderToMs(val, minV, maxV);
+        console.info(`[NMAP] Playback speed set to ${PLAY_INTERVAL_MS} ms/frame (slider value: ${val}, range: ${minV}-${maxV})`);
+        if (wasPlaying) {
+            // Restart playback using the previous mode so changes take effect immediately.
+            _stopPlayback();
+            if (prevMode && prevMode !== 'pause') _togglePlayback(prevMode);
+        }
+    });
+
     // ── Freeze Map Location ──
     let frozen = false;
     wire('#btn-freeze', () => {
@@ -243,17 +308,15 @@ function _wireToolbar() {
         interactions.forEach(name => _map[name][frozen ? 'disable' : 'enable']());
     });
 
-    // ── Auto-Update (reload data periodically) ──
-    let autoTimer = null;
+    // ── Auto-Update — SSE-driven live frame append ──
     wire('#btn-autoupdate', () => {
         const btn = document.querySelector('#btn-autoupdate');
-        if (autoTimer) {
-            clearInterval(autoTimer);
-            autoTimer = null;
+        if (_autoUpdateActive) {
+            _stopAutoUpdate();
             btn.classList.remove('active');
             btn.title = 'Auto-Update (off)';
         } else {
-            autoTimer = setInterval(() => _refreshCurrentView(), 60_000);
+            _startAutoUpdate();
             btn.classList.add('active');
             btn.title = 'Auto-Update (on)';
         }
@@ -264,6 +327,17 @@ function _wireToolbar() {
         const btn = document.querySelector('#btn-product');
         const nowOpen = ProductGen.toggle();
         btn.classList.toggle('active', nowOpen);
+    });
+
+    // ── Data Sampler popup toggle ──
+    wire('#btn-sampler', () => {
+        _samplerEnabled = !_samplerEnabled;
+        const btn = document.querySelector('#btn-sampler');
+        btn.classList.toggle('active', _samplerEnabled);
+        btn.title = _samplerEnabled ? 'Data Sampler (on)' : 'Data Sampler (off)';
+        if (!_samplerEnabled && _samplerPopupEl) {
+            _samplerPopupEl.classList.add('hidden');
+        }
     });
 
     // ── Template button (placeholder for future functionality) ──
@@ -336,6 +410,11 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
 
     // ── 1. Clear existing layers from the map ──
     _clearActiveLayers();
+
+    // ── 1b. Save this configuration for auto-update reference ──
+    _currentLoadConfig = { sources, dominantId, numFrames };
+    _sourceUpdateState = [];
+    _autoUpdatePending.clear();
 
     // ── 2. Normalize frame times ──
     //
@@ -421,9 +500,37 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Load data for one source across all frame times, then build MultiPlotLayers.
+ * Load data for one source across all frame times, then build layers.
  *
- * This is the core of the data pipeline.  In Python pseudocode:
+ * Dispatches to a source-type-specific loader based on `src.entry.endpoint_type`
+ * as reported by the catalog.  New endpoint types can be handled by adding
+ * a case here and implementing the corresponding `_load*Source` function.
+ *
+ * @param {object} src        - { uid, id, name, color, entry, cycleTime }
+ * @param {Date[]} frameTimes - sorted oldest → newest
+ */
+async function _loadAndBuildSource(src, frameTimes, { onFirstFrame, onProgress } = {}) {
+    const endpointType = src.entry?.endpoint_type ?? 'gridded';
+
+    switch (endpointType) {
+        case 'gridded':
+            return _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress });
+        case 'point_obs':
+            return _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress });
+        case 'geometry':
+            return _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress });
+        default:
+            console.warn(
+                `[NMAP] Source "${src.id}" has unknown endpoint_type="${endpointType}" — skipping.`
+            );
+            return;
+    }
+}
+
+/**
+ * Load gridded data for one source across all frame times, then build MultiPlotLayers.
+ *
+ * This is the core of the gridded data pipeline.  In Python pseudocode:
  *
  *     product = PRODUCT_SUITES[product_id]            # visualization config
  *     grid_info = catalog_client.get_grid_info(src)   # coordinate system
@@ -440,8 +547,7 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
  * @param {object} src        - { uid, id, name, color, entry, cycleTime }
  * @param {Date[]} frameTimes - sorted oldest → newest
  */
-async function _loadAndBuildSource(src, frameTimes, { onFirstFrame, onProgress } = {}) {
-
+async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } = {}) {
     // ── Step A: Pick a product for this source ──
     //
     // Each data source (GFS, RAP, MESOANALYSIS_GRID) can render many products
@@ -449,9 +555,9 @@ async function _loadAndBuildSource(src, frameTimes, { onFirstFrame, onProgress }
     //   - What variables to fetch from the API (data_keys)
     //   - How to visualize them (make_layers function)
     //
-    // For now we auto-pick the first available product.
-    // TODO: Add a product picker dropdown per source in the LayerManager UI.
-    const productId = _pickDefaultProduct(src.id);
+    // Use the product the user explicitly selected in the DataSelector dialog.
+    // Fall back to auto-picking the first available product if none was chosen.
+    const productId = src.productKey || _pickDefaultProduct(src.id);
     if (!productId) {
         console.warn(`[NMAP] No products available for source "${src.id}" — skipping`);
         return;
@@ -516,11 +622,14 @@ async function _loadAndBuildSource(src, frameTimes, { onFirstFrame, onProgress }
     const totalFrames = frameEntries.length;
 
     if (isForecast && src.cycleTime && !src.entry?.has_fhrs) {
-        // ── Streaming forecast path (single-store sources only) ──
+        // ────────────────────────────────────────────────────────────────────────────
+        // ── STREAMING FORECAST PATH (single-store sources only) ──
         // Sources where all fhrs live in one Zarr store (e.g. HREF).
         // Per-file sources (has_fhrs=true, e.g. ECMWF_HR) fall through
         // to the per-frame path below.
         // Build a fhr→frameKey mapping and use the batch stream endpoint.
+        // ────────────────────────────────────────────────────────────────────────────
+
         const cycleStr = _dateToCycleStr(src.cycleTime);
         const cycleMs  = src.cycleTime.getTime();
 
@@ -576,11 +685,74 @@ async function _loadAndBuildSource(src, frameTimes, { onFirstFrame, onProgress }
         }
 
         console.info(`[NMAP] Streamed ${loaded}/${totalFrames} frames for "${src.id}/${productId}"`);
+        _sourceUpdateState.push({
+            srcId: src.id, addFrame: progressive.addFrame,
+            controller: progressive.controller, isPointObs: false, isForecast, dataKeys,
+        });
+
+    } else if (!isForecast) {
+        // ────────────────────────────────────────────────────────────────────────────
+        // ── ANALYSIS/OBSERVATION STREAMING PATH ──
+        // Batch all keys through the analysis_stream endpoint (single HTTP
+        // connection, length-prefixed protobuf frames, same wire format as
+        // forecast_stream).  Client-side cache is checked first inside
+        // DataClient.streamAnalysisFrames so cached frames skip the network.
+        // ────────────────────────────────────────────────────────────────────────────
+
+        const apiKeys = frameEntries.map(([, apiKey]) => apiKey);
+        const keyToFrameKey = new Map(
+            frameEntries.map(([frameMs, apiKey]) => [apiKey, _dateToKey(new Date(frameMs))])
+        );
+
+        console.info(`[NMAP] Streaming ${apiKeys.length} analysis frames for "${src.id}"`);
+
+        let progressive = null;
+        let loaded = 0;
+
+        await DataClient.streamAnalysisFrames(
+            src.id, dataKeys, apiKeys,
+            ({ fields, gridInfo, key: serverKey }) => {
+                const frameKey = keyToFrameKey.get(serverKey) || serverKey;
+                loaded++;
+
+                if (!progressive) {
+                    console.info(`[NMAP] First streamed frame "${frameKey}" — building layers (namespace="${namespace}")`);
+                    progressive = buildProgressiveMultiLayers(
+                        productSuite, frameKey, fields, grid, namespace
+                    );
+                    for (const ml of progressive.layers) {
+                        try { _map.addLayer(ml, 'coastline'); }
+                        catch (err) { console.error(`[NMAP] FAILED to add layer "${ml.id}":`, err); }
+                    }
+                    _activeMultiLayers.push(...progressive.layers);
+                    _layerControllers.push(progressive.controller);
+                    if (progressive.colorbars?.length) _activeColorbars.push(...progressive.colorbars);
+                    if (progressive.sampler) _activeSampler = progressive.sampler;
+                    onFirstFrame?.();
+                } else {
+                    progressive.addFrame(frameKey, fields);
+                }
+                onProgress?.(loaded, totalFrames);
+            }
+        );
+
+        if (!progressive) {
+            console.warn(`[NMAP] No data loaded for "${src.id}" — skipping layer build`);
+            return;
+        }
+
+        console.info(`[NMAP] Streamed ${loaded}/${totalFrames} frames for "${src.id}/${productId}"`);
+        _sourceUpdateState.push({
+            srcId: src.id, addFrame: progressive.addFrame,
+            controller: progressive.controller, isPointObs: false, isForecast, dataKeys,
+        });
 
     } else {
-        // ── Per-frame path (individual HTTP requests) ──
-        // Used for analysis/obs sources and per-file forecast sources
-        // (e.g. ECMWF_HR which has separate .zarr files per fhr).
+        // ────────────────────────────────────────────────────────────────────────────
+        // ── Per-frame path for per-file forecast sources (e.g. ECMWF_HR) ──
+        // These sources have separate .zarr files per forecast hour, so they
+        // cannot use the streaming store endpoint and are fetched individually.
+        // ────────────────────────────────────────────────────────────────────────────
         const fetchOneFrame = async ([frameMs, apiKey]) => {
             const frameKey = _dateToKey(new Date(frameMs));
             try {
@@ -648,8 +820,260 @@ async function _loadAndBuildSource(src, frameTimes, { onFirstFrame, onProgress }
             onProgress?.(loaded, totalFrames);
         }
 
-        console.info(`[NMAP] Loaded ${loaded}/${totalFrames} frames for "${src.id}/${productId}" (progressive)`);
+        console.info(`[NMAP] Loaded ${loaded}/${totalFrames} frames for "${src.id}/${productId}" (per-file)`);
+        _sourceUpdateState.push({
+            srcId: src.id, addFrame: progressive.addFrame,
+            controller: progressive.controller, isPointObs: false, isForecast, dataKeys,
+        });
     }
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// GEOMETRY / ALERT POLYGON LOADING PIPELINE
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Load alert polygon data (endpoint_type === 'geometry') for one source
+ * across all frame times, then build MultiPlotLayers for looping.
+ *
+ * The `data_keys` on the product are VTEC phenomenon slugs (e.g. 'flash_flood',
+ * 'tornado') or the sentinel '_all' to fetch all phenomena for the source's
+ * significance level (Warnings / Watches / Advisories).
+ *
+ * Each frame fetches one GeoJSON FeatureCollection per slug via:
+ *   GET /api/v1/geometries/{sourceId}/features?at=<ISO>&phen=<slug>
+ * Slugs are fetched in parallel; all results are combined into a single
+ * GeometryComponent PlotLayer by the product's make_layers().
+ *
+ * Unlike gridded sources, no time-matching against the catalog is performed:
+ * the frame times from the dominant source are used directly as `at` values,
+ * so the polygons shown always match the active frame's valid time.
+ *
+ * @param {object} src        - { uid, id, name, color, entry, cycleTime }
+ * @param {Date[]} frameTimes - sorted oldest → newest
+ */
+async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress } = {}) {
+    const productId = src.productKey || _pickDefaultProduct(src.id);
+    if (!productId) {
+        console.warn(`[NMAP] No products available for geometry source "${src.id}" — skipping`);
+        return;
+    }
+
+    const productSuite = PRODUCT_SUITES[productId];
+    const slugs        = productSuite.data_keys;   // e.g. ['flash_flood'] or ['_all']
+
+    console.info(
+        `[NMAP] Geometry source "${src.id}" → product "${productId}" (slugs: [${slugs.join(', ')}])`
+    );
+
+    const namespace   = src.uid || src.id;
+    const totalFrames = frameTimes.length;
+
+    // Fetch one frame: parallel requests for each slug, build data object.
+    const fetchOneFrame = async (frameTime) => {
+        const frameKey = _dateToKey(frameTime);
+        try {
+            const data = {};
+            await Promise.all(slugs.map(async slug => {
+                const phen = slug === '_all' ? undefined : slug;
+                data[slug] = await DataClient.fetchGeometryFeatures(src.id, frameKey, { phen });
+            }));
+            return { frameKey, data };
+        } catch (err) {
+            console.warn(
+                `[NMAP] Failed to fetch geometry frame ${frameKey} for "${src.id}":`,
+                err.message
+            );
+            return { frameKey, data: null };
+        }
+    };
+
+    // Find first successful frame to bootstrap the progressive layer build.
+    let firstResult = null;
+    let firstIndex  = 0;
+    for (let i = 0; i < frameTimes.length; i++) {
+        const r = await fetchOneFrame(frameTimes[i]);
+        if (r.data) { firstResult = r; firstIndex = i; break; }
+    }
+
+    if (!firstResult) {
+        console.warn(`[NMAP] No geometry data loaded for "${src.id}" — skipping layer build`);
+        return;
+    }
+
+    // Geometry products pass null grid — make_layers() ignores the grid arg.
+    console.info(
+        `[NMAP] First geometry frame "${firstResult.frameKey}" — building layers (namespace="${namespace}")`
+    );
+    const progressive = buildProgressiveMultiLayers(
+        productSuite, firstResult.frameKey, firstResult.data, null, namespace
+    );
+
+    for (const ml of progressive.layers) {
+        try { _map.addLayer(ml, 'coastline'); }
+        catch (err) { console.error(`[NMAP] FAILED to add geometry layer "${ml.id}":`, err); }
+    }
+    _activeMultiLayers.push(...progressive.layers);
+    _layerControllers.push(progressive.controller);
+    if (progressive.colorbars?.length) _activeColorbars.push(...progressive.colorbars);
+    if (progressive.sampler) _activeSampler = progressive.sampler;
+    onFirstFrame?.();
+    let loaded = 1;
+    onProgress?.(loaded, totalFrames);
+
+    // Fetch remaining frames in small parallel batches.
+    const remaining = [
+        ...frameTimes.slice(0, firstIndex),
+        ...frameTimes.slice(firstIndex + 1),
+    ];
+    const BATCH_SIZE = 4;
+    for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
+        const batch   = remaining.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(batch.map(fetchOneFrame));
+        for (const { frameKey, data } of results) {
+            if (data) {
+                progressive.addFrame(frameKey, data);
+                loaded++;
+            }
+        }
+        onProgress?.(loaded, totalFrames);
+    }
+
+    console.info(
+        `[NMAP] Loaded ${loaded}/${totalFrames} geometry frames for "${src.id}/${productId}"`
+    );
+    _sourceUpdateState.push({
+        srcId: src.id, addFrame: progressive.addFrame,
+        controller: progressive.controller, isPointObs: false, isForecast: false, dataKeys: slugs,
+    });
+}
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// POINT OBSERVATION LOADING PIPELINE
+// =════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Load point observation data (endpoint_type === 'point_obs') for one source
+ * across all frame times, then build MultiPlotLayers for looping.
+ *
+ * Key differences from _loadGriddedSource:
+ *   - No grid_info call: UnstructuredGrid is built per-frame from the lat/lon
+ *     values embedded in the PointResponse, so moving sources (ships, lightning)
+ *     update their point positions on every frame step.
+ *   - No streaming endpoint: each frame is a single fetchDbPoints() call so
+ *     they are fetched in parallel batches rather than a single stream.
+ *   - data_keys are forwarded to the backend `fields=` query param so only
+ *     the properties the product's SPConfig references are transferred.
+ *
+ * @param {object} src        - { uid, id, name, color, entry, cycleTime }
+ * @param {Date[]} frameTimes - sorted oldest → newest
+ */
+async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress } = {}) {
+    // ── Step A: Pick product + determine which fields to request ──
+    const productId = src.productKey || _pickDefaultProduct(src.id);
+    if (!productId) {
+        console.warn(`[NMAP] No products available for source "${src.id}" — skipping`);
+        return;
+    }
+
+    const productSuite = PRODUCT_SUITES[productId];
+    // data_keys drive the backend `fields=` filter; only listed properties
+    // are returned in each PointObs.variables map.
+    const dataKeys = productSuite.data_keys;
+
+    console.info(
+        `[NMAP] Point source "${src.id}" → product "${productId}" (fields: [${dataKeys.join(', ')}])`
+    );
+
+    // ── Step B: Match frame times to available API keys ──
+    const frameToKey = await _matchAnalysisFrames(src, frameTimes);
+    if (!frameToKey.size) {
+        console.warn(`[NMAP] No matching times found for source "${src.id}" — skipping`);
+        return;
+    }
+
+    const namespace    = src.uid || src.id;
+    const frameEntries = [...frameToKey.entries()];   // [[ms, apiKey], ...]
+    const totalFrames  = frameEntries.length;
+
+    // ── Step C: Fetch frames in small parallel batches ──
+    //
+    // Point frames are fetched via protobuf PointResponse.  Each response
+    // already contains lat/lon for all points in that frame, so no separate
+    // grid_info call is needed.  The null grid is passed to make_layers()
+    // and is ignored by buildObsLayer() which constructs its own
+    // UnstructuredGrid from the obs coords.
+
+    const fetchOneFrame = async ([frameMs, apiKey]) => {
+        const frameKey = _dateToKey(new Date(frameMs));
+        try {
+            const { obs_json } = await DataClient.fetchDbPoints(src.id, dataKeys, apiKey);
+            return { frameKey, data: { obs_json } };
+        } catch (err) {
+            console.warn(`[NMAP] Failed to fetch point frame ${frameKey} for "${src.id}":`, err.message);
+            return { frameKey, data: null };
+        }
+    };
+
+    // Find first successful frame to bootstrap the progressive build
+    let firstResult = null;
+    let firstIndex  = 0;
+    for (let i = 0; i < frameEntries.length; i++) {
+        const r = await fetchOneFrame(frameEntries[i]);
+        if (r.data) { firstResult = r; firstIndex = i; break; }
+    }
+
+    if (!firstResult) {
+        console.warn(`[NMAP] No data loaded for "${src.id}" — skipping layer build`);
+        return;
+    }
+
+    // Build progressive layers (null grid: point products build their own
+    // UnstructuredGrid inside make_layers from the obs coords)
+    console.info(
+        `[NMAP] First point frame "${firstResult.frameKey}" — building layers (namespace="${namespace}")`
+    );
+    const progressive = buildProgressiveMultiLayers(
+        productSuite, firstResult.frameKey, firstResult.data, null, namespace
+    );
+
+    for (const ml of progressive.layers) {
+        try { _map.addLayer(ml, 'coastline'); }
+        catch (err) { console.error(`[NMAP] FAILED to add layer "${ml.id}":`, err); }
+    }
+    _activeMultiLayers.push(...progressive.layers);
+    _layerControllers.push(progressive.controller);
+    if (progressive.colorbars?.length) _activeColorbars.push(...progressive.colorbars);
+    if (progressive.sampler) _activeSampler = progressive.sampler;
+    onFirstFrame?.();
+    let loaded = 1;
+    onProgress?.(loaded, totalFrames);
+
+    // Fetch the remaining frames in parallel batches
+    const remaining = [
+        ...frameEntries.slice(0, firstIndex),
+        ...frameEntries.slice(firstIndex + 1),
+    ];
+    const BATCH_SIZE = 6;
+    for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
+        const batch   = remaining.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(batch.map(fetchOneFrame));
+        for (const { frameKey, data } of results) {
+            if (data) {
+                progressive.addFrame(frameKey, data);
+                loaded++;
+            }
+        }
+        onProgress?.(loaded, totalFrames);
+    }
+
+    console.info(`[NMAP] Loaded ${loaded}/${totalFrames} point frames for "${src.id}/${productId}"`);
+    _sourceUpdateState.push({
+        srcId: src.id, addFrame: progressive.addFrame,
+        controller: progressive.controller, isPointObs: true, isForecast: false, dataKeys,
+    });
 }
 
 
@@ -807,6 +1231,10 @@ function _setFrame(idx) {
         console.warn(`[NMAP]   controller keys: [${ctrl.keys.join(', ')}]`);
         if (ctrl.keys.includes(key)) {
             ctrl.setKey(key);
+            // Swap the active sampler to whichever frame is now displayed.
+            // Geometry products (alerts) return a per-frame sampler closure.
+            const s = ctrl.getSampler?.();
+            if (s) _activeSampler = s;
             console.warn(`[NMAP]   → set key "${key}" on controller`);
         } else {
             console.warn(`[NMAP]   → key "${key}" NOT found in controller keys`);
@@ -874,6 +1302,13 @@ function _stopPlayback() {
 function _togglePlayback(mode) {
     if (!_frameTimes.length) return;
 
+    // If asked to pause, stop any timer and return immediately. This prevents
+    // accidentally starting a no-op interval when mode === 'pause'.
+    if (mode === 'pause') {
+        _stopPlayback();
+        return;
+    }
+
     // Clicking the same mode while playing → stop
     if (_playbackMode === mode && _playbackTimer) {
         _stopPlayback();
@@ -929,6 +1364,7 @@ function _clearActiveLayers() {
     _layerControllers  = [];
     _activeColorbars   = [];
     _activeSampler     = null;
+    if (_samplerPopupEl) _samplerPopupEl.classList.add('hidden');
     _frameTimes        = [];
     _frameKeys         = [];
     _currentFrameIdx   = -1;
@@ -957,34 +1393,284 @@ function _setupReadout() {
 
     _mousemoveHandler = (ev) => {
         const coord = ev.lngLat.wrap();
-        let text = `${coord.lat.toFixed(2)}°N ${coord.lng.toFixed(2)}°E`;
+        const lat = coord.lat.toFixed(2);
+        const lon = coord.lng.toFixed(2);
+        let text = `${lat}°N ${lon}°E`;
 
-        if (_activeSampler) {
+        // Collect results from every active controller that has a sampler for
+        // the current key.  Also fall back to the legacy _activeSampler for
+        // products that don't yet expose getSampler().
+        /** @type {Array<{key: string, val: *}>} */
+        const hits = [];
+
+        for (const ctrl of _layerControllers) {
+            const sampler = ctrl.getSampler?.();
+            if (!sampler) continue;
             try {
-                const sample = _activeSampler(coord.lng, coord.lat);
-                if (sample) {
-                    const parts = Object.entries(sample).map(([name, val]) =>
-                        Array.isArray(val)
-                            ? `${name}: ${val[0].toFixed(0)}/${val[1].toFixed(0)}`
-                            : `${name}: ${val.toFixed(1)}`
-                    );
-                    text += ` | ${parts.join(', ')}`;
+                const result = sampler(coord.lng, coord.lat);
+                if (result) {
+                    for (const [k, v] of Object.entries(result)) hits.push({ key: k, val: v });
                 }
-            } catch (e) { /* sampling can fail at map edges */ }
+            } catch (_) { /* can fail at map edges */ }
+        }
+
+        // Legacy fallback — samplers from non-progressive paths
+        if (hits.length === 0 && _activeSampler) {
+            try {
+                const result = _activeSampler(coord.lng, coord.lat);
+                if (result) {
+                    for (const [k, v] of Object.entries(result)) hits.push({ key: k, val: v });
+                }
+            } catch (_) { /* ignore */ }
+        }
+
+        if (hits.length) {
+            const parts = hits.map(({ key, val }) =>
+                Array.isArray(val)
+                    ? `${key}: ${val[0].toFixed(0)}/${val[1].toFixed(0)}`
+                    : typeof val === 'string'
+                        ? `${key}: ${val}`
+                        : `${key}: ${val.toFixed(1)}`
+            );
+            text += ` | ${parts.join(', ')}`;
         }
 
         if (_readoutEl) _readoutEl.textContent = text;
+
+        // ── Cursor popup ─────────────────────────────────────────────────────
+        if (_samplerEnabled && _samplerPopupEl) {
+            if (hits.length) {
+                // Build rows: one per sampler key-value pair
+                _samplerPopupEl.innerHTML = hits.map(({ key, val }) => {
+                    let display;
+                    if (Array.isArray(val)) {
+                        display = `${val[0].toFixed(0)} / ${val[1].toFixed(0)}`;
+                    } else if (typeof val === 'string') {
+                        display = val;
+                    } else {
+                        display = val.toFixed(1);
+                    }
+                    return `<div class="sp-row"><span class="sp-key">${key}:</span><span class="sp-val">${display}</span></div>`;
+                }).join('');
+
+                // Position the popup at the raw pixel position of the mouse
+                const px = ev.originalEvent;
+                _samplerPopupEl.style.left = `${px.clientX}px`;
+                _samplerPopupEl.style.top  = `${px.clientY}px`;
+                _samplerPopupEl.classList.remove('hidden');
+            } else {
+                _samplerPopupEl.classList.add('hidden');
+            }
+        }
     };
+
+    // Hide popup when mouse leaves the map
+    _map.on('mouseout', () => {
+        if (_samplerPopupEl) _samplerPopupEl.classList.add('hidden');
+    });
 
     _map.on('mousemove', _mousemoveHandler);
 }
 
 /**
- * Placeholder for auto-update refresh.
- * TODO: Re-fetch data for the current configuration and rebuild layers.
+ * Start listening for SSE new-data events and wire them to frame appending.
+ *
+ * Connects to /api/v1/events/data (EventSource, text/event-stream).
+ * When a "new_data" event arrives for the dominant source we fetch the new
+ * frame, time-match secondaries via the build_map API, append all frames,
+ * then drop the oldest to keep the frame count constant.
  */
-function _refreshCurrentView() {
-    console.info('[NMAP] Auto-update tick (full refresh not yet implemented)');
+function _startAutoUpdate() {
+    if (_autoUpdateSse) return;  // already running
+    _autoUpdateActive = true;
+
+    const es = new EventSource('/api/v1/events/data');
+    _autoUpdateSse = es;
+
+    es.addEventListener('connected', () => {
+        console.warn('[NMAP] Auto-update SSE connected');
+    });
+
+    es.addEventListener('new_data', (ev) => {
+        let payload;
+        try { payload = JSON.parse(ev.data); } catch (err) { console.warn('[NMAP] SSE parse error:', err); return; }
+        console.warn('[NMAP] SSE new_data received:', payload);
+        _handleNewDataEvent(payload);
+    });
+
+    es.addEventListener('message', (ev) => {
+        // Fallback: some proxies strip the event: line, routing named events as 'message'
+        console.warn('[NMAP] SSE message (unnamed event):', ev.data);
+    });
+
+    es.addEventListener('heartbeat', () => {
+        console.warn('[NMAP] SSE heartbeat');
+    });
+
+    es.onerror = (err) => {
+        console.warn('[NMAP] Auto-update SSE error — will reconnect automatically', err);
+        // EventSource reconnects automatically; no manual action needed
+    };
+
+    console.info('[NMAP] Auto-update started (SSE)');
+}
+
+/** Stop the SSE connection and disable auto-update. */
+function _stopAutoUpdate() {
+    _autoUpdateActive = false;
+    if (_autoUpdateSse) {
+        _autoUpdateSse.close();
+        _autoUpdateSse = null;
+    }
+    console.info('[NMAP] Auto-update stopped');
+}
+
+/**
+ * Called for every SSE "new_data" event.
+ * Only acts when the event is for the currently dominant source.
+ */
+function _handleNewDataEvent(payload) {
+    console.warn('[NMAP] SSE _handleNewDataEvent: active=', _autoUpdateActive,
+        '| configDominant=', _currentLoadConfig?.dominantId,
+        '| payloadSource=', payload?.source_id,
+        '| stateEntries=', _sourceUpdateState.length);
+    if (!_currentLoadConfig) { console.warn('[NMAP] Auto-update blocked: no load config'); return; }
+    if (payload.source_id !== _currentLoadConfig.dominantId) {
+        console.warn(`[NMAP] Auto-update blocked: source_id mismatch — got "${payload.source_id}", dominant is "${_currentLoadConfig.dominantId}"`);
+        return;
+    }
+    if (!_autoUpdateActive) { console.warn('[NMAP] Auto-update blocked: not active'); return; }
+
+    _applyNewDominantFrame(payload).catch(err => {
+        console.error('[NMAP] Auto-update error:', err);
+    });
+}
+
+/**
+ * Fetch and append a new dominant-source frame (plus time-matched secondary frames),
+ * then drop the oldest frame to keep the total frame count constant.
+ *
+ * @param {{ source_id: string, key: string, valid_time: string }} payload  SSE event data
+ */
+async function _applyNewDominantFrame({ source_id, key, valid_time }) {
+    // ── Guard: dedup in-flight requests for the same key ──
+    if (_autoUpdatePending.has(key)) return;
+
+    // ── Guard: parse the new valid time ──
+    const newDate = new Date(valid_time);
+    if (!Number.isFinite(newDate.getTime())) {
+        console.warn('[NMAP] Auto-update: invalid valid_time in SSE payload', valid_time);
+        return;
+    }
+
+    // ── Guard: we need a dominant progressive state to append to ──
+    const dominantState = _sourceUpdateState.find(
+        s => s.srcId === source_id && !s.isForecast
+    );
+    if (!dominantState) return;
+
+    // ── Guard: don't add a key we already display ──
+    if (_frameKeys.includes(key)) return;
+
+    _autoUpdatePending.add(key);
+    console.info(`[NMAP] Auto-update: ingesting new dominant frame ${key} (${source_id})`);
+
+    try {
+        // ── 1. Fetch the new dominant-source frame ──
+        let dominantFields;
+        try {
+            const result = await DataClient.fetchAnalysisFields(source_id, dominantState.dataKeys, key);
+            dominantFields = result.fields;
+        } catch (err) {
+            console.warn(`[NMAP] Auto-update: failed to fetch ${source_id} key=${key}:`, err.message);
+            return;
+        }
+
+        // ── 2. Time-match secondary sources via the build_map API ──
+        const secondaryStates = _sourceUpdateState.filter(s => s.srcId !== source_id);
+        let timemap = null;
+        if (secondaryStates.length > 0) {
+            try {
+                const tmResult = await CatalogClient.buildTimemap(
+                    source_id,
+                    secondaryStates.map(s => s.srcId),
+                    [key],
+                    3
+                );
+                timemap = tmResult.map;
+            } catch (err) {
+                console.warn('[NMAP] Auto-update: build_map failed:', err.message);
+            }
+        }
+
+        // ── 3. Append the new dominant frame (using the SSE key as canonical key) ──
+        dominantState.addFrame(key, dominantFields);
+
+        // ── 4. Append new secondary frames ──
+        for (const secState of secondaryStates) {
+            const matchedApiKey = timemap?.[key]?.[secState.srcId];
+            if (!matchedApiKey) continue;
+
+            // Skip if this canonical key is already in the secondary controller
+            // (two dominant frames can map to the same secondary key)
+            if (secState.controller.keys.includes(key)) continue;
+
+            try {
+                if (secState.isPointObs) {
+                    const { obs_json } = await DataClient.fetchDbPoints(
+                        secState.srcId, secState.dataKeys, matchedApiKey
+                    );
+                    secState.addFrame(key, { obs_json });
+                } else {
+                    const secResult = await DataClient.fetchAnalysisFields(
+                        secState.srcId, secState.dataKeys, matchedApiKey
+                    );
+                    secState.addFrame(key, secResult.fields);
+                }
+            } catch (err) {
+                console.warn(
+                    `[NMAP] Auto-update: failed to fetch secondary ${secState.srcId} key=${matchedApiKey}:`,
+                    err.message
+                );
+            }
+        }
+
+        // ── 5. Maintain frame count — drop the oldest frame ──
+        const targetCount = _currentLoadConfig.numFrames;
+        while (_frameTimes.length >= targetCount) {
+            const oldestKey = _frameKeys.shift();
+            _frameTimes.shift();
+
+            // Remove oldest entry from each controller's live keys array (in-place)
+            for (const state of _sourceUpdateState) {
+                const arr = state.controller.keys;
+                if (arr.length > 0) arr.shift();
+            }
+
+            // Adjust current frame index to account for the removed oldest frame
+            if (_currentFrameIdx > 0) _currentFrameIdx--;
+        }
+
+        // ── 6. Append new frame to the timeline ──
+        const wasAtNewest = (_currentFrameIdx === _frameTimes.length - 1);
+        _frameTimes.push(newDate);
+        _frameKeys.push(key);
+
+        // If the user was already on the newest frame, advance to the new newest
+        if (wasAtNewest) {
+            _setFrame(_frameTimes.length - 1);
+        } else {
+            _updateFrameDisplay();
+        }
+
+        console.info(
+            `[NMAP] Auto-update complete: loop now ${_frameTimes.length} frames, ` +
+            `newest=${key}`
+        );
+
+    } finally {
+        _autoUpdatePending.delete(key);
+    }
 }
 
 

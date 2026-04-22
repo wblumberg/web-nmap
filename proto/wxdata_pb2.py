@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cwxdata.proto\x12\x06wxdata\"\xfb\x01\n\x08GridInfo\x12\x11\n\tgrid_type\x18\x01 \x01(\t\x12\n\n\x02ni\x18\x02 \x01(\x05\x12\n\n\x02nj\x18\x03 \x01(\x05\x12\x0f\n\x07lat_min\x18\x04 \x01(\x02\x12\x0f\n\x07lat_max\x18\x05 \x01(\x02\x12\x0f\n\x07lon_min\x18\x06 \x01(\x02\x12\x0f\n\x07lon_max\x18\x07 \x01(\x02\x12\n\n\x02\x64x\x18\x08 \x01(\x02\x12\n\n\x02\x64y\x18\t \x01(\x02\x12\x35\n\x0bproj_params\x18\n \x03(\x0b\x32 .wxdata.GridInfo.ProjParamsEntry\x1a\x31\n\x0fProjParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\x82\x02\n\tGridField\x12\x10\n\x08variable\x18\x01 \x01(\t\x12\r\n\x05units\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x1e\n\x04grid\x18\x04 \x01(\x0b\x32\x10.wxdata.GridInfo\x12\x12\n\nvalid_time\x18\x05 \x01(\t\x12\r\n\x05\x63ycle\x18\x06 \x01(\t\x12\x0b\n\x03\x66hr\x18\x07 \x01(\x05\x12\x12\n\nfill_value\x18\x08 \x01(\x02\x12\x31\n\x08metadata\x18\t \x03(\x0b\x32\x1f.wxdata.GridField.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xd3\x01\n\x0cGridResponse\x12\x11\n\tsource_id\x18\x01 \x01(\t\x12\x0b\n\x03key\x18\x02 \x01(\t\x12\r\n\x05\x63ycle\x18\x03 \x01(\t\x12\x0b\n\x03\x66hr\x18\x04 \x01(\x05\x12\x13\n\x0b\x66ield_count\x18\x05 \x01(\x05\x12\x30\n\x06\x66ields\x18\x06 \x03(\x0b\x32 .wxdata.GridResponse.FieldsEntry\x1a@\n\x0b\x46ieldsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12 \n\x05value\x18\x02 \x01(\x0b\x32\x11.wxdata.GridField:\x02\x38\x01\"\x81\x02\n\x08PointObs\x12\x0b\n\x03lat\x18\x01 \x01(\x02\x12\x0b\n\x03lon\x18\x02 \x01(\x02\x12\x12\n\nvalid_time\x18\x03 \x01(\t\x12\x32\n\tvariables\x18\x04 \x03(\x0b\x32\x1f.wxdata.PointObs.VariablesEntry\x12\x30\n\x08metadata\x18\x05 \x03(\x0b\x32\x1e.wxdata.PointObs.MetadataEntry\x1a\x30\n\x0eVariablesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x02:\x02\x38\x01\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xe1\x01\n\rPointResponse\x12\x11\n\tsource_id\x18\x01 \x01(\t\x12\x12\n\nstart_time\x18\x02 \x01(\t\x12\x10\n\x08\x65nd_time\x18\x03 \x01(\t\x12\r\n\x05\x63ount\x18\x04 \x01(\x05\x12 \n\x06points\x18\x05 \x03(\x0b\x32\x10.wxdata.PointObs\x12\x35\n\x08metadata\x18\x06 \x03(\x0b\x32#.wxdata.PointResponse.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0cwxdata.proto\x12\x06wxdata\"\xc4\x02\n\x08GridInfo\x12\x11\n\tgrid_type\x18\x01 \x01(\t\x12\n\n\x02ni\x18\x02 \x01(\x05\x12\n\n\x02nj\x18\x03 \x01(\x05\x12\x0f\n\x07lat_min\x18\x04 \x01(\x02\x12\x0f\n\x07lat_max\x18\x05 \x01(\x02\x12\x0f\n\x07lon_min\x18\x06 \x01(\x02\x12\x0f\n\x07lon_max\x18\x07 \x01(\x02\x12\n\n\x02\x64x\x18\x08 \x01(\x02\x12\n\n\x02\x64y\x18\t \x01(\x02\x12\x35\n\x0bproj_params\x18\n \x03(\x0b\x32 .wxdata.GridInfo.ProjParamsEntry\x12\x0c\n\x04ll_x\x18\x0b \x01(\x02\x12\x0c\n\x04ll_y\x18\x0c \x01(\x02\x12\x0c\n\x04ur_x\x18\r \x01(\x02\x12\x0c\n\x04ur_y\x18\x0e \x01(\x02\x12\x0f\n\x07sat_lon\x18\x0f \x01(\x02\x1a\x31\n\x0fProjParamsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xbf\x02\n\tGridField\x12\x10\n\x08variable\x18\x01 \x01(\t\x12\r\n\x05units\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x1e\n\x04grid\x18\x04 \x01(\x0b\x32\x10.wxdata.GridInfo\x12\x12\n\nvalid_time\x18\x05 \x01(\t\x12\r\n\x05\x63ycle\x18\x06 \x01(\t\x12\x0b\n\x03\x66hr\x18\x07 \x01(\x05\x12\x12\n\nfill_value\x18\x08 \x01(\x02\x12\x31\n\x08metadata\x18\t \x03(\x0b\x32\x1f.wxdata.GridField.MetadataEntry\x12\x14\n\x0cscale_factor\x18\n \x01(\x02\x12\x12\n\nadd_offset\x18\x0b \x01(\x02\x12\x11\n\tdata_type\x18\x0c \x01(\t\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xd3\x01\n\x0cGridResponse\x12\x11\n\tsource_id\x18\x01 \x01(\t\x12\x0b\n\x03key\x18\x02 \x01(\t\x12\r\n\x05\x63ycle\x18\x03 \x01(\t\x12\x0b\n\x03\x66hr\x18\x04 \x01(\x05\x12\x13\n\x0b\x66ield_count\x18\x05 \x01(\x05\x12\x30\n\x06\x66ields\x18\x06 \x03(\x0b\x32 .wxdata.GridResponse.FieldsEntry\x1a@\n\x0b\x46ieldsEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12 \n\x05value\x18\x02 \x01(\x0b\x32\x11.wxdata.GridField:\x02\x38\x01\"\x81\x02\n\x08PointObs\x12\x0b\n\x03lat\x18\x01 \x01(\x02\x12\x0b\n\x03lon\x18\x02 \x01(\x02\x12\x12\n\nvalid_time\x18\x03 \x01(\t\x12\x32\n\tvariables\x18\x04 \x03(\x0b\x32\x1f.wxdata.PointObs.VariablesEntry\x12\x30\n\x08metadata\x18\x05 \x03(\x0b\x32\x1e.wxdata.PointObs.MetadataEntry\x1a\x30\n\x0eVariablesEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x02:\x02\x38\x01\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xe1\x01\n\rPointResponse\x12\x11\n\tsource_id\x18\x01 \x01(\t\x12\x12\n\nstart_time\x18\x02 \x01(\t\x12\x10\n\x08\x65nd_time\x18\x03 \x01(\t\x12\r\n\x05\x63ount\x18\x04 \x01(\x05\x12 \n\x06points\x18\x05 \x03(\x0b\x32\x10.wxdata.PointObs\x12\x35\n\x08metadata\x18\x06 \x03(\x0b\x32#.wxdata.PointResponse.MetadataEntry\x1a/\n\rMetadataEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -44,25 +44,25 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_POINTRESPONSE_METADATAENTRY']._loaded_options = None
   _globals['_POINTRESPONSE_METADATAENTRY']._serialized_options = b'8\001'
   _globals['_GRIDINFO']._serialized_start=25
-  _globals['_GRIDINFO']._serialized_end=276
-  _globals['_GRIDINFO_PROJPARAMSENTRY']._serialized_start=227
-  _globals['_GRIDINFO_PROJPARAMSENTRY']._serialized_end=276
-  _globals['_GRIDFIELD']._serialized_start=279
-  _globals['_GRIDFIELD']._serialized_end=537
-  _globals['_GRIDFIELD_METADATAENTRY']._serialized_start=490
-  _globals['_GRIDFIELD_METADATAENTRY']._serialized_end=537
-  _globals['_GRIDRESPONSE']._serialized_start=540
-  _globals['_GRIDRESPONSE']._serialized_end=751
-  _globals['_GRIDRESPONSE_FIELDSENTRY']._serialized_start=687
-  _globals['_GRIDRESPONSE_FIELDSENTRY']._serialized_end=751
-  _globals['_POINTOBS']._serialized_start=754
-  _globals['_POINTOBS']._serialized_end=1011
-  _globals['_POINTOBS_VARIABLESENTRY']._serialized_start=914
-  _globals['_POINTOBS_VARIABLESENTRY']._serialized_end=962
-  _globals['_POINTOBS_METADATAENTRY']._serialized_start=490
-  _globals['_POINTOBS_METADATAENTRY']._serialized_end=537
-  _globals['_POINTRESPONSE']._serialized_start=1014
-  _globals['_POINTRESPONSE']._serialized_end=1239
-  _globals['_POINTRESPONSE_METADATAENTRY']._serialized_start=490
-  _globals['_POINTRESPONSE_METADATAENTRY']._serialized_end=537
+  _globals['_GRIDINFO']._serialized_end=349
+  _globals['_GRIDINFO_PROJPARAMSENTRY']._serialized_start=300
+  _globals['_GRIDINFO_PROJPARAMSENTRY']._serialized_end=349
+  _globals['_GRIDFIELD']._serialized_start=352
+  _globals['_GRIDFIELD']._serialized_end=671
+  _globals['_GRIDFIELD_METADATAENTRY']._serialized_start=624
+  _globals['_GRIDFIELD_METADATAENTRY']._serialized_end=671
+  _globals['_GRIDRESPONSE']._serialized_start=674
+  _globals['_GRIDRESPONSE']._serialized_end=885
+  _globals['_GRIDRESPONSE_FIELDSENTRY']._serialized_start=821
+  _globals['_GRIDRESPONSE_FIELDSENTRY']._serialized_end=885
+  _globals['_POINTOBS']._serialized_start=888
+  _globals['_POINTOBS']._serialized_end=1145
+  _globals['_POINTOBS_VARIABLESENTRY']._serialized_start=1048
+  _globals['_POINTOBS_VARIABLESENTRY']._serialized_end=1096
+  _globals['_POINTOBS_METADATAENTRY']._serialized_start=624
+  _globals['_POINTOBS_METADATAENTRY']._serialized_end=671
+  _globals['_POINTRESPONSE']._serialized_start=1148
+  _globals['_POINTRESPONSE']._serialized_end=1373
+  _globals['_POINTRESPONSE_METADATAENTRY']._serialized_start=624
+  _globals['_POINTRESPONSE_METADATAENTRY']._serialized_end=671
 # @@protoc_insertion_point(module_scope)

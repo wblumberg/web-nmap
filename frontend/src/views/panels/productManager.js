@@ -110,6 +110,7 @@ export const LayerManager = (() => {
             category:         apiSrc.source_type || apiSrc.data_category || 'MISC',
             subcategory:      apiSrc.data_category || null,
             description:      apiSrc.label,
+            endpoint_type:    apiSrc.endpoint_type || 'gridded',
             has_forecast_hour: !!(apiSrc.has_fhrs || apiSrc.has_cycles),
             has_cycles:        !!(apiSrc.has_cycles),
             has_fhrs:          !!(apiSrc.has_fhrs),
@@ -272,7 +273,7 @@ export const LayerManager = (() => {
             if (!sel) return;
             _editingUid = sel;
             const src = _sources.find(s => s.uid === sel);
-            const presel = src ? { id: src.id, cycleTime: src.cycleTime || null } : null;
+            const presel = src ? { id: src.id, productKey: src.productKey || null, cycleTime: src.cycleTime || null } : null;
             DataSelector.open(_onDataSelected, presel);
         });
         overlay.querySelector('#lm-btn-remove').addEventListener('click', _removeSelected);
@@ -364,7 +365,7 @@ export const LayerManager = (() => {
     // ------------------------------------------------------------------
     // DataSelector callback — add a new source or replace an existing one
     // ------------------------------------------------------------------
-    function _onDataSelected(id, cycleTime) {
+    function _onDataSelected(id, productKey, cycleTime) {
         const entry = _makeEntry(id);
         if (!entry) return;
 
@@ -377,7 +378,7 @@ export const LayerManager = (() => {
             const idx = _sources.findIndex(s => s.uid === _editingUid);
             if (idx !== -1) {
                 const old = _sources[idx];
-                _sources[idx] = { uid: old.uid, id, name: entry.name, color: old.color, entry, cycleTime: storedCycle };
+                _sources[idx] = { uid: old.uid, id, name: entry.name, color: old.color, entry, productKey: productKey || null, cycleTime: storedCycle };
                 if (_dominantId === old.id) {
                     _dominantId = id;
                     try {
@@ -402,7 +403,7 @@ export const LayerManager = (() => {
             // Add new source
             const uid = ++_uidCounter;
             const color = _nextColor();
-            _sources.push({ uid, id, name: entry.name, color, entry, cycleTime: storedCycle });
+            _sources.push({ uid, id, name: entry.name, color, entry, productKey: productKey || null, cycleTime: storedCycle });
             if (_sources.length === 1) {
                 _dominantId = id; // auto-assign first dominant
                 try {
@@ -420,7 +421,7 @@ export const LayerManager = (() => {
                     }
                 } catch (e) {}
             }
-            LM.info(`Source added → uid=${uid} | id="${id}" name="${entry.name}" cycle=${storedCycle ? storedCycle.toISOString() : 'n/a'} dominant=${_dominantId === id}`);
+            LM.info(`Source added → uid=${uid} | id="${id}" product="${productKey || 'none'}" name="${entry.name}" cycle=${storedCycle ? storedCycle.toISOString() : 'n/a'} dominant=${_dominantId === id}`);
         }
 
         _renderAll();

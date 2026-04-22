@@ -164,6 +164,8 @@ app.add_middleware(
     gzip_fallback=True,       # fall back to gzip if client doesn't accept br
     excluded_handlers=[       # don't compress the protobuf stream — it adds
         r"/api/v1/gridded/.*/forecast_stream",  # latency between frames
+        r"/api/v1/gridded/.*/analysis_stream",
+        r"/api/v1/events/.*",  # SSE — compression middleware buffers the stream
     ],
 )
 
@@ -198,7 +200,7 @@ async def metrics_middleware(request: Request, call_next):
 
     # Streaming responses must NOT be consumed — pass them through as-is.
     content_type = response.headers.get("content-type", "")
-    is_streaming = "protobuf-stream" in content_type
+    is_streaming = "protobuf-stream" in content_type or "event-stream" in content_type
 
     if is_streaming:
         # Record count + latency only (no body-size measurement).

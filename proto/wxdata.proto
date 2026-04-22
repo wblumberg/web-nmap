@@ -14,19 +14,28 @@ message GridInfo {
     float  dx              = 8;   // grid spacing in x
     float  dy              = 9;   // grid spacing in y
     map<string, string> proj_params = 10;  // projection parameters
+    // Geostationary-specific fields (projected space, metres)
+    float  ll_x            = 11;  // lower-left x
+    float  ll_y            = 12;  // lower-left y
+    float  ur_x            = 13;  // upper-right x
+    float  ur_y            = 14;  // upper-right y
+    float  sat_lon         = 15;  // sub-satellite longitude (degrees)
 }
 
 // A single 2-D gridded variable
 message GridField {
-    string   variable   = 1;
-    string   units      = 2;
-    bytes    data       = 3;   // raw little-endian float array (ni*nj*bytes_per_element)
-    GridInfo grid       = 4;
-    string   valid_time = 5;   // ISO 8601 UTC
-    string   cycle      = 6;   // model init time (empty for analysis)
-    int32    fhr        = 7;   // forecast hour (-1 = analysis/not applicable)
-    float    fill_value = 8;
-    map<string, string> metadata = 9;  // includes 'precision' key: "float32"|"float16"
+    string   variable    = 1;
+    string   units       = 2;
+    bytes    data        = 3;   // raw little-endian array (int16 or float32 depending on data_type)
+    GridInfo grid        = 4;
+    string   valid_time  = 5;   // ISO 8601 UTC
+    string   cycle       = 6;   // model init time (empty for analysis)
+    int32    fhr         = 7;   // forecast hour (-1 = analysis/not applicable)
+    float    fill_value  = 8;
+    map<string, string> metadata = 9;  // arbitrary key/value pairs
+    float    scale_factor = 10;  // CF-convention: physical = data * scale_factor + add_offset
+    float    add_offset   = 11;  // CF-convention offset
+    string   data_type    = 12;  // "int16" | "float32" | "float16"
 }
 
 // Envelope wrapping one or more gridded fields

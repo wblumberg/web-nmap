@@ -1,42 +1,58 @@
 /**
- * dataselector.js — Dataset Selector Dialog for web-nmap
+ * dataSelector.js — Dataset Selector Dialog for web-nmap
  *
- * Provides a three-panel hierarchical dataset picker inspired by GEMPAK NMAP2's
- * data selector.  The three panels are:
+ * Three-level hierarchical picker:
  *
- *   [CATEGORY] → [DATASET LIST] → [METADATA]
+ *   Column 1: Data Category (MODEL_DET, SATELLITE, RADAR_MOSAIC, …)
+ *             grouped by source_type from the catalog API.
+ *             Within each category, sources are collapsed under their
+ *             source_group (e.g. "GOES-E", "MRMS").
  *
- * Usage:
- *   DataSelector.init();               // call once after catalog is loaded
- *   DataSelector.open(onLoadCallback); // opens the dialog
- *     onLoadCallback(id) is called with the catalog id when the user clicks Load
+ *   Column 2: Products available for the selected source_group / source_id,
+ *             organised by product group tag (goes_conus, basic, shear, …).
+ *
+ *   Column 3: INFO panel — metadata about the selected data source and,
+ *             once a product is selected, details about that product.
+ *             For forecast sources a cycle-time picker is shown here.
+ *
+ * Callback signature (unchanged from previous version):
+ *   onLoad(sourceId, productKey, cycleTime)
+ *     sourceId   — backend source_id string
+ *     productKey — PRODUCT_SUITES key (e.g. 'goes_conus_wv'), or null
+ *     cycleTime  — Date for forecast sources, otherwise null
  */
 
 import { getState } from '../../app/store.js';
 import * as CatalogClient from '../../services/api/catalogClient.js';
-import { PRODUCT_SUITES } from '../../domain/dataProducts/productIndex.js';
-
+import { PRODUCT_SUITES, PRODUCT_GROUPS } from '../../domain/dataProducts/productIndex.js';
 
 export const DataSelector = (() => {
     'use strict';
-    // ------------------------------------------------------------------
-    // State
-    // ------------------------------------------------------------------
-    let _onLoad    = null;   // callback(id) invoked on "Load"
-    let _selCat    = null;   // currently selected category key
-    let _selId     = null;   // currently selected catalog entry id
-    let _entries   = [];     // flat list of display entries from API sources
-    let _overlay   = null;   // root DOM element (created once)
 
-    // Cycle-time selection state (forecast datasets only)
-    let _selCycleTime    = null;  // selected cycle time (Date) or null
-    let _cycleProbeToken = 0;     // incremented to cancel stale cycle probes
-    let _preselCycleTime = null;  // cycle to pre-select when editing an existing source
+    // ─── state ────────────────────────────────────────────────────────
+    let _onLoad          = null;   // callback(sourceId, productKey, cycleTime)
+    let _overlay         = null;
+    let _apiSources      = [];     // raw objects from catalog API
 
-    // ------------------------------------------------------------------
-    // Category label map (replaces the old DataCategoryLabel global)
-    // ------------------------------------------------------------------
-    const DataCategoryLabel = {
+    // Column-1 selection
+    let _selCatKey       = null;   // source_type key, e.g. 'SATELLITE'
+    let _selGroupKey     = null;   // source_group, e.g. 'GOES-E'
+    let _selRegionKey    = null;   // region sub-group within a group, e.g. 'CONUS'
+    let _selSourceId     = null;   // specific source_id, e.g. 'GOES-E_CONUS_C08'
+
+    // Column-2 selection
+    let _selProductKey   = null;   // PRODUCT_SUITES key
+
+    // Forecast cycle state
+    let _selCycleTime    = null;
+    let _cycleProbeToken = 0;
+    let _preselCycleTime = null;
+
+    // Search
+    let _searchQuery     = '';
+
+    // ─── constants ────────────────────────────────────────────────────
+    const CAT_LABEL = {
         MODEL_DET:    'Deterministic Models',
         MODEL_ENS:    'Ensemble Models',
         ANALYSIS:     'Analyses',
@@ -48,69 +64,121 @@ export const DataSelector = (() => {
         MISC:         'Miscellaneous',
     };
 
-    // ------------------------------------------------------------------
-    // Helpers: map API sources to display entries + product availability
-    // ------------------------------------------------------------------
+    const CAT_ORDER = [
+        'MODEL_DET','MODEL_ENS','ANALYSIS',
+        'SATELLITE','RADAR_MOSAIC','RADAR_NEXRAD',
+        'OBS_UPPERAIR','OBS_SURFACE','MISC',
+    ];
+
+    // Friendly display labels for multi-source groups that don't expose a label
+    // on the individual sources (e.g., "GOES-E" → "GOES-East").
+    const GROUP_LABEL = {
+        'MRMS':   'MRMS',
+        'GOES-E': 'GOES-East',
+        'GOES-W': 'GOES-West',
+    };
+
+    // ─── helpers ──────────────────────────────────────────────────────
+
+    /** Products whose available_for includes at least one source in a set. */
+    function _productsForSources(sourceIds) {
+        const idSet = new Set(sourceIds);
+        return Object.entries(PRODUCT_SUITES).filter(([, p]) =>
+            Array.isArray(p.available_for) && p.available_for.some(id => idSet.has(id))
+        );
+    }
+
+    /** All source_ids that belong to a given source_group. */
+    function _sourcesInGroup(groupKey) {
+        return _apiSources
+            .filter(s => (s.source_group || s.source_id) === groupKey)
+            .map(s => s.source_id);
+    }
 
     /**
-     * Check if any product suite declares support for this source.
-     * Replaces the old `DataRegistry.has(id)` check.
+     * Unique region values within a group (from sources' regions[0] field),
+     * preserving first-seen order.  Returns [] for groups with no region tags.
      */
-    function _hasProducts(sourceId) {
+    function _regionsInGroup(groupKey) {
+        const seen = new Set();
+        const out  = [];
+        for (const s of _apiSources) {
+            if ((s.source_group || s.source_id) !== groupKey) continue;
+            const region = s.regions && s.regions.length ? s.regions[0] : null;
+            if (region && !seen.has(region)) { seen.add(region); out.push(region); }
+        }
+        return out;
+    }
+
+    /** All source_ids in a group that belong to a specific region. */
+    function _sourcesInGroupRegion(groupKey, regionKey) {
+        return _apiSources
+            .filter(s =>
+                (s.source_group || s.source_id) === groupKey &&
+                Array.isArray(s.regions) && s.regions.includes(regionKey)
+            )
+            .map(s => s.source_id);
+    }
+
+    /** Unique source_groups within a category, preserving first-seen order. */
+    function _groupsInCat(catKey) {
+        const seen = new Set();
+        const out  = [];
+        for (const s of _apiSources) {
+            if (s.source_type !== catKey) continue;
+            const g = s.source_group || s.source_id;
+            if (!seen.has(g)) { seen.add(g); out.push(g); }
+        }
+        return out;
+    }
+
+    /** A friendly display label for a source_group. */
+    function _groupLabel(groupKey) {
+        // 1. Static friendly map (e.g. "GOES-E" → "GOES-East")
+        if (GROUP_LABEL[groupKey]) return GROUP_LABEL[groupKey];
+        const src = _apiSources.find(s => (s.source_group || s.source_id) === groupKey);
+        if (!src) return groupKey;
+        // 2. Explicit group label from API
+        if (src.source_group_label) return src.source_group_label;
+        // 3. Single-source groups: the group key equals the source_id, so
+        //    use the human-readable label from the API (e.g. "ECMWF IFS",
+        //    "Hourly Mesoanalysis Grids") rather than the raw source_id.
+        if (!src.source_group || src.source_group === src.source_id) return src.label;
+        return groupKey;
+    }
+
+    /** Count of sources in a group that have at least one registered product. */
+    function _implCountInGroup(groupKey) {
+        const ids = _sourcesInGroup(groupKey);
+        return ids.filter(id =>
+            Object.values(PRODUCT_SUITES).some(p =>
+                Array.isArray(p.available_for) && p.available_for.includes(id)
+            )
+        ).length;
+    }
+
+    /** Is there any registered product for this exact source_id? */
+    function _sourceHasProducts(sourceId) {
         return Object.values(PRODUCT_SUITES).some(p =>
             Array.isArray(p.available_for) && p.available_for.includes(sourceId)
         );
     }
 
-    /**
-     * Convert API source objects into the shape the DataSelector rendering
-     * functions expect.
-     *
-     * API source: { source_id, label, data_category, source_type, has_cycles, has_fhrs }
-     * Display entry: { id, name, category, description, subcategory, tags,
-     *                   has_forecast_hour, ... }
-     */
-    function _mapSources(apiSources) {
-        if (!apiSources || !apiSources.length) return [];
-        return apiSources.map(src => ({
-            id:             src.source_id,
-            name:           src.label,
-            // Use source_type for the category selector hierarchy (MODEL_DET, OBS_SURFACE, …)
-            category:       src.source_type || src.data_category || 'MISC',
-            description:    src.label,
-            subcategory:    src.data_category || null,
-            tags:           [],
-            has_forecast_hour: !!(src.has_fhrs || src.has_cycles),
-            has_cycles:        !!(src.has_cycles),
-            // These fields were from the old catalog.json — we don't have them
-            // from the API but keep them so the info panel degrades gracefully.
-            data_format: null,
-            dtype:       null,
-            grid:        null,
-            max_zoom:    null,
-            temporal_frequency_min: null,
-            time_range_hr:         null,
-        }));
+    /** Apply search query against a source or product label. */
+    function _matches(text) {
+        if (!_searchQuery) return true;
+        return text.toLowerCase().includes(_searchQuery);
     }
 
-    // ------------------------------------------------------------------
-    // Category order (mirrors DataCategoryLabel in catalog.js)
-    // ------------------------------------------------------------------
-    const CAT_ORDER = [
-        'MODEL_DET',
-        'MODEL_ENS',
-        'ANALYSIS',
-        'SATELLITE',
-        'RADAR_MOSAIC',
-        'RADAR_NEXRAD',
-        'OBS_UPPERAIR',
-        'OBS_SURFACE',
-        'MISC',
-    ];
+    /** Whether the LOAD button should be enabled given current state. */
+    function _canLoad() {
+        if (!_selSourceId) return false;
+        if (_selProductKey) return true;
+        // no product selected yet → only enable if at least one product exists for this source
+        return _sourceHasProducts(_selSourceId);
+    }
 
-    // ------------------------------------------------------------------
-    // Build DOM (called once by init())
-    // ------------------------------------------------------------------
+    // ─── DOM build ────────────────────────────────────────────────────
     function _buildDOM() {
         const overlay = document.createElement('div');
         overlay.id = 'ds-overlay';
@@ -121,22 +189,22 @@ export const DataSelector = (() => {
     <button id="ds-close" title="Close">&#10005;</button>
   </div>
   <div id="ds-search-bar">
-    <input id="ds-search" type="text" placeholder="Search datasets..." autocomplete="off" spellcheck="false" />
-    <span id="ds-search-clear" title="Clear search">&#10005;</span>
+    <input id="ds-search" type="text" placeholder="Search datasets and products&#8230;" autocomplete="off" spellcheck="false" />
+    <span id="ds-search-clear" title="Clear">&#10005;</span>
   </div>
   <div id="ds-panels">
     <div id="ds-cat-panel">
-      <div class="ds-panel-header">CATEGORY</div>
+      <div class="ds-panel-header">DATA SOURCE</div>
       <ul id="ds-cat-list"></ul>
     </div>
-    <div id="ds-list-panel">
-      <div class="ds-panel-header">DATASET <span id="ds-list-count"></span></div>
-      <ul id="ds-dataset-list"></ul>
+    <div id="ds-prod-panel">
+      <div class="ds-panel-header">PRODUCTS <span id="ds-prod-count"></span></div>
+      <ul id="ds-prod-list"></ul>
     </div>
     <div id="ds-info-panel">
       <div class="ds-panel-header">INFO</div>
       <div id="ds-info-content">
-        <p class="ds-info-placeholder">Select a dataset.</p>
+        <p class="ds-info-placeholder">Select a data source.</p>
       </div>
     </div>
   </div>
@@ -151,299 +219,410 @@ export const DataSelector = (() => {
 
         document.body.appendChild(overlay);
 
-        // Wire up close / cancel / load
         overlay.querySelector('#ds-close').addEventListener('click', _close);
         overlay.querySelector('#ds-cancel-btn').addEventListener('click', _close);
         overlay.querySelector('#ds-load-btn').addEventListener('click', _handleLoad);
+        overlay.addEventListener('click', e => { if (e.target === overlay) _close(); });
 
-        // Clicking the backdrop closes the dialog
-        overlay.addEventListener('click', (e) => { if (e.target === overlay) _close(); });
-
-        // Search box
         const searchInput = overlay.querySelector('#ds-search');
         const searchClear = overlay.querySelector('#ds-search-clear');
         searchInput.addEventListener('input', () => {
-            const q = searchInput.value.trim();
-            searchClear.style.display = q ? 'flex' : 'none';
-            _renderDatasetList();
+            _searchQuery = searchInput.value.trim().toLowerCase();
+            searchClear.style.display = _searchQuery ? 'flex' : 'none';
+            // In search mode collapse all group selections to show broad results
+            _renderSourcePanel();
+            _renderProductPanel();
+            _renderInfo();
         });
         searchClear.addEventListener('click', () => {
             searchInput.value = '';
+            _searchQuery = '';
             searchClear.style.display = 'none';
-            _renderDatasetList();
+            _renderSourcePanel();
+            _renderProductPanel();
+            _renderInfo();
         });
 
-        // Keyboard: Escape closes
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && overlay.style.display !== 'none' && overlay.style.display !== '') {
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && overlay.style.display !== 'none' && overlay.style.display !== '')
                 _close();
-            }
         });
 
         return overlay;
     }
 
-    // ------------------------------------------------------------------
-    // Cycle-time helpers (forecast datasets) — API-based
-    // ------------------------------------------------------------------
-
-    /**
-     * Probe available cycles for a forecast source using the catalog API.
-     * Replaces the old HEAD-request / data_store_catalog approach.
-     */
-    async function _probeCyclesFromAPI(entry, token) {
-        if (!entry || !entry.has_forecast_hour) return null;
-
+    // ─── cycle picker helpers ─────────────────────────────────────────
+    async function _probeCyclesFromAPI(sourceId, token) {
+        const src = _apiSources.find(s => s.source_id === sourceId);
+        if (!src || !(src.has_fhrs || src.has_cycles)) return null;
         try {
-            const cyclesData = await CatalogClient.listCycles(entry.id, { limit: 20 });
-            if (token !== _cycleProbeToken) return null; // stale
-
-            // cyclesData: [{ cycle, cycle_time, fhr_count, fhr_min, fhr_max, fhrs }]
-            // Convert to Date array (newest first) for the cycle picker.
-            const cycles = cyclesData
+            const cyclesData = await CatalogClient.listCycles(sourceId, { limit: 20 });
+            if (token !== _cycleProbeToken) return null;
+            return cyclesData
                 .map(c => new Date(c.cycle_time))
                 .filter(d => Number.isFinite(d.getTime()));
-
-            return cycles;
         } catch (err) {
-            console.warn(`[DataSelector] Failed to probe cycles for "${entry.id}":`, err);
+            console.warn(`[DataSelector] cycle probe failed for "${sourceId}":`, err);
             return null;
         }
     }
 
-    /** Format a Date as "DD Mon YYYY HHZ" for the cycle picker dropdown. */
     function _fmtCycleLabel(dt) {
         const pad = n => String(n).padStart(2, '0');
         const mon = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][dt.getUTCMonth()];
         return `${pad(dt.getUTCDate())} ${mon} ${dt.getUTCFullYear()} ${pad(dt.getUTCHours())}:00 UTC`;
     }
 
-    // RENDERING FUNCTION SECTION
-
-    // ------------------------------------------------------------------
-    // Render category list
-    // ------------------------------------------------------------------
-    function _renderCategories() {
+    // ─── Column 1: source panel ───────────────────────────────────────
+    function _renderSourcePanel() {
         const ul = _overlay.querySelector('#ds-cat-list');
         ul.innerHTML = '';
 
-        // Count entries per category so we can show them
-        const counts = {};
-        const impl   = {};
-        for (const e of _entries) {
-            counts[e.category] = (counts[e.category] || 0) + 1;
-            if (_hasProducts(e.id)) impl[e.category] = (impl[e.category] || 0) + 1;
+        // In search mode show a flat list of matching sources across all categories
+        if (_searchQuery) {
+            _renderSourcePanelSearch(ul);
+            return;
         }
 
         for (const cat of CAT_ORDER) {
-            if (!counts[cat]) continue;
-            const li = document.createElement('li');
-            li.className = 'ds-cat-item';
-            li.dataset.cat = cat;
+            const groups = _groupsInCat(cat);
+            if (!groups.length) continue;
 
-            const label = DataCategoryLabel[cat] || cat;
-            const n     = counts[cat] || 0;
-            const ni    = impl[cat]   || 0;
+            // Category header row
+            const hdr = document.createElement('li');
+            hdr.className = 'ds-cat-header';
+            hdr.innerHTML = `<span class="ds-cat-header-label">${CAT_LABEL[cat] || cat}</span>`;
+            ul.appendChild(hdr);
 
-            li.innerHTML =
-                `<span class="ds-cat-label">${label}</span>` +
-                `<span class="ds-cat-badge">${ni}/${n}</span>`;
+            for (const grp of groups) {
+                const hasImpl = _implCountInGroup(grp) > 0;
+                const isSelGroup   = _selGroupKey  === grp;
+                const isSelCat     = _selCatKey    === cat;
+                const sources      = _sourcesInGroup(grp);
+                const isSingleSrc  = sources.length === 1;
 
-            if (cat === _selCat) li.classList.add('selected');
+                const li = document.createElement('li');
+                li.className = 'ds-group-item'
+                    + (isSelGroup ? ' selected' : '')
+                    + (hasImpl ? ' ds-implemented' : ' ds-unimplemented');
+                li.dataset.group = grp;
+                li.dataset.cat   = cat;
 
-            li.addEventListener('click', () => {
-                _selCat = cat;
-                _selId  = null;
-                _renderCategories();
-                _renderDatasetList();
-                _renderInfo();
-            });
+                li.innerHTML =
+                    `<span class="ds-ds-indicator">${hasImpl ? '&#9679;' : '&#9675;'}</span>` +
+                    `<span class="ds-group-label">${_groupLabel(grp)}</span>`;
 
-            ul.appendChild(li);
+                li.addEventListener('click', () => {
+                    _selCatKey    = cat;
+                    _selGroupKey  = grp;
+                    _selRegionKey = null;  // reset region when group changes
+                    // If this group has exactly one source, auto-select it
+                    _selSourceId  = isSingleSrc ? sources[0] : null;
+                    _selProductKey = null;
+                    _selCycleTime  = null;
+                    ++_cycleProbeToken;
+                    _renderSourcePanel();
+                    _renderProductPanel();
+                    _renderInfo();
+                    _overlay.querySelector('#ds-load-btn').disabled = !_canLoad();
+                });
+
+                ul.appendChild(li);
+
+                // If this group is selected and has multiple sources, expand them inline.
+                // For groups with region tags (MRMS, GOES-E/W), show regions as sub-items.
+                // Otherwise fall back to showing individual source_ids.
+                if (isSelGroup && !isSingleSrc) {
+                    const regions = _regionsInGroup(grp);
+                    if (regions.length > 0) {
+                        // ── Region sub-items ──
+                        for (const region of regions) {
+                            const regionSourceIds = _sourcesInGroupRegion(grp, region);
+                            const hasP = regionSourceIds.some(id => _sourceHasProducts(id));
+                            const subLi = document.createElement('li');
+                            subLi.className = 'ds-source-sub-item'
+                                + (region === _selRegionKey ? ' selected' : '')
+                                + (hasP ? ' ds-implemented' : ' ds-unimplemented');
+                            subLi.dataset.region = region;
+                            subLi.innerHTML =
+                                `<span class="ds-ds-indicator">${hasP ? '&#9679;' : '&#9675;'}</span>` +
+                                `<span class="ds-source-sub-label">${region}</span>`;
+                            subLi.addEventListener('click', e => {
+                                e.stopPropagation();
+                                _selRegionKey  = region;
+                                _selSourceId   = null;  // resolved when a product is picked
+                                _selProductKey = null;
+                                _selCycleTime  = null;
+                                ++_cycleProbeToken;
+                                ul.querySelectorAll('.ds-source-sub-item').forEach(el =>
+                                    el.classList.toggle('selected', el.dataset.region === region)
+                                );
+                                _renderProductPanel();
+                                _renderInfo();
+                                _overlay.querySelector('#ds-load-btn').disabled = !_canLoad();
+                            });
+                            ul.appendChild(subLi);
+                        }
+                    } else {
+                        // ── Individual source sub-items (legacy / non-region groups) ──
+                        for (const srcId of sources) {
+                            const hasP = _sourceHasProducts(srcId);
+                            const src  = _apiSources.find(s => s.source_id === srcId);
+                            const subLi = document.createElement('li');
+                            subLi.className = 'ds-source-sub-item'
+                                + (srcId === _selSourceId ? ' selected' : '')
+                                + (hasP ? ' ds-implemented' : ' ds-unimplemented');
+                            subLi.dataset.srcId = srcId;
+                            subLi.innerHTML =
+                                `<span class="ds-ds-indicator">${hasP ? '&#9679;' : '&#9675;'}</span>` +
+                                `<span class="ds-source-sub-label">${src ? src.label : srcId}</span>`;
+                            subLi.addEventListener('click', e => {
+                                e.stopPropagation();
+                                _selSourceId   = srcId;
+                                _selRegionKey  = null;
+                                _selProductKey = null;
+                                _selCycleTime  = null;
+                                ++_cycleProbeToken;
+                                ul.querySelectorAll('.ds-source-sub-item').forEach(el =>
+                                    el.classList.toggle('selected', el.dataset.srcId === srcId)
+                                );
+                                _renderProductPanel();
+                                _renderInfo();
+                                _overlay.querySelector('#ds-load-btn').disabled = !_canLoad();
+                            });
+                            ul.appendChild(subLi);
+                        }
+                    }
+                }  // end if (isSelGroup && !isSingleSrc)
+            }
         }
-
-        // "All" pseudo-category goes at the top
-        const allLi = document.createElement('li');
-        allLi.className = 'ds-cat-item ds-cat-all' + (_selCat === null ? ' selected' : '');
-        allLi.innerHTML =
-            `<span class="ds-cat-label">All</span>` +
-            `<span class="ds-cat-badge">${_entries.length}</span>`;
-        allLi.addEventListener('click', () => {
-            _selCat = null;
-            _selId  = null;
-            _renderCategories();
-            _renderDatasetList();
-            _renderInfo();
-        });
-        ul.insertBefore(allLi, ul.firstChild);
     }
 
-    // ------------------------------------------------------------------
-    // Render dataset list for selected category, filtered by search
-    // ------------------------------------------------------------------
-    function _renderDatasetList() {
-        const ul      = _overlay.querySelector('#ds-dataset-list');
-        const counter = _overlay.querySelector('#ds-list-count');
-        const query   = (_overlay.querySelector('#ds-search').value || '').trim().toLowerCase();
-
-        ul.innerHTML = '';
-
-        let visible = _selCat ? _entries.filter(e => e.category === _selCat) : _entries.slice();
-
-        if (query) {
-            visible = visible.filter(e =>
-                e.name.toLowerCase().includes(query) ||
-                e.description.toLowerCase().includes(query) ||
-                (e.tags || []).some(t => t.toLowerCase().includes(query)) ||
-                (e.subcategory || '').toLowerCase().includes(query)
-            );
-        }
-
-        counter.textContent = visible.length ? `(${visible.length})` : '';
-
-        if (!visible.length) {
+    function _renderSourcePanelSearch(ul) {
+        // Flat filtered list — search across source labels
+        const matched = _apiSources.filter(s =>
+            _matches(s.label) || _matches(s.source_id) || _matches(s.source_group || '')
+        );
+        if (!matched.length) {
             const li = document.createElement('li');
             li.className = 'ds-no-results';
-            li.textContent = 'No datasets match.';
+            li.textContent = 'No sources match.';
+            ul.appendChild(li);
+            return;
+        }
+        for (const src of matched) {
+            const hasP = _sourceHasProducts(src.source_id);
+            const li = document.createElement('li');
+            li.className = 'ds-group-item'
+                + (src.source_id === _selSourceId ? ' selected' : '')
+                + (hasP ? ' ds-implemented' : ' ds-unimplemented');
+            li.dataset.srcId = src.source_id;
+            li.innerHTML =
+                `<span class="ds-ds-indicator">${hasP ? '&#9679;' : '&#9675;'}</span>` +
+                `<span class="ds-group-label">${src.label}</span>`;
+            li.addEventListener('click', () => {
+                _selSourceId   = src.source_id;
+                _selGroupKey   = src.source_group || src.source_id;
+                _selCatKey     = src.source_type;
+                _selRegionKey  = null;
+                _selProductKey = null;
+                _selCycleTime  = null;
+                ++_cycleProbeToken;
+                _renderSourcePanel();
+                _renderProductPanel();
+                _renderInfo();
+                _overlay.querySelector('#ds-load-btn').disabled = !_canLoad();
+            });
+            ul.appendChild(li);
+        }
+    }
+
+    // ─── Column 2: product panel ──────────────────────────────────────
+    function _renderProductPanel() {
+        const ul      = _overlay.querySelector('#ds-prod-list');
+        const counter = _overlay.querySelector('#ds-prod-count');
+        ul.innerHTML  = '';
+
+        // Determine which source_ids feed this panel.
+        // Priority: explicit source > region sub-group > full group > nothing.
+        let sourceIds = [];
+        if (_selSourceId) {
+            sourceIds = [_selSourceId];
+        } else if (_selRegionKey && _selGroupKey) {
+            sourceIds = _sourcesInGroupRegion(_selGroupKey, _selRegionKey);
+        } else if (_selGroupKey) {
+            sourceIds = _sourcesInGroup(_selGroupKey);
+        }
+
+        if (!sourceIds.length && !_searchQuery) {
+            counter.textContent = '';
+            const li = document.createElement('li');
+            li.className = 'ds-no-results';
+            li.textContent = 'Select a data source.';
             ul.appendChild(li);
             return;
         }
 
-        // Group by subcategory within the list so it's easy to scan
-        const bySub = {};
-        const subOrder = [];
-        for (const e of visible) {
-            const sub = e.subcategory || '';
-            if (!bySub[sub]) { bySub[sub] = []; subOrder.push(sub); }
-            bySub[sub].push(e);
+        // In search mode also search product labels
+        let products;
+        if (_searchQuery) {
+            // Union of products for selected sources + any product matching
+            // the query regardless of source (cross-search)
+            const fromSource = sourceIds.length ? _productsForSources(sourceIds) : [];
+            const fromQuery  = Object.entries(PRODUCT_SUITES).filter(([k, p]) =>
+                _matches(p.label || k) || _matches(p.group || '')
+            );
+            // Deduplicate
+            const seen = new Set(fromSource.map(([k]) => k));
+            const combined = [...fromSource];
+            for (const entry of fromQuery) {
+                if (!seen.has(entry[0])) { seen.add(entry[0]); combined.push(entry); }
+            }
+            products = combined;
+        } else {
+            products = _productsForSources(sourceIds);
         }
 
-        for (const sub of subOrder) {
-            // Subcategory header (only show if more than one subcat present)
-            if (subOrder.length > 1 && sub) {
-                const hdr = document.createElement('li');
-                hdr.className = 'ds-subcat-header';
-                hdr.textContent = sub;
-                ul.appendChild(hdr);
-            }
+        if (!products.length) {
+            counter.textContent = '';
+            const li = document.createElement('li');
+            li.className = 'ds-no-results';
+            li.textContent = 'No products available.';
+            ul.appendChild(li);
+            return;
+        }
 
-            for (const e of bySub[sub]) {
-                const isImpl = _hasProducts(e.id);
+        // Group by product.group
+        const byGroup  = new Map();
+        const grpOrder = [];
+        for (const [key, prod] of products) {
+            const g = prod.group || 'misc';
+            if (!byGroup.has(g)) { byGroup.set(g, []); grpOrder.push(g); }
+            byGroup.get(g).push([key, prod]);
+        }
+
+        counter.textContent = `(${products.length})`;
+
+        for (const grp of grpOrder) {
+            const grpLabel = PRODUCT_GROUPS[grp] || grp;
+
+            const hdr = document.createElement('li');
+            hdr.className = 'ds-prod-group-header';
+            hdr.textContent = grpLabel;
+            ul.appendChild(hdr);
+
+            for (const [key, prod] of byGroup.get(grp)) {
                 const li = document.createElement('li');
-                li.className = 'ds-dataset-item' +
-                    (isImpl ? ' ds-implemented' : ' ds-unimplemented') +
-                    (e.id === _selId ? ' selected' : '');
-                li.dataset.id = e.id;
-
+                li.className = 'ds-prod-item' + (key === _selProductKey ? ' selected' : '');
+                li.dataset.key = key;
                 li.innerHTML =
-                    `<span class="ds-ds-indicator">${isImpl ? '&#9679;' : '&#9675;'}</span>` +
-                    `<span class="ds-ds-name">${e.name}</span>`;
+                    `<span class="ds-prod-indicator">&#9654;</span>` +
+                    `<span class="ds-prod-label">${prod.label || key}</span>`;
 
                 li.addEventListener('click', () => {
-                    _selId = e.id;
-                    // re-highlight list without full re-render
-                    ul.querySelectorAll('.ds-dataset-item').forEach(el => {
-                        el.classList.toggle('selected', el.dataset.id === _selId);
-                    });
+                    _selProductKey = key;
+                    // When a product is picked, resolve which source_id to use.
+                    // Prefer already-selected source_id if it's compatible.
+                    // If a region sub-group is active, restrict candidates to that region.
+                    if (!_selSourceId || !prod.available_for.includes(_selSourceId)) {
+                        const regionCandidates = (_selRegionKey && _selGroupKey)
+                            ? _sourcesInGroupRegion(_selGroupKey, _selRegionKey)
+                            : null;
+                        const firstMatch = (prod.available_for || []).find(id => {
+                            if (!_apiSources.some(s => s.source_id === id)) return false;
+                            if (regionCandidates) return regionCandidates.includes(id);
+                            return true;
+                        });
+                        if (firstMatch) {
+                            _selSourceId  = firstMatch;
+                            const src = _apiSources.find(s => s.source_id === firstMatch);
+                            if (src) {
+                                _selGroupKey = src.source_group || src.source_id;
+                                _selCatKey   = src.source_type;
+                            }
+                        }
+                    }
+                    ul.querySelectorAll('.ds-prod-item').forEach(el =>
+                        el.classList.toggle('selected', el.dataset.key === key)
+                    );
                     _renderInfo();
-                    _overlay.querySelector('#ds-load-btn').disabled = !isImpl;
+                    _overlay.querySelector('#ds-load-btn').disabled = !_canLoad();
                 });
 
-                // Double-click to immediately load if implemented
-                if (isImpl) {
-                    li.addEventListener('dblclick', () => {
-                        _selId = e.id;
-                        _handleLoad();
-                    });
-                }
+                li.addEventListener('dblclick', () => {
+                    _selProductKey = key;
+                    _handleLoad();
+                });
 
                 ul.appendChild(li);
             }
         }
     }
 
-    // ------------------------------------------------------------------
-    // Render metadata panel
-    // ------------------------------------------------------------------
+    // ─── Column 3: info panel ─────────────────────────────────────────
     function _renderInfo() {
-        const panel = _overlay.querySelector('#ds-info-content');
+        const panel  = _overlay.querySelector('#ds-info-content');
         const status = _overlay.querySelector('#ds-status');
 
-        if (!_selId) {
-            panel.innerHTML = '<p class="ds-info-placeholder">Select a dataset to see its details.</p>';
+        const src  = _selSourceId ? _apiSources.find(s => s.source_id === _selSourceId) : null;
+        const prod = _selProductKey ? PRODUCT_SUITES[_selProductKey] : null;
+
+        if (!src && !prod) {
+            panel.innerHTML = '<p class="ds-info-placeholder">Select a data source.</p>';
             status.textContent = '';
             return;
         }
 
-        const e      = _entries.find(en => en.id === _selId);
-        const isImpl = _hasProducts(e.id);
+        const hasForecast = src && !!(src.has_fhrs || src.has_cycles);
 
-        status.textContent = isImpl ? '' : 'Not yet implemented';
-        status.className   = isImpl ? '' : 'ds-status-warn';
+        status.textContent = '';
+        status.className   = '';
 
-        const freq = e.temporal_frequency_min != null
-            ? (e.temporal_frequency_min >= 60
-                ? `${e.temporal_frequency_min / 60}h`
-                : `${e.temporal_frequency_min}min`)
-            : '—';
-
-        const range = e.time_range_hr != null ? `${e.time_range_hr}h` : '—';
-
-        let gridHtml = '—';
-        if (e.grid) {
-            const g = e.grid;
-            if (g.type === 'latlon') {
-                gridHtml = `${g.type} ${g.nx}&times;${g.ny}`;
-            } else if (g.type === 'lambert') {
-                gridHtml = `${g.type} ${g.nx}&times;${g.ny}, ${g.dx_m}m`;
-            } else {
-                gridHtml = g.type;
-            }
-        }
-
-        const pathHtml = '<em>Managed by API</em>';
-
-        const tagsHtml = (e.tags || [])
-            .map(t => `<span class="ds-tag">${t}</span>`).join(' ');
-
-        // Reset cycle selection on every new dataset pick
-        _selCycleTime = null;
-        const cyclePickerHtml = e.has_forecast_hour ? `
-<div class="ds-info-path-label" style="margin-top:0.8em">Model Cycle:</div>
+        // Cycle picker HTML — injected only for forecast sources
+        const cyclePickerHtml = hasForecast ? `
+<div class="ds-info-section-label" style="margin-top:0.8em">Model Cycle</div>
 <div id="ds-cycle-row">
   <select id="ds-cycle-sel" disabled><option value="">(probing&#8230;)</option></select>
 </div>` : '';
 
-        panel.innerHTML = `
-<div class="ds-info-name">${e.name}</div>
-<div class="ds-info-sub">${(e.category || '')} / ${(e.subcategory || '')}</div>
-<p class="ds-info-desc">${e.description}</p>
+        // Product detail section
+        const prodHtml = prod ? `
+<div class="ds-info-section-label" style="margin-top:1em">Selected Product</div>
+<div class="ds-info-prod-name">${prod.label || _selProductKey}</div>
+<div class="ds-info-prod-meta">
+  Group: <span class="ds-info-prod-group">${PRODUCT_GROUPS[prod.group] || prod.group || '—'}</span>
+</div>
+<div class="ds-info-prod-meta">
+  Data keys: <code>${(prod.data_keys || []).join(', ')}</code>
+</div>` : '';
+
+        panel.innerHTML = src ? `
+<div class="ds-info-name">${src.label}</div>
+<div class="ds-info-sub">${CAT_LABEL[src.source_type] || src.source_type || ''}${src.source_group && src.source_group !== src.source_id ? ' &rsaquo; ' + src.source_group : ''}</div>
 <table class="ds-info-table">
-  <tr><td>Update freq.</td><td>${freq}</td></tr>
-  <tr><td>Time range</td><td>${range}</td></tr>
-  <tr><td>Fcst hours</td><td>${e.has_forecast_hour ? 'Yes' : 'No'}</td></tr>
-  <tr><td>Format</td><td>${e.data_format || '—'} ${e.dtype ? '/ ' + e.dtype : ''}</td></tr>
-  <tr><td>Grid</td><td>${gridHtml}</td></tr>
-  <tr><td>Category</td><td>${e.subcategory || '—'}</td></tr>
+  <tr><td>Source ID</td><td><code>${src.source_id}</code></td></tr>
+  <tr><td>Category</td><td>${src.data_category || '—'}</td></tr>
+  <tr><td>Forecast</td><td>${hasForecast ? 'Yes' : 'No'}</td></tr>
+  <tr><td>Regions</td><td>${(src.regions || []).join(', ') || '—'}</td></tr>
 </table>
 ${cyclePickerHtml}
-<div class="ds-info-path-label">Path template:</div>
-${pathHtml}
-<div class="ds-info-tags">${tagsHtml}</div>`;
+${prodHtml}` : `
+<p class="ds-info-placeholder" style="margin-top:0">
+  Product: <strong>${prod ? (prod.label || _selProductKey) : '—'}</strong><br>
+  Select a data source to load it.
+</p>`;
 
-        // If this is a forecast dataset, asynchronously populate the cycle picker
-        if (e.has_forecast_hour) {
+        // Async cycle picker population
+        if (hasForecast) {
+            _selCycleTime = null;
             const token = ++_cycleProbeToken;
-            _probeCyclesFromAPI(e, token).then(cycles => {
-                if (!cycles) return; // stale or probing error
+            _probeCyclesFromAPI(_selSourceId, token).then(cycles => {
+                if (!cycles) return;
                 const sel = _overlay.querySelector('#ds-cycle-sel');
-                if (!sel) return; // user navigated away
+                if (!sel) return;
                 sel.innerHTML = '';
                 if (!cycles.length) {
-                    const opt = document.createElement('option');
-                    opt.value = '';
-                    opt.textContent = '(no cycles found)';
-                    sel.appendChild(opt);
+                    sel.innerHTML = '<option value="">(no cycles found)</option>';
                     sel.disabled = true;
                     return;
                 }
@@ -455,11 +634,10 @@ ${pathHtml}
                     sel.appendChild(opt);
                 });
                 sel.disabled = false;
-                // If editing an existing source, pre-select its cycle; else default to latest
                 let defaultCycle = cycles[0];
                 if (_preselCycleTime) {
-                    const preselIso = _preselCycleTime.toISOString();
-                    const match = cycles.find(c => c.toISOString() === preselIso);
+                    const iso = _preselCycleTime.toISOString();
+                    const match = cycles.find(c => c.toISOString() === iso);
                     if (match) defaultCycle = match;
                     _preselCycleTime = null;
                 }
@@ -472,78 +650,73 @@ ${pathHtml}
         }
     }
 
-    // END RENDERING FUNCTION SECTION
-
-    // ------------------------------------------------------------------
-    // Open / close
-    // ------------------------------------------------------------------
+    // ─── load / close ─────────────────────────────────────────────────
     function _close() {
         if (_overlay) _overlay.style.display = 'none';
     }
 
     function _handleLoad() {
-        if (!_selId || !_hasProducts(_selId)) return;
-        const entry = _entries.find(en => en.id === _selId);
-        // For forecast datasets pass the selected cycle time; non-forecast pass null
-        const cycleTime = (entry && entry.has_forecast_hour) ? _selCycleTime : null;
+        if (!_canLoad()) return;
+        const src = _apiSources.find(s => s.source_id === _selSourceId);
+        const hasForecast = src && !!(src.has_fhrs || src.has_cycles);
+        const cycleTime = hasForecast ? _selCycleTime : null;
         _close();
-        if (typeof _onLoad === 'function') _onLoad(_selId, cycleTime);
+        if (typeof _onLoad === 'function')
+            _onLoad(_selSourceId, _selProductKey, cycleTime);
     }
 
-    // ------------------------------------------------------------------
-    // Public API
-    // ------------------------------------------------------------------
+    // ─── public API ───────────────────────────────────────────────────
     return {
         /**
-         * Build the dialog DOM.  Call once after DOMContentLoaded.
-         * (Store must have sources populated first.)
+         * Build the dialog DOM. Call once after DOMContentLoaded.
          */
         init() {
-            _entries = _mapSources(getState().sources || []);
-            _overlay = _buildDOM();
+            _apiSources = getState().sources || [];
+            _overlay    = _buildDOM();
             _overlay.style.display = 'none';
         },
 
         /**
          * Open the selector dialog.
-         * @param {Function} onLoad   callback(id, cycleTime) called when user clicks Load
-         * @param {Object}  [presel]  optional pre-selection: { id, cycleTime }
-         *                            When provided the dialog opens with that dataset
-         *                            already highlighted (and its cycle pre-selected).
+         * @param {Function} onLoad  callback(sourceId, productKey, cycleTime)
+         * @param {Object}  [presel] optional { id, cycleTime } to pre-select
          */
         open(onLoad, presel) {
-            _onLoad = onLoad;
-            _entries = _mapSources(getState().sources || []);   // refresh from API store
+            _onLoad     = onLoad;
+            _apiSources = getState().sources || [];
 
-            // Reset selection
+            // Reset transient state
+            _searchQuery     = '';
             _selCycleTime    = null;
             _preselCycleTime = null;
-            ++_cycleProbeToken; // cancel any in-flight cycle probe
+            ++_cycleProbeToken;
             _overlay.querySelector('#ds-search').value = '';
             _overlay.querySelector('#ds-search-clear').style.display = 'none';
             _overlay.querySelector('#ds-status').textContent = '';
 
             if (presel && presel.id) {
-                // Pre-select the provided dataset
-                const entry = _entries.find(e => e.id === presel.id);
-                _selId  = presel.id;
-                _selCat = entry ? entry.category : null;
-                if (presel.cycleTime instanceof Date) {
-                    _preselCycleTime = presel.cycleTime;
-                }
-                _overlay.querySelector('#ds-load-btn').disabled = !_hasProducts(presel.id);
+                const src = _apiSources.find(s => s.source_id === presel.id);
+                _selSourceId  = presel.id;
+                _selGroupKey  = src ? (src.source_group || src.source_id) : null;
+                _selCatKey    = src ? src.source_type : null;
+                _selRegionKey = null;
+                _selProductKey = presel.productKey || null;
+                if (presel.cycleTime instanceof Date) _preselCycleTime = presel.cycleTime;
+                _overlay.querySelector('#ds-load-btn').disabled = !_canLoad();
             } else {
-                _selCat = null;
-                _selId  = null;
+                _selCatKey     = null;
+                _selGroupKey   = null;
+                _selRegionKey  = null;
+                _selSourceId   = null;
+                _selProductKey = null;
                 _overlay.querySelector('#ds-load-btn').disabled = true;
             }
 
-            _renderCategories();
-            _renderDatasetList();
+            _renderSourcePanel();
+            _renderProductPanel();
             _renderInfo();
 
             _overlay.style.display = 'flex';
-            // Focus search only when opening fresh (not pre-selected)
             if (!presel) _overlay.querySelector('#ds-search').focus();
         },
     };
