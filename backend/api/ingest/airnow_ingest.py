@@ -66,7 +66,9 @@ async def ingest_text_to_db(csv_text, source_id: str = "AIRNOW"):
             props[k] = v
 
         # store properties as JSON string for robust DB binding
-        rows.append((source_id, dt, float(lon), float(lat), json.dumps(props, default=str)))
+        # Use AQSID as the station identifier (unique per monitoring site)
+        station_id = str(row.get('AQSID')) if row.get('AQSID') is not None else None
+        rows.append((source_id, dt, float(lon), float(lat), json.dumps(props, default=str), station_id))
 
     if not rows:
         return 0, 0
@@ -76,8 +78,8 @@ async def ingest_text_to_db(csv_text, source_id: str = "AIRNOW"):
 
     engine = get_engine()
     insert_sql = text(
-        "INSERT INTO points (source_id, valid_time, geom, properties) VALUES "
-        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties)"
+        "INSERT INTO points (source_id, valid_time, geom, properties, station_id) VALUES "
+        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties, :station_id)"
     )
 
     async with engine.begin() as conn:
@@ -120,14 +122,24 @@ async def ingest_text_to_db(csv_text, source_id: str = "AIRNOW"):
             to_insert.append(r)
 
         for r in to_insert:
-            params = {"source_id": r[0], "valid_time": r[1], "lon": r[2], "lat": r[3], "properties": r[4]}
+            params = {"source_id": r[0], "valid_time": r[1], "lon": r[2], "lat": r[3], "properties": r[4], "station_id": r[5]}
             await conn.execute(insert_sql, params)
 
     return len(to_insert), len(rows) - len(to_insert)
 
 
-async def ingest_hours(start_dt: datetime, hours: int, verbose: bool = False):
+async def ingest_hours(start_dt: datetime, hours: int, verbose: bool = False,
+                       stop_after_all_skipped: int = 2):
+    """Ingest up to `hours` hourly files going backward from `start_dt`.
+
+    Parameters
+    ----------
+    stop_after_all_skipped:
+        Stop early when this many consecutive hours have zero new rows inserted
+        (i.e., all data was already in the DB).  Set to 0 to disable early exit.
+    """
     import requests
+    consecutive_all_skipped = 0
     with requests.Session() as session:
         for i in range(hours):
             dt = start_dt - timedelta(hours=i)
@@ -142,6 +154,14 @@ async def ingest_hours(start_dt: datetime, hours: int, verbose: bool = False):
             inserted, skipped = await ingest_text_to_db(csv_text, source_id='AIRNOW')
             if verbose:
                 print(f"  Inserted {inserted}, skipped {skipped} for {dt}")
+            if inserted == 0 and skipped > 0:
+                consecutive_all_skipped += 1
+                if stop_after_all_skipped > 0 and consecutive_all_skipped >= stop_after_all_skipped:
+                    if verbose:
+                        print(f"  {consecutive_all_skipped} consecutive all-skipped hours — stopping early.")
+                    break
+            else:
+                consecutive_all_skipped = 0
 
 
 def main():
@@ -150,6 +170,10 @@ def main():
     p.add_argument("--hours", "-n", type=int, default=1)
     p.add_argument("--start-utc", default=None)
     p.add_argument("--verbose", "-v", action="store_true")
+    p.add_argument(
+        "--stop-after-all-skipped", type=int, default=2, metavar="N",
+        help="Stop early after N consecutive hours where all rows were already in the DB (0 = disable)",
+    )
     args = p.parse_args()
 
     if args.start_utc:
@@ -157,7 +181,8 @@ def main():
     else:
         start = datetime.now(timezone.utc)
 
-    asyncio.run(ingest_hours(start, args.hours, verbose=args.verbose))
+    asyncio.run(ingest_hours(start, args.hours, verbose=args.verbose,
+                             stop_after_all_skipped=args.stop_after_all_skipped))
 
 
 if __name__ == '__main__':

@@ -69,6 +69,8 @@
 
 // ─── Shared formatter helpers ─────────────────────────────────────────────────
 
+import COLORMAPS from '../../config/colormaps.js';
+
 // Temperature: round to integer, blank if missing
 const fmtTemp = val => isMissing(val) ? '' : Math.round(val).toString();
 
@@ -185,6 +187,7 @@ function buildObsLayer(layerId, obsJson, spConfig, opts = {}) {
 
     const grid = new apgl.UnstructuredGrid(obsJson.map(o => o.coord));
     const field = new apgl.RawObsField(grid, obsJson.map(o => o.data));
+    console.log(field);
     const plot = new apgl.StationPlot(field, {
         config: spConfig,
         thin_fac,
@@ -224,12 +227,24 @@ export default {
                 for (const k of KEYS) {
                     if (!(k in d)) d[k] = null;
                 }
-                d.wind = (d.sknt != null && d.drct != null)
-                    ? [d.sknt, d.drct]
+                // Float16 cannot represent 180.0 exactly; the nearest value wraps to 0°
+                // (northerly), so nudge exact southerlies by 0.1° — imperceptible visually.
+                const drct = d.drct === 180 ? 180.1 : d.drct;
+                d.wind = (d.sknt != null && drct != null)
+                    ? [d.sknt, drct]
                     : [null, null];
                 d.preswx = wnumToSymbol(d.wnum);
                 return { coord: o.coord, valid_time: o.valid_time, data: d };
             });
+
+            // Debug: log specific stations suspected of wind-barb flipping
+            const DEBUG_STATIONS = new Set(['GBD', 'HUT', 'WWR']);
+            obsJson
+                .filter(o => DEBUG_STATIONS.has(o.data.station_id))
+                .forEach(o => console.warn(
+                    `[surface_obs_standard] station=${o.data.station_id}  sknt=${o.data.sknt}  drct=${o.data.drct}  valid_time=${o.valid_time}  coord=${JSON.stringify(o.coord)}`
+                ));
+
             const layer = buildObsLayer(
                 'sfc_obs_standard',
                 obsJson,
@@ -407,8 +422,9 @@ export default {
                     if (!(k in d)) d[k] = null;
                 }
                 d.dwpf = (d.dwpc != null) ? (9./5.) * d.dwpc + 32 : null;  // convert to °F for coloring
-                d.wind = (d.sknt != null && d.drct != null)
-                    ? [d.sknt, d.drct]
+                const drct = d.drct === 180 ? 180.1 : d.drct;
+                d.wind = (d.sknt != null && drct != null)
+                    ? [d.sknt, drct]
                     : [null, null];
                 return { coord: o.coord, valid_time: o.valid_time, data: d };
             });
@@ -719,6 +735,52 @@ export default {
         },
     },
 
+    'recon_winds': {
+        label: 'Recon. Aircraft Winds',
+        group: 'point',
+        available_for: ['RECON'],
+        data_keys: ['wind_dir_deg', 'wind_speed_kt', 'max_10s_flt_wind_kt'],
+
+        make_layers(data, _grid) {
+            console.log(`Building recon_winds layer with ${data.obs_json.length} points`);
+            console.log(data.obs_json);
+            const KEYS = ['wind_speed_kt', 'wind_dir_deg'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                const drct = d.wind_dir_deg === 180 ? 180.1 : d.wind_dir_deg;
+                d.wind = (d.wind_speed_kt != null && drct != null)
+                    ? [d.wind_speed_kt, drct]
+                    : [null, null];
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+            console.log(`Building recon_winds layer with ${obsJson.length} points`);
+            console.log(obsJson);
+            const layer = buildObsLayer(
+                'recon_winds',
+                obsJson,
+                {
+                    //tmpc: {
+                    //    type: 'number', pos: 'ul', color: '#ca5252',
+                    //    formatter: pipe(cToF, fmtTemp), halo: false
+                    //},
+                    //dwpf: {
+                    //    type: 'number', pos: 'll', cmap: apgl.colormaps.pw_td2m,
+                    //    formatter: fmtDwpt, halo: false,
+                    //},
+                    wind: { type: 'barb', pos: 'c', color: '#a2d5daec' },
+                },
+                { thin_fac: 12, font_size: 14 }
+            );
+            //const temp_cbar = apgl.makeColorBar(apgl.colormaps.pw_td2m, {label: "Dewpoint (F)", fontface: 'Trebuchet MS',
+            //                                               ticks: [-40, -30, -20, -10, 0, 10, 20, 30, 40, 50, 60, 70, 80],
+            //                                                orientation: 'horizontal', tick_direction: 'bottom'});
+            return { layers: [layer], colorbar: [], sampler: null };
+        },
+    },
+
     // ════════════════════════════════════════════════════════════════════════
     // Buoy / marine model
     // Buoys report wave height and water temperature in addition to standard
@@ -842,7 +904,9 @@ export default {
                 return [coord.lon ?? null, coord.lat ?? null];
             };
 
-            // Build strikes array from obsJson, skipping entries without age/coord
+            // Build strikes array from obsJson, skipping entries without age/coord.
+            // Sort oldest-first so that newer (lower age) strikes are drawn last
+            // and appear on top when many points overlap.
             const strikes = obsJson
                 .map(o => {
                     const [lon, lat] = getLonLat(o.coord);
@@ -855,7 +919,8 @@ export default {
                     else pol = '';
                     return { lon, lat, polarity: pol, age };
                 })
-                .filter(x => x !== null);
+                .filter(x => x !== null)
+                .sort((a, b) => b.age - a.age);
 
             // Create geometry feature
             const strike_feature = {
@@ -888,5 +953,335 @@ export default {
         },
     },
 
+    'severe_lsr': {
+        label: 'Severe Storm Reports',
+        group: 'basic',
+        available_for: ['LSR'],
+        data_keys: ['descript', 'magnitude'],
+
+        make_layers(data, _grid) {
+            const KEYS = ['descript', 'magnitude'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+
+            // Helper to extract lon/lat from either {lon,lat} or [lon,lat]
+            const getLonLat = coord => {
+                if (!coord) return [null, null];
+                if (Array.isArray(coord)) return [coord[0], coord[1]];
+                return [coord.lon ?? null, coord.lat ?? null];
+            };
+
+            // Categorize by descript (case-insensitive)
+            const isHail     = d => d && d.toLowerCase().includes('hail');
+            const isWind     = d => d && (d.toLowerCase().includes('tstm') || d.toLowerCase().includes('wind'));
+            const isTornado  = d => d && d.toLowerCase().includes('tornado');
+
+            // ── Hail colormap: shades of blue, magnitude in inches ──────────
+            const hail_levels = [0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.75, 4.0];
+            const hail_colors = ['#c6dbef', '#9ecae1', '#6baed6', '#4292c6', '#2171b5', '#08519c', '#08306b'];
+            const hail_cmap   = new apgl.ColorMap(hail_levels, hail_colors, { overflow_color: '#03164a' });
+
+            // ── Wind colormap: shades of green, magnitude in mph ─────────────
+            const wind_levels = [30, 40, 50, 60, 70, 80, 90, 100];
+            const wind_colors = ['#c7e9c0', '#a1d99b', '#74c476', '#41ab5d', '#238b45', '#006d2c', '#00441b'];
+            const wind_cmap   = new apgl.ColorMap(wind_levels, wind_colors, { overflow_color: '#001a0a' });
+
+            // ── Tornado colormap: shades of red, EF scale 0–5 ───────────────
+            // 6 levels → 5 intervals → 5 colors
+            const tornado_levels = [0, 1, 2, 3, 4, 5];
+            const tornado_colors = ['#fc9272', '#fb6a4a', '#ef3b2c', '#cb181d', '#99000d'];
+            const tornado_cmap   = new apgl.ColorMap(tornado_levels, tornado_colors, { overflow_color: '#67000d' });
+
+            const layers    = [];
+            const colorbars = [];
+
+            // ── Hail ─────────────────────────────────────────────────────────
+            const hailPoints = obsJson
+                .filter(o => isHail(o.data.descript))
+                .map(o => {
+                    const [lon, lat] = getLonLat(o.coord);
+                    if (lon == null || lat == null) return null;
+                    const mag = Number(o.data.magnitude);
+                    return { lon, lat, mag: isNaN(mag) ? 0.25 : mag };
+                })
+                .filter(x => x !== null);
+
+            if (hailPoints.length > 0) {
+                const hail_feature = {
+                    geometry: { type: 'MultiPoint', coordinates: hailPoints.map(s => [s.lon, s.lat]) },
+                    text: hailPoints.map(() => 'H'),
+                    data: hailPoints.map(s => s.mag),
+                    style: { text_cmap: hail_cmap, text_halo: true, text_halo_color: '#000000', text_font_size: 18 },
+                };
+                layers.push(new apgl.PlotLayer('lsr-hail', new apgl.GeometryComponent([hail_feature])));
+                colorbars.push(apgl.makeColorBar(hail_cmap, {
+                    label: 'Hail Size (in)', fontface: 'Trebuchet MS',
+                    ticks: hail_levels, orientation: 'horizontal', tick_direction: 'bottom',
+                }));
+            }
+
+            // ── Thunderstorm Wind ─────────────────────────────────────────────
+            const windPoints = obsJson
+                .filter(o => isWind(o.data.descript))
+                .map(o => {
+                    const [lon, lat] = getLonLat(o.coord);
+                    if (lon == null || lat == null) return null;
+                    const mag = Number(o.data.magnitude);
+                    return { lon, lat, mag: isNaN(mag) ? 30 : mag };
+                })
+                .filter(x => x !== null);
+
+            if (windPoints.length > 0) {
+                const wind_feature = {
+                    geometry: { type: 'MultiPoint', coordinates: windPoints.map(s => [s.lon, s.lat]) },
+                    text: windPoints.map(() => 'W'),
+                    data: windPoints.map(s => s.mag),
+                    style: { text_cmap: wind_cmap, text_halo: true, text_halo_color: '#000000', text_font_size: 18 },
+                };
+                layers.push(new apgl.PlotLayer('lsr-wind', new apgl.GeometryComponent([wind_feature])));
+                colorbars.push(apgl.makeColorBar(wind_cmap, {
+                    label: 'Wind Speed (mph)', fontface: 'Trebuchet MS',
+                    ticks: wind_levels, orientation: 'horizontal', tick_direction: 'bottom',
+                }));
+            }
+
+            // ── Tornado ───────────────────────────────────────────────────────
+            const tornadoPoints = obsJson
+                .filter(o => isTornado(o.data.descript))
+                .map(o => {
+                    const [lon, lat] = getLonLat(o.coord);
+                    if (lon == null || lat == null) return null;
+                    const mag = Number(o.data.magnitude);
+                    return { lon, lat, mag: isNaN(mag) ? 0 : mag };
+                })
+                .filter(x => x !== null);
+
+            if (tornadoPoints.length > 0) {
+                const tornado_feature = {
+                    geometry: { type: 'MultiPoint', coordinates: tornadoPoints.map(s => [s.lon, s.lat]) },
+                    text: tornadoPoints.map(() => 'T'),
+                    data: tornadoPoints.map(s => s.mag),
+                    style: { text_cmap: tornado_cmap, text_halo: true, text_halo_color: '#000000', text_font_size: 18 },
+                };
+                layers.push(new apgl.PlotLayer('lsr-tornado', new apgl.GeometryComponent([tornado_feature])));
+                colorbars.push(apgl.makeColorBar(tornado_cmap, {
+                    label: 'Tornado (EF Scale)', fontface: 'Trebuchet MS',
+                    ticks: tornado_levels, orientation: 'horizontal', tick_direction: 'bottom',
+                }));
+            }
+
+            return { layers, colorbar: colorbars, sampler: null };
+        },
+    },
+
+    'airq_pm25': {
+        label: 'Particulate Matter 2.5 μm  (PM2.5)',
+        group: 'point',
+        available_for: ['AIRNOW'],
+        data_keys: ['PM25'],
+
+        make_layers(data, _grid) {
+            const KEYS = ['PM25'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+            const layer = buildObsLayer(
+                'sfc_obs',
+                obsJson,
+                {
+                    PM25: {
+                        type: 'number', pos: 'c', cmap: COLORMAPS['epa_aqi_pm25'],
+                        formatter: fmtDwpt, halo: false,
+                    },
+                },
+                { thin_fac: 12, font_size: 14 }
+            );
+            const aqi_cbar = apgl.makeColorBar(COLORMAPS['epa_aqi_pm25'], {label: "Particulate Matter 2.5 μm (μg/m³) (Colored by EPA AQI)",                                  fontface: 'Trebuchet MS',
+                                                            ticks: [0,9,35,55,125,225],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+            return { layers: [layer], colorbar: [aqi_cbar], sampler: null };
+        },
+    },
+
+    'airq_pm10': {
+        label: 'Particulate Matter 10 μm (PM10)',
+        group: 'point',
+        available_for: ['AIRNOW'],
+        data_keys: ['PM10'],
+
+        make_layers(data, _grid) {
+            const KEYS = ['PM10'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+            const layer = buildObsLayer(
+                'sfc_obs',
+                obsJson,
+                {
+                    PM10: {
+                        type: 'number', pos: 'c', cmap: COLORMAPS['epa_aqi_pm10'],
+                        formatter: fmtDwpt, halo: false,
+                    },
+                },
+                { thin_fac: 12, font_size: 14 }
+            );
+            const aqi_cbar = apgl.makeColorBar(COLORMAPS['epa_aqi_pm10'],
+                 {label: "Particulate Matter 10 μm (μg/m³) (Colored by EPA AQI)",                       fontface: 'Trebuchet MS',
+                 //ticks: [0,9,35,55,125,225],
+                 orientation: 'horizontal', tick_direction: 'bottom'});
+            return { layers: [layer], colorbar: [aqi_cbar], sampler: null };
+        },
+    },
+
+    'airq_o3': {
+        label: 'Ozone (O3)',
+        group: 'point',
+        available_for: ['AIRNOW'],
+        data_keys: ['O3'],
+
+        make_layers(data, _grid) {
+            const KEYS = ['O3'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+            const layer = buildObsLayer(
+                'sfc_obs',
+                obsJson,
+                {
+                    O3: {
+                        type: 'number', pos: 'c', cmap: COLORMAPS['epa_aqi_o3'],
+                        formatter: fmtDwpt, halo: false,
+                    },
+                },
+                { thin_fac: 12, font_size: 14 }
+            );
+            const aqi_cbar = apgl.makeColorBar(COLORMAPS['epa_aqi_o3'],
+                 {label: "Ozone Concentration [ppb] (Colored by EPA AQI)",                       fontface: 'Trebuchet MS',
+                 ticks: [0, 55, 71, 86, 106, 405],
+                 orientation: 'horizontal', tick_direction: 'bottom'});
+            return { layers: [layer], colorbar: [aqi_cbar], sampler: null };
+        },
+    },
+
+    'airq_co': {
+        label: 'Carbon Monoxide (CO)',
+        group: 'point',
+        available_for: ['AIRNOW'],
+        data_keys: ['CO'],
+
+        make_layers(data, _grid) {
+            const KEYS = ['CO'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+            const layer = buildObsLayer(
+                'sfc_obs',
+                obsJson,
+                {
+                    CO: {
+                        type: 'number', pos: 'c', cmap: COLORMAPS['epa_aqi_co'],
+                        formatter: fmtDwpt, halo: false,
+                    },
+                },
+                { thin_fac: 12, font_size: 14 }
+            );
+            const aqi_cbar = apgl.makeColorBar(COLORMAPS['epa_aqi_co'],
+                 {label: "Carbon Monoxide Concentration [ppm] (Colored by EPA AQI)",                       fontface: 'Trebuchet MS',
+                ticks: [ 0.0, 4.5, 9.5, 12.5, 15.5, 30.5],
+                 orientation: 'horizontal', tick_direction: 'bottom'});
+            return { layers: [layer], colorbar: [aqi_cbar], sampler: null };
+        },
+    },
+
+    'airq_so2': {
+        label: 'Sulfur Dioxide (SO2)',
+        group: 'point',
+        available_for: ['AIRNOW'],
+        data_keys: ['SO2'],
+
+        make_layers(data, _grid) {
+            const KEYS = ['SO2'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+            const layer = buildObsLayer(
+                'sfc_obs',
+                obsJson,
+                {
+                    SO2: {
+                        type: 'number', pos: 'c', cmap: COLORMAPS['epa_aqi_so2'],
+                        formatter: fmtDwpt, halo: false,
+                    },
+                },
+                { thin_fac: 12, font_size: 14 }
+            );
+            const aqi_cbar = apgl.makeColorBar(COLORMAPS['epa_aqi_so2'],
+                 {label: "Sulfur Dioxide Concentration [ppb] (Colored by EPA AQI)",                       fontface: 'Trebuchet MS',
+                 ticks: [0, 36, 76, 186, 305, 605],
+                 orientation: 'horizontal', tick_direction: 'bottom'});
+            return { layers: [layer], colorbar: [aqi_cbar], sampler: null };
+        },
+    },
+
+    'airq_no2': {
+        label: 'Nitrogen Dioxide (NO2)',
+        group: 'point',
+        available_for: ['AIRNOW'],
+        data_keys: ['NO2'],
+
+        make_layers(data, _grid) {
+            const KEYS = ['NO2'];
+            const obsJson = (data.obs_json || []).map(o => {
+                const d = { ...o.data };
+                for (const k of KEYS) {
+                    if (!(k in d)) d[k] = null;
+                }
+                return { coord: o.coord, valid_time: o.valid_time, data: d };
+            });
+            const layer = buildObsLayer(
+                'sfc_obs',
+                obsJson,
+                {
+                    NO2: {
+                        type: 'number', pos: 'c', cmap: COLORMAPS['epa_aqi_no2'],
+                        formatter: fmtDwpt, halo: false,
+                    },
+                },
+                { thin_fac: 12, font_size: 14 }
+            );
+            const aqi_cbar = apgl.makeColorBar(COLORMAPS['epa_aqi_no2'],
+                 {label: "Nitrogen Dioxide Concentration [ppb] (Colored by EPA AQI)",                       fontface: 'Trebuchet MS',
+                 ticks: [ 0.0, 54, 101, 361, 650, 1250],
+                 orientation: 'horizontal', tick_direction: 'bottom'});
+            return { layers: [layer], colorbar: [aqi_cbar], sampler: null };
+        },
+    },
 
 };
+
+//postgresql+asyncpg://webnmap:SH%40RPpyFunt1m3z@localhost:5432/wxdata

@@ -24,6 +24,7 @@ async def query_points(
     bbox: Optional[tuple[float, float, float, float]] = None,
     limit: int = _DEFAULT_LIMIT,
     most_recent: bool = False,
+    most_recent_by: str = 'geom',
     fields: Optional[list[str]] = None,
 ) -> list[dict]:
     """Query the `points` hypertable and return a list of dicts.
@@ -32,19 +33,20 @@ async def query_points(
         lat, lon, valid_time (datetime), properties (dict)
 
     Args:
-        source_id:   Matches the ``source_id`` column (e.g. "LIGHTNING", "AIRNOW").
-        start:       Inclusive start of the valid_time window (timezone-aware).
-        end:         Inclusive end of the valid_time window (timezone-aware).
-        bbox:        Optional spatial filter (lon_min, lat_min, lon_max, lat_max).
-        limit:       Maximum rows to return.
-        most_recent: If True, return only the most recent observation per unique
-                     station location (uses DISTINCT ON geom).  Suitable for
-                     stationary observation networks where each location has
-                     exactly one active reading (e.g. AirNow).
-        fields:      Optional list of property keys to include in each point's
-                     ``properties`` dict.  When None, all properties are returned.
-                     Filtering is applied in Python after the DB query so the SQL
-                     stays portable across JSON and JSONB column types.
+        source_id:      Matches the ``source_id`` column (e.g. "LIGHTNING", "AIRNOW").
+        start:          Inclusive start of the valid_time window (timezone-aware).
+        end:            Inclusive end of the valid_time window (timezone-aware).
+        bbox:           Optional spatial filter (lon_min, lat_min, lon_max, lat_max).
+        limit:          Maximum rows to return.
+        most_recent:    If True, return only the most recent observation per station.
+        most_recent_by: Column to deduplicate on when most_recent=True.
+                        ``'station_id'`` — use for networks with stable station IDs
+                        (SAO, SHIP, SYNOPTIC).  Groups by the station_id text column
+                        and uses the partial index for best performance.
+                        ``'geom'`` (default) — use for moving sources or sources
+                        without station IDs (AIRNOW by coordinates, LIGHTNING).
+        fields:         Optional list of property keys to include in each point's
+                        ``properties`` dict.  When None, all properties are returned.
     """
     limit = min(limit, _HARD_LIMIT)
 
@@ -70,22 +72,42 @@ async def query_points(
         params.update(lon_min=lon_min, lat_min=lat_min, lon_max=lon_max, lat_max=lat_max)
 
     if most_recent:
-        # Return the single most-recent observation per station location.
-        # DISTINCT ON requires ORDER BY to lead with the DISTINCT expression;
-        # the secondary `valid_time DESC` picks the newest row per geometry.
-        sql = text(f"""
-            SELECT DISTINCT ON (geom)
-                ST_Y(geom)   AS lat,
-                ST_X(geom)   AS lon,
-                valid_time,
-                properties
-            FROM points
-            WHERE source_id = :source_id
-              AND valid_time BETWEEN :start AND :end
-              {bbox_clause}
-            ORDER BY geom, valid_time DESC
-            LIMIT :limit
-        """)
+        if most_recent_by == 'station_id':
+            # Deduplicate by station_id — correct for networks with stable station
+            # identifiers (SAO, SHIP, SYNOPTIC).  Rows that lack a station_id are
+            # excluded; the partial index on (source_id, station_id, valid_time DESC)
+            # makes this fast.
+            sql = text(f"""
+                SELECT DISTINCT ON (station_id)
+
+                    ST_Y(geom)   AS lat,
+                    ST_X(geom)   AS lon,
+                    valid_time,
+                    properties
+                FROM points
+                WHERE source_id = :source_id
+                  AND valid_time BETWEEN :start AND :end
+                  AND station_id IS NOT NULL
+                  {bbox_clause}
+                ORDER BY station_id, valid_time DESC
+                LIMIT :limit
+            """)
+        else:
+            # Deduplicate by geometry — for stationary networks without station IDs
+            # or for moving sources where position is the identity.
+            sql = text(f"""
+                SELECT DISTINCT ON (geom)
+                    ST_Y(geom)   AS lat,
+                    ST_X(geom)   AS lon,
+                    valid_time,
+                    properties
+                FROM points
+                WHERE source_id = :source_id
+                  AND valid_time BETWEEN :start AND :end
+                  {bbox_clause}
+                ORDER BY geom, valid_time DESC
+                LIMIT :limit
+            """)
     else:
         sql = text(f"""
             SELECT

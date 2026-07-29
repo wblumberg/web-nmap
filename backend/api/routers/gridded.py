@@ -41,6 +41,7 @@ from ..services.grid_cache import grid_cache
 
 from datetime import datetime, timedelta, timezone
 import asyncio
+import gzip
 import hashlib
 import struct
 import sys
@@ -74,7 +75,9 @@ def _pack_data(data_array: np.ndarray, data_type: str = "float32") -> bytes:
         # Caller is responsible for pre-quantizing; just ensure int16 dtype and serialise.
         return data_array.astype(np.int16).tobytes()
     elif data_type == "float16":
-        return np.nan_to_num(data_array.astype(np.float16), nan=0.0).tobytes()
+        # Preserve NaN — missing-data pixels must NOT be replaced with 0.0.
+        # The browser-side float16ToFloat32 correctly maps float16 NaN → float32 NaN.
+        return data_array.astype(np.float16).tobytes()
     else:
         return np.nan_to_num(data_array.astype(np.float32), nan=0.0).tobytes()
 
@@ -163,8 +166,14 @@ def _results_to_protobuf(results, source_id: str, key: str,
             sat_lon=safe_float(getattr(gi, "sat_lon", None), default=0.0),
         )
         data_type = getattr(r, 'data_type', None) or 'float32'
+        if data_type == 'int16':
+            _default_dtype = np.int16
+        elif data_type == 'float16':
+            _default_dtype = np.float16
+        else:
+            _default_dtype = np.float32
         data_array = r.data if isinstance(r.data, np.ndarray) else np.asarray(
-            r.data, dtype=np.int16 if data_type == 'int16' else np.float32
+            r.data, dtype=_default_dtype
         )
         raw_bytes = _pack_data(data_array, data_type)
 
@@ -518,7 +527,10 @@ async def stream_forecast_fields(
                 t_zarr0 = time.perf_counter()
                 if arr.ndim >= 3:
                     t_axis = dims.index('time') if 'time' in dims else 0
-                    t_idx = min(fhr, arr.shape[t_axis] - 1)
+                    # Convert forecast hour to array index (handles non-hourly time axes
+                    # like NSSL_GEFS which stores 3-hourly steps as [0, 3, 6, ...]).
+                    t_idx = reader._fhr_to_index(store, fhr)
+                    t_idx = min(t_idx, arr.shape[t_axis] - 1)  # safety clamp
                     idx = [slice(None)] * arr.ndim
                     idx[t_axis] = t_idx
                     slice_2d = arr[tuple(idx)]
@@ -564,21 +576,19 @@ async def stream_forecast_fields(
                 print(f"[STREAM][{key}] {generic_name}: zarr_read={t_zarr1-t_zarr0:.3f}s pack={t_pack1-t_pack0:.3f}s shape={slice_2d.shape}")
             t2 = time.perf_counter()
             print(f"[STREAM][{key}] frame: total_serialize={t2-t1:.3f}s")
-            return resp.SerializeToString()
+            pb_bytes = resp.SerializeToString()
+            t3 = time.perf_counter()
+            compressed = gzip.compress(pb_bytes, compresslevel=6)
+            t4 = time.perf_counter()
+            print(f"[STREAM][{key}] gzip: raw={len(pb_bytes)//1024}KB → {len(compressed)//1024}KB compress_time={t4-t3:.3f}s")
+            return compressed
 
         async def producer():
             for fhr in fhr_list:
                 key = f"{cycle}_f{fhr:03d}"
                 t0 = time.perf_counter()
                 pb_bytes = await asyncio.to_thread(_read_and_serialize_frame, fhr, key)
-                frame = struct.pack('>I', len(pb_bytes)) + pb_bytes
-                if queue.full():
-                    try:
-                        queue.get_nowait()
-                        print(f"[QUEUE] Dropping stale frame before enqueue ({key})")
-                    except asyncio.QueueEmpty:
-                        pass
-                await queue.put(frame)
+                await queue.put(pb_bytes)
                 t1 = time.perf_counter()
                 print(f"[PRODUCER][{key}] produced in {t1-t0:.3f}s")
             await queue.put(None)
@@ -586,11 +596,12 @@ async def stream_forecast_fields(
         asyncio.create_task(producer())
 
         while True:
-            frame = await queue.get()
-            if frame is None:
+            compressed = await queue.get()
+            if compressed is None:
                 break
             t_send0 = time.perf_counter()
-            yield frame
+            # Wire format: [4-byte BE: 1 + len(compressed)][0x01 gzip flag][compressed protobuf]
+            yield struct.pack('>I', 1 + len(compressed)) + b'\x01' + compressed
             t_send1 = time.perf_counter()
             print(f"[STREAM] send_time={t_send1-t_send0:.3f}s")
 
@@ -651,13 +662,10 @@ async def stream_analysis_fields(
           f"vars={var_list} precision={prec}")
 
     def _read_and_serialize_frame(path, key):
-        """Blocking: read one analysis frame from disk and serialize to protobuf bytes."""
-        import asyncio
+        """Blocking (thread worker): read one analysis frame from disk and return raw protobuf bytes."""
+        import asyncio as _asyncio
         reader = get_reader(path)
-        # read_gridded is async, but the underlying zarr I/O is sync.
-        # Run the coroutine on the current thread's event loop via asyncio.run_coroutine_threadsafe
-        # — except we're already on a thread worker, so just use a new event loop.
-        loop = asyncio.new_event_loop()
+        loop = _asyncio.new_event_loop()
         try:
             results = loop.run_until_complete(
                 reader.read_gridded(path=path, var_map=var_map, level=level)
@@ -667,35 +675,61 @@ async def stream_analysis_fields(
         return _results_to_protobuf(results, source_id, key)
 
     async def _generate():
-        for key in key_list:
-            cache_key = (source_id, key, variables, level, prec)
+        """
+        Stream frames using a bounded read-ahead queue so disk I/O for frame N+1
+        overlaps with network transmission of frame N.
 
-            # ── Server-side cache hit ──
-            if not bypass_cache:
-                cached = grid_cache.get(cache_key)
-                if cached is not None:
-                    frame = struct.pack('>I', len(cached)) + cached
-                    yield frame
+        Wire format per frame:
+            [4-byte BE: 1 + len(compressed)][0x01 gzip flag][gzip-compressed protobuf]
+
+        The cache always stores raw (uncompressed) protobuf bytes so the single-frame
+        /field endpoint can retrieve them without decompressing.  Gzip compression
+        is applied per-frame right before yielding.
+        """
+        queue = asyncio.Queue(maxsize=3)  # buffer up to 3 frames ahead
+
+        async def producer():
+            for key in key_list:
+                cache_key = (source_id, key, variables, level, prec)
+
+                # ── Cache hit: enqueue raw protobuf bytes directly ──
+                if not bypass_cache:
+                    cached = grid_cache.get(cache_key)
+                    if cached is not None:
+                        await queue.put(cached)
+                        continue
+
+                # ── Resolve path; skip missing keys without aborting the stream ──
+                path = await source.get_path(key)
+                if path is None:
+                    print(f"[ANALYSIS_STREAM] key '{key}' not found — skipping")
                     continue
 
-            # ── Resolve file path for this key ──
-            path = await source.get_path(key)
-            if path is None:
-                print(f"[ANALYSIS_STREAM] key '{key}' not found — skipping")
-                continue
+                # ── Read + serialize on a thread; event loop stays responsive ──
+                try:
+                    pb_bytes = await asyncio.to_thread(_read_and_serialize_frame, path, key)
+                except Exception as e:
+                    print(f"[ANALYSIS_STREAM] read error for '{source_id}' key='{key}': {e}")
+                    continue
 
-            # ── Read and serialize on a thread so the event loop stays free ──
-            try:
-                pb_bytes = await asyncio.to_thread(_read_and_serialize_frame, path, key)
-            except Exception as e:
-                print(f"[ANALYSIS_STREAM] read error for '{source_id}' key='{key}': {e}")
-                continue
+                if not bypass_cache:
+                    grid_cache.put(cache_key, pb_bytes)
 
-            if not bypass_cache:
-                grid_cache.put(cache_key, pb_bytes)
+                await queue.put(pb_bytes)
 
-            frame = struct.pack('>I', len(pb_bytes)) + pb_bytes
-            yield frame
+            await queue.put(None)  # sentinel: producer is done
+
+        asyncio.create_task(producer())
+
+        while True:
+            pb_bytes = await queue.get()
+            if pb_bytes is None:
+                break
+            # Compress on the event loop — gzip is fast enough at level 6 for
+            # ~50 KB–5 MB protobuf payloads.  For very large frames consider
+            # asyncio.to_thread(gzip.compress, pb_bytes, 6) instead.
+            compressed = await asyncio.to_thread(gzip.compress, pb_bytes, 6)
+            yield struct.pack('>I', 1 + len(compressed)) + b'\x01' + compressed
 
     return StreamingResponse(
         _generate(),

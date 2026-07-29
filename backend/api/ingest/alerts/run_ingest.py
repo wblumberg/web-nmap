@@ -43,6 +43,8 @@ from typing import Optional
 
 import requests
 
+from sqlalchemy.exc import OperationalError
+
 from backend.api.ingest.alerts.cap_parser import parse_vtec_list
 from backend.api.ingest.alerts.ingest import ingest_feature
 
@@ -57,6 +59,10 @@ _NWS_HEADERS    = {
 _DEFAULT_SHP = Path(__file__).resolve().parents[4] / (
     "assets/mapping/counties/counties_boundaries_2025.shp"
 )
+
+# Retry configuration for transient DB errors (recovery mode, dropped connections)
+_MAX_RETRIES   = 4
+_RETRY_DELAYS  = (2, 5, 15, 30)   # seconds per attempt
 
 
 # ── Fetch helpers ─────────────────────────────────────────────────────────────
@@ -161,7 +167,18 @@ async def run(
             continue
 
         try:
-            key = await ingest_feature(feat, county_shp_path=shp_path, engine=engine)
+            for attempt in range(_MAX_RETRIES + 1):
+                try:
+                    key = await ingest_feature(feat, county_shp_path=shp_path, engine=engine)
+                    break
+                except OperationalError as exc:
+                    if attempt >= _MAX_RETRIES:
+                        raise
+                    delay = _RETRY_DELAYS[attempt]
+                    print(f"[{i:3d}] RETRY ({attempt + 1}/{_MAX_RETRIES}) "
+                          f"in {delay}s – {exc.__class__.__name__}",
+                          file=sys.stderr)
+                    await asyncio.sleep(delay)
             if key:
                 ok += 1
                 if verbose:
@@ -314,6 +331,7 @@ async def main() -> None:
               "Only features with API-provided geometry will be ingested.")
 
     # ── Run ingest ─────────────────────────────────────────────────────────
+    print("Running ingest into TimescaleDB...")
     ok, skipped, errors = await run(
         features,
         shp_path=shp,
@@ -325,6 +343,15 @@ async def main() -> None:
     mode = "dry-run" if args.dry_run else "ingested"
     print(f"\n{'─' * 50}")
     print(f"  {mode}: {ok}   skipped: {skipped}   errors: {errors}")
+
+    # Dispose the engine explicitly so asyncpg closes all pool connections
+    # before the event loop tears down.  Without this, asyncpg's SSL/TLS
+    # shutdown races with loop closure and causes a segfault on Linux.
+    if not args.dry_run:
+        from backend.api.db.engine import get_engine
+        engine = get_engine()
+        await engine.dispose()
+
     if not args.dry_run and errors:
         sys.exit(1)
 

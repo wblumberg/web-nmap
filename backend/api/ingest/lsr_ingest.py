@@ -53,8 +53,8 @@ async def ingest_features(features: List[dict], source_id: str = 'LSR'):
 
     engine = get_engine()
     insert_sql = text(
-        "INSERT INTO points (source_id, valid_time, geom, properties) VALUES "
-        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties)"
+        "INSERT INTO points (source_id, valid_time, geom, properties, station_id) VALUES "
+        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties, NULL)"
     )
 
     async with engine.begin() as conn:

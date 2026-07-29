@@ -1,7 +1,7 @@
 from pathlib import Path
 import os
 
-from .types.db_source import PointDBSource
+from .types.db_source import PointDBSource, ProfileDBSource
 
 # Local DATA_ROOT
 DATA_ROOT = Path(os.environ.get("WEBNMAP_DATA_ROOT", "/data/store/"))
@@ -13,7 +13,7 @@ DATA_ROOT = Path(os.environ.get("WEBNMAP_DATA_ROOT", "/data/store/"))
 # Lightning strikes ingested via lightning_ingest.py
 LIGHTNING_DB = PointDBSource(
     source_id_       = "LIGHTNING",
-    label_           = "Lightning Strikes (DB)",
+    label_           = "Lightning (NLDN)",
     source_type      = "MISC",
     data_category    = "point_obs",
     default_selected = 10,
@@ -21,7 +21,7 @@ LIGHTNING_DB = PointDBSource(
     binflag          = True,
     before_minutes   = 60,
     after_minutes    = 0,
-    most_recent      = False,
+    use_most_recent_filter = False,
     return_age       = True,
 )
 
@@ -36,22 +36,23 @@ LSR_DB = PointDBSource(
     binflag          = False,
     before_minutes   = 1440,
     after_minutes    = 0,
-    most_recent      = False,
+    use_most_recent_filter = False,
     return_age       = True,
 )
 
 # AirNow hourly AQI observations ingested via airnow_ingest.py
 AIRNOW_DB = PointDBSource(
     source_id_       = "AIRNOW",
-    label_           = "Air Quality (AirNow)",
+    label_           = "AirNow",
     source_type      = "OBS_SURFACE",
     data_category    = "point_obs",
     default_selected = 1,
     timeline_hours   = 48,
     binflag          = True,
-    before_minutes   = 60,
+    before_minutes   = 180,
     after_minutes    = 0,
-    most_recent      = True,
+    use_most_recent_filter = True,
+    most_recent_by   = 'station_id',
     return_age       = False,
 )
 
@@ -66,7 +67,8 @@ SHIP_DB = PointDBSource(
     binflag          = True,
     before_minutes   = 60,
     after_minutes    = 0,
-    most_recent      = True,
+    use_most_recent_filter = True,
+    most_recent_by   = 'station_id',
     return_age       = False,
 )
 
@@ -81,6 +83,38 @@ SAO_DB = PointDBSource(
     binflag          = True,
     before_minutes   = 60,
     after_minutes    = 0,
-    most_recent      = True,
+    use_most_recent_filter = True,
+    most_recent_by   = 'station_id',
     return_age       = False,
+)
+
+# RECON observations ingested via recon_ingest.py
+RECON_DB = PointDBSource(
+    source_id_       = "RECON",
+    label_           = "RECON",
+    source_type      = "OBS_UPPERAIR",
+    data_category    = "point_obs",
+    default_selected = 1,
+    timeline_hours   = 48,
+    binflag          = True,
+    before_minutes   = 180,
+    after_minutes    = 0,
+    use_most_recent_filter = False,
+    most_recent_by   = 'station_id',
+    return_age       = False,
+)
+
+
+# VAD profile observations (vertical wind profiles).
+VAD_PROFILE_DB = ProfileDBSource(
+    source_id_       = "VAD_PROFILE",
+    label_           = "VAD Profile",
+    source_type      = "OBS_UPPERAIR",
+    data_category    = "profile_obs",
+    default_selected = 1,
+    timeline_hours   = 48,
+    before_minutes   = 20,
+    after_minutes    = 0,
+    use_most_recent_filter = True,
+    most_recent_by   = 'station_id',
 )

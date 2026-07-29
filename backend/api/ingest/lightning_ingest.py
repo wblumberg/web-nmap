@@ -23,10 +23,20 @@ from datetime import datetime, timezone, timedelta
 BATCH_SIZE = 1000
 
 
-async def ingest_dir(dirpath: Path, source_id: str = "LIGHTNING"):
+async def ingest_dir(dirpath: Path, source_id: str = "LIGHTNING",
+                     stop_after_all_skipped: int = 3):
+    """Ingest lightning files from `dirpath` (newest-first).
+
+    Parameters
+    ----------
+    stop_after_all_skipped:
+        Stop early when this many consecutive files have zero new rows inserted
+        (i.e., all data was already in the DB).  Set to 0 to disable early exit.
+    """
     engine = get_engine()
     reader = AcadLtngReader()
 
+    consecutive_all_skipped = 0
     files = sorted(dirpath.glob("*.txt"))[::-1] # newest first
     for path in files:
         try:
@@ -90,8 +100,8 @@ async def ingest_dir(dirpath: Path, source_id: str = "LIGHTNING"):
         t_max = max(r[1] for r in rows)
 
         insert_sql = text(
-            "INSERT INTO points (source_id, valid_time, geom, properties) VALUES "
-            "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties)"
+            "INSERT INTO points (source_id, valid_time, geom, properties, station_id) VALUES "
+            "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties, NULL)"
         )
 
         async with engine.begin() as conn:
@@ -146,13 +156,25 @@ async def ingest_dir(dirpath: Path, source_id: str = "LIGHTNING"):
 
         print(f"Inserted {len(to_insert)} new points from {path} (skipped {len(rows)-len(to_insert)})")
 
+        if len(to_insert) == 0 and len(rows) > 0:
+            consecutive_all_skipped += 1
+            if stop_after_all_skipped > 0 and consecutive_all_skipped >= stop_after_all_skipped:
+                print(f"{consecutive_all_skipped} consecutive all-skipped files — stopping early.")
+                break
+        else:
+            consecutive_all_skipped = 0
+
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("Usage: python -m backend.api.ingest.lightning_ingest /path/to/dir")
-        sys.exit(2)
-    d = Path(sys.argv[1])
-    if not d.exists():
-        print("Directory not found:", d)
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('dirpath', type=Path)
+    p.add_argument(
+        '--stop-after-all-skipped', type=int, default=3, metavar='N',
+        help='Stop early after N consecutive files where all rows were already in the DB (0 = disable)',
+    )
+    args = p.parse_args()
+    if not args.dirpath.exists():
+        print('Directory not found:', args.dirpath)
         sys.exit(1)
-    asyncio.run(ingest_dir(d))
+    asyncio.run(ingest_dir(args.dirpath, stop_after_all_skipped=args.stop_after_all_skipped))

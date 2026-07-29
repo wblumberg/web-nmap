@@ -83,7 +83,7 @@ class MatchRequest(BaseModel):
     dominant_key          : str        = Field(..., example="20250302_1800")
     dominant_source_id    : str        = Field(..., example="RAP")
     secondary_source_ids  : list[str]  = Field(..., example=["MRMS", "SURFACE_OBS"])
-    window_hours          : float      = Field(3.0, ge=0.1, le=48.0)
+    window_hours          : float      = Field(1.0, ge=0.1, le=48.0)
 
 
 class MatchedSource(BaseModel):
@@ -127,7 +127,7 @@ class BuildMapRequest(BaseModel):
         None,
         description="If omitted, all available dominant keys are used."
     )
-    window_hours         : float = Field(3.0, ge=0.1, le=48.0)
+    window_hours         : float = Field(1.0, ge=0.1, le=48.0)
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -271,7 +271,8 @@ async def build_match_map(req: BuildMapRequest):
     for source_id in req.secondary_source_ids:
         try:
             source = get_source(source_id)
-            secondary_time_lists[source_id] = await source.list_times(limit=2000)
+            # Expand single-store forecast sources to per-fhr virtual entries
+            secondary_time_lists[source_id] = await _list_times_with_fhrs(source)
         except KeyError:
             secondary_time_lists[source_id] = []   # unknown source → no matches
 
@@ -432,13 +433,14 @@ async def _find_best_match(
             status        = "unknown_source",
         )
 
-    # Fetch available times within the search window
+    # Fetch available times, expanding single-store forecast sources to per-fhr
+    # virtual entries so that the returned matched_key encodes the forecast hour.
     window    = timedelta(hours=window_hours)
-    sec_times = await source.list_times(
-        after  = target_dt - window,
-        before = target_dt + window,
-        limit  = 500,
-    )
+    all_times = await _list_times_with_fhrs(source)
+    sec_times = [
+        t for t in all_times
+        if target_dt - window <= t.valid_time <= target_dt + window
+    ]
 
     if not sec_times:
         return MatchedSource(
@@ -459,6 +461,82 @@ async def _find_best_match(
         delta_minutes = round(delta_secs / 60.0, 1),
         status        = "matched",
     )
+
+
+async def _list_times_with_fhrs(source) -> list:
+    """
+    Return available times for a source, expanding single-file-per-cycle
+    forecast sources into per-fhr virtual AvailableTime entries.
+
+    Sources like NSSL_GEFS or HREF store all forecast hours in one zarr store
+    per cycle.  Their list_times() returns ONE entry per file (key = init time).
+    For time-matching against observation sources to work, we need one entry per
+    forecast hour so the returned matched_key encodes both cycle and fhr:
+        e.g. "2026042200_f012"
+
+    That key is then used by the gridded fetch endpoints to retrieve the exact
+    forecast hour from the store.
+    """
+    from ..sources.types.base import AvailableTime
+    from ..readers import get_reader
+
+    times      = await source.list_times(limit=2000)
+    cycle_re   = getattr(source, 'cycle_regex', None)
+    fhr_re     = getattr(source, 'fhr_regex',   None)
+
+    # Only expand sources that have cycles but no per-file fhr encoding
+    if not (cycle_re and not fhr_re):
+        return times
+    if not any(t.fhr is None and t.cycle for t in times):
+        return times
+
+    expanded: list = []
+    for t in times:
+        if t.fhr is not None or not t.cycle or t.path is None:
+            expanded.append(t)
+            continue
+
+        # Parse the cycle string (stored as str e.g. "2026042200") to datetime
+        cycle_str = str(t.cycle)
+        cycle_dt  = None
+        for fmt in ("%Y%m%d%H", "%Y%m%d%H%M"):
+            try:
+                cycle_dt = datetime.strptime(cycle_str, fmt).replace(tzinfo=timezone.utc)
+                break
+            except ValueError:
+                pass
+        if cycle_dt is None:
+            expanded.append(t)
+            continue
+
+        # Read forecast hours from the store
+        try:
+            reader       = get_reader(t.path)
+            list_fhrs_fn = getattr(reader, 'list_forecast_hours', None)
+            if list_fhrs_fn is None:
+                expanded.append(t)
+                continue
+            fhrs = await list_fhrs_fn(t.path)
+        except Exception as e:
+            print(f"[timematch] could not expand fhrs for {t.path}: {e}")
+            expanded.append(t)
+            continue
+
+        for fhr in fhrs:
+            try:
+                fhr_int = int(fhr)
+            except (TypeError, ValueError):
+                continue
+            expanded.append(AvailableTime(
+                valid_time = cycle_dt + timedelta(hours=fhr_int),
+                key        = f"{cycle_str}_f{fhr_int:03d}",
+                path       = t.path,
+                cycle      = cycle_str,
+                fhr        = fhr_int,
+                size_bytes = t.size_bytes,
+            ))
+
+    return expanded
 
 
 def _nearest_in_list(target_dt: datetime, times: list, window_secs: float):
@@ -482,6 +560,10 @@ def _nearest_in_list(target_dt: datetime, times: list, window_secs: float):
         if diff < best_diff:
             best_diff = diff
             best      = t
+
+    # Reject the match if it falls outside the allowed window
+    if best is not None and best_diff > window_secs:
+        return None
 
     return best
 

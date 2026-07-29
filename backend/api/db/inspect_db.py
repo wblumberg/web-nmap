@@ -9,6 +9,7 @@ Run from the repo root (or anywhere) with:
 
 Commands
 --------
+  timeseries <options>               Time series for a specific station ID
   tables                          List every table with live row estimate
   schema    <table>               Column names, types, nullability, defaults
   sources                         Distinct source_ids in the points table
@@ -18,6 +19,14 @@ Commands
   recent    <table>  [--limit N]  Most-recent N rows from any table
   count     <table>  [--where "…"] Row count with optional filter
   sql       "<SELECT …>"          Run any read-only SQL (SELECT / EXPLAIN / WITH)
+
+Options for `timeseries`
+------------------------
+  --station STATION_ID            Station identifier to extract (required, e.g. KPNC)
+  --source  SOURCE_ID             Filter by source_id (default: SAO)
+  --start   "2025-01-01 00:00"    Earliest valid_time (UTC)
+  --end     "2025-01-02 00:00"    Latest valid_time  (UTC)
+  --props                         Expand the full properties JSONB column
 
 Options for `points`
 ---------------------
@@ -57,6 +66,8 @@ Environment
     python backend/api/db/inspect_db.py keys --source SHIP
     python backend/api/db/inspect_db.py keys --source AIRNOW --sample-rows 500
     python backend/api/db/inspect_db.py points --source LIGHTNING --limit 10
+    python backend/api/db/inspect_db.py timeseries --station KPNC --source SAO
+    python backend/api/db/inspect_db.py timeseries --station KPNC --source SAO --start "2026-04-22" --props
     python backend/api/db/inspect_db.py points --source AIRNOW --start "2026-04-07" --bbox "-100,25,-80,40"
     python backend/api/db/inspect_db.py alerts --phen SV --sig W --limit 20
     python backend/api/db/inspect_db.py alerts --active-at "2026-04-07 18:00"
@@ -226,6 +237,8 @@ async def cmd_points(args) -> None:
 
     if args.source:
         _add("source_id = ?", args.source)
+    if getattr(args, 'station', None):
+        _add("station_id = ?", args.station)
     if args.start:
         _add("valid_time >= ?", _parse_dt(args.start))
     if args.end:
@@ -256,6 +269,7 @@ async def cmd_points(args) -> None:
         SELECT
             id,
             source_id,
+            station_id,
             valid_time,
             ST_Y(geom) AS lat,
             ST_X(geom) AS lon,
@@ -332,6 +346,66 @@ async def cmd_alerts(args) -> None:
     finally:
         await conn.close()
     _print_rows(rows, title="alerts")
+
+
+async def cmd_timeseries(args) -> None:
+    """Extract a time-ordered observation record for a single station."""
+    conditions: list[str] = []
+    params: list = []
+
+    def _p(val) -> str:
+        params.append(val)
+        return f"${len(params)}"
+
+    conditions.append(f"station_id = {_p(args.station)}")
+    if args.source:
+        conditions.append(f"source_id = {_p(args.source)}")
+    if args.start:
+        conditions.append(f"valid_time >= {_p(_parse_dt(args.start))}")
+    if args.end:
+        conditions.append(f"valid_time <= {_p(_parse_dt(args.end))}")
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    # Build the SELECT list for properties.
+    # --fields key1,key2,...  → one column per key, cast to text
+    # --props                 → full JSONB blob
+    # (default)               → truncated blob
+    fields = [f.strip() for f in args.fields.split(",") if f.strip()] \
+             if getattr(args, 'fields', None) else []
+
+    if fields:
+        # Each field becomes a separate column: properties->>'key' AS key
+        field_cols = ",\n            ".join(
+            # Use double-dollar quoting to safely embed arbitrary key names
+            f"properties->>'{f}' AS \"{f}\"" for f in fields
+        )
+        props_sql = field_cols
+    elif getattr(args, 'props', False):
+        props_sql = "properties"
+    else:
+        props_sql = "LEFT(properties::text, 200) AS properties"
+
+    sql = f"""
+        SELECT
+            valid_time,
+            source_id,
+            station_id,
+            ST_Y(geom) AS lat,
+            ST_X(geom) AS lon,
+            {props_sql}
+        FROM points
+        {where}
+        ORDER BY valid_time ASC
+        LIMIT {int(getattr(args, 'limit', 500))};
+    """
+
+    conn = await _connect()
+    try:
+        rows = await conn.fetch(sql, *params)
+    finally:
+        await conn.close()
+    _print_rows(rows, title=f"time series — {args.station} ({args.source or 'all sources'})")
 
 
 async def cmd_geometries(args) -> None:
@@ -522,6 +596,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # points
     pts = sub.add_parser("points", help="Query the points hypertable")
     pts.add_argument("--source", default=None, help="Filter by source_id")
+    pts.add_argument("--station", default=None, help="Filter by station_id (e.g. KPNC)")
     pts.add_argument("--start",  default=None, help="Earliest valid_time (UTC)")
     pts.add_argument("--end",    default=None, help="Latest   valid_time (UTC)")
     pts.add_argument("--bbox",   default=None, help="lon_min,lat_min,lon_max,lat_max")
@@ -555,6 +630,18 @@ def _build_parser() -> argparse.ArgumentParser:
     kys.add_argument("--sample-rows", default=1000, type=int,
                      help="Number of most-recent rows to sample (default 1000)")
 
+    # timeseries
+    ts = sub.add_parser("timeseries", help="Time series for a specific station ID")
+    ts.add_argument("--station", required=True, help="Station identifier (e.g. KPNC, KLGA)")
+    ts.add_argument("--source",  default=None,  help="Filter by source_id (e.g. SAO, SHIP)")
+    ts.add_argument("--start",   default=None,  help="Earliest valid_time (UTC)")
+    ts.add_argument("--end",     default=None,  help="Latest   valid_time (UTC)")
+    ts.add_argument("--props",   action="store_true",
+                    help="Show full properties JSONB (may be wide)")
+    ts.add_argument("--fields",  default=None,
+                    help="Comma-separated JSONB keys to extract as columns, e.g. 'drct,sknt,tmpc'")
+    ts.add_argument("--limit",   default=500,   type=int, help="Max rows (default 500)")
+
     # recent
     rec = sub.add_parser("recent", help="Most-recent N rows from any table")
     rec.add_argument("table", help="Table name")
@@ -578,6 +665,7 @@ _HANDLERS = {
     "schema":     cmd_schema,
     "sources":    cmd_sources,
     "points":     cmd_points,
+    "timeseries": cmd_timeseries,
     "alerts":     cmd_alerts,
     "geometries": cmd_geometries,
     "keys":       cmd_keys,

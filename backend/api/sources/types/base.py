@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -88,6 +89,7 @@ class DataSource(ABC):
         after  : datetime | None = None,
         before : datetime | None = None,
         limit  : int             = 200,
+        params : dict[str, Any] | None = None,
     ) -> list[AvailableTime]:
         """
         Return available valid times, optionally filtered to a time window.
@@ -96,6 +98,8 @@ class DataSource(ABC):
             after  : Only return times after this datetime (inclusive)
             before : Only return times before this datetime (inclusive)
             limit  : Maximum number of times to return (most-recent first)
+            params : Optional source-specific query parameters that can
+                     influence time listing behavior.
 
         Returns:
             List of AvailableTime objects, sorted newest → oldest.
@@ -110,7 +114,7 @@ class DataSource(ABC):
         """
         ...
 
-    async def most_recent(self) -> AvailableTime | None:
+    async def most_recent(self, params: dict[str, Any] | None = None) -> AvailableTime | None:
         """Convenience: return the single most recent available time."""
-        times = await self.list_times(limit=1)
+        times = await self.list_times(limit=1, params=params)
         return times[0] if times else None

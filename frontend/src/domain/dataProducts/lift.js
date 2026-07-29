@@ -1,3 +1,6 @@
+import { smooth2D } from './utils.js';
+import COLORMAPS from '../../config/colormaps.js';
+
 export default {
 
   '500mb_qg_ab': {
@@ -14,11 +17,13 @@ export default {
                                                  { relative_to: 'grid' });
 
             //const fill  = new apgl.ContourFill(wspd,  { cmap: COLORMAPS['pw_speed500mb'], opacity: 0.8 });
-            const hght_cntr  = new apgl.Contour(hght, {
+            const hghtSmth = new apgl.RawScalarField(grid, smooth2D(hght.renderCPU().data, grid.ni, grid.nj));
+            const tmpcSmth = new apgl.RawScalarField(grid, smooth2D(tmpc.data, grid.ni, grid.nj));
+            const hght_cntr  = new apgl.Contour(hghtSmth, {
                 interval: 60, color: '#afa600',
                 line_width: lev => (lev % 60 === 0) ? 3 : 1.5,
             });
-            const tmpc_cntr  = new apgl.Contour(tmpc, {
+            const tmpc_cntr  = new apgl.Contour(tmpcSmth, {
                 interval: 2, color: '#a74949',
                 line_width: 2, line_style: '--',
             });
@@ -34,7 +39,7 @@ export default {
             });          
             const levels = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50] 
             //const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#e0f3f8', '#ffffbf', '#fee090', '#fdae61', '#f46d43', '#d73027'];
-            const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#000000', '#000000', '#fee090', '#fdae61', '#f46d43', '#d73027'];
+            const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#00000000', '#00000000', '#fee090', '#fdae61', '#f46d43', '#d73027'];
 
             const cb = new apgl.ColorMap(levels, colors, {underflow_color: '#313695', overflow_color: '#d73027'});
 
@@ -74,12 +79,14 @@ export default {
             const wind = new apgl.RawVectorField(grid, data.urel_700hpa.data, data.vrel_700hpa.data,
                                                  { relative_to: 'grid' });
 
+            const hghtSmth = new apgl.RawScalarField(grid, smooth2D(hght.renderCPU().data, grid.ni, grid.nj));
+            const tmpcSmth = new apgl.RawScalarField(grid, smooth2D(tmpc.data, grid.ni, grid.nj));
             //const fill  = new apgl.ContourFill(wspd,  { cmap: COLORMAPS['pw_speed500mb'], opacity: 0.8 });
-            const hght_cntr  = new apgl.Contour(hght, {
+            const hght_cntr  = new apgl.Contour(hghtSmth, {
                 interval: 60, color: '#afa600',
                 line_width: lev => (lev % 60 === 0) ? 3 : 1.5,
             });
-            const tmpc_cntr  = new apgl.Contour(tmpc, {
+            const tmpc_cntr  = new apgl.Contour(tmpcSmth, {
                 interval: 2, color: '#a74949',
                 line_width: 2, line_style: '--',
             });
@@ -95,7 +102,7 @@ export default {
             });          
             const levels = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50] 
             //const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#e0f3f8', '#ffffbf', '#fee090', '#fdae61', '#f46d43', '#d73027'];
-            const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#000000', '#000000', '#fee090', '#fdae61', '#f46d43', '#d73027'];
+            const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#00000000', '#00000000', '#fee090', '#fdae61', '#f46d43', '#d73027'];
 
             const cb = new apgl.ColorMap(levels, colors, {underflow_color: '#313695', overflow_color: '#d73027'});
 
@@ -134,12 +141,14 @@ export default {
             const wind = new apgl.RawVectorField(grid, data.urel_850hpa.data, data.vrel_850hpa.data,
                                                  { relative_to: 'grid' });
 
+            const hghtSmth = new apgl.RawScalarField(grid, smooth2D(hght.renderCPU().data, grid.ni, grid.nj));
+            const tmpcSmth = new apgl.RawScalarField(grid, smooth2D(tmpc.data, grid.ni, grid.nj));
             //const fill  = new apgl.ContourFill(wspd,  { cmap: COLORMAPS['pw_speed500mb'], opacity: 0.8 });
-            const hght_cntr  = new apgl.Contour(hght, {
+            const hght_cntr  = new apgl.Contour(hghtSmth, {
                 interval: 60, color: '#afa600',
                 line_width: lev => (lev % 60 === 0) ? 3 : 1.5,
             });
-            const tmpc_cntr  = new apgl.Contour(tmpc, {
+            const tmpc_cntr  = new apgl.Contour(tmpcSmth, {
                 interval: 2, color: '#a74949',
                 line_width: 2, line_style: '--',
             });
@@ -155,7 +164,7 @@ export default {
             });          
             const levels = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50] 
             //const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#e0f3f8', '#ffffbf', '#fee090', '#fdae61', '#f46d43', '#d73027'];
-            const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#000000', '#000000', '#fee090', '#fdae61', '#f46d43', '#d73027'];
+            const colors = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#00000000', '#00000000', '#fee090', '#fdae61', '#f46d43', '#d73027'];
 
             const cb = new apgl.ColorMap(levels, colors, {underflow_color: '#313695', overflow_color: '#d73027'});
 

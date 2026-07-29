@@ -15,6 +15,8 @@ import paintball     from './paintball.js';
 import winter        from './winter.js';
 import overlays      from './overlays.js';
 import alerts        from './alerts.js';
+import vad           from './vad.js';
+import atcf          from './atcf.js';
 
 // Merge all groups into a single flat registry.
 // Duplicate IDs across files will throw at import time (good — fail loudly).
@@ -33,6 +35,8 @@ export const PRODUCT_SUITES = {
     ...misc,
     ...winter,
     ...alerts,
+    ...vad,
+    ...atcf,
 };
 
 // Define the order of product groups for display in the UI.
@@ -49,7 +53,7 @@ export const PRODUCT_GROUPS = {
     overlays: "Contour Overlays",
     winter: "Winter Weather",
     misc: "Miscellaneous Products",
-    paintball: "Paintball Products",
+    storm_attributes: "Storm Attributes",
     alerts: "Watches, Warnings & Advisories",
     
     goes_conus: "GOES CONUS Products",

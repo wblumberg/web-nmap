@@ -15,13 +15,14 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 _engine: AsyncEngine | None = None
 
 
-TIMESCALE_CONN='postgresql+asyncpg://webnmap:SH%40RPpyFunt1m3z@localhost:5432/wxdata'
-
 def get_db_dsn() -> str:
     dsn = os.environ.get("TIMESCALE_CONN")
     if not dsn:
-        return TIMESCALE_CONN
-        #raise RuntimeError("TIMESCALE_CONN not configured")
+        raise RuntimeError(
+            "TIMESCALE_CONN environment variable is not set. "
+            "Set it to a DSN such as: "
+            "postgresql+asyncpg://user:pass@host:5432/dbname"
+        )
     return dsn
 
 
@@ -29,5 +30,5 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         dsn = get_db_dsn()
-        _engine = create_async_engine(dsn, pool_size=10, max_overflow=20)
+        _engine = create_async_engine(dsn, pool_size=10, max_overflow=20, pool_pre_ping=True)
     return _engine

@@ -1,0 +1,19 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+prometheus-client>=0.20.0
+python-dateutil>=2.9.0
+watchdog>=4.0.0
+aiofiles>=23.0.0
+numpy>=1.26.0
+brotli>=1.1.0           # Brotli compression for HTTP responses
+brotli-asgi>=1.4.0      # ASGI middleware for Brotli transport
+# Optional — add as needed for reading specific data formats:
+xarray>=2024.0.0
+dask[array]>=2024.0.0  # lazy chunked compute for xarray operations
+zarr>=2.17.0           # chunked cloud-friendly output format
+cfgrib>=0.9.10          # for GRIB2 (RAP, GFS, etc.)
+grib2io>=2.4.0          # message-by-message GRIB2 read/write utilities
+metpy>=1.6.0            # unit handling, derived fields
+netCDF4>=1.7.0
+pandas>=2.2.0           # for obs binning
+matplotlib>=3.8.0       # optional: contour extraction for spaghetti outputs

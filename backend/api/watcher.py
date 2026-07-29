@@ -122,21 +122,32 @@ class NewFileHandler(FileSystemEventHandler):
 
     def _schedule_zarr_check(self, store_path: Path, vt, attempt: int = 0):
         """
-        Poll store_path/zarr.json every 2 s until it contains
-        ``consolidated_metadata`` (written last), then fire the SSE event.
-        Gives up after 15 attempts (~30 s).
+        Poll store_path until the zarr store is ready to serve, then fire.
+
+        ── zarr v3 stores (zarr.json) ────────────────────────────────────────
+        zarr.json with consolidated_metadata is written as the very last step
+        of the Python ingest pipeline.  We poll every 2 s and give up after
+        15 attempts (~30 s).
+
+        ── zarr v2 stores (.zgroup) ─────────────────────────────────────────
+        zarr v2 has no consolidated metadata file.  The 2-second initial delay
+        is sufficient — by the time the first check fires, the store is complete.
+        We just verify .zgroup exists (written as the first file in the store).
         """
         def check():
             print(f"[watcher] Polling zarr check attempt={attempt} store={store_path.name}")
             with self._stores_lock:
                 if store_path in self._emitted_stores:
                     print(f"[watcher] Already emitted for {store_path.name}, skipping")
-                    return  # Already fired for this store
+                    return
 
-            ready = False
             zarr_json = store_path / "zarr.json"
-            print(f"[watcher] zarr.json exists={zarr_json.exists()}")
+            zgroup    = store_path / ".zgroup"
+
             if zarr_json.exists():
+                # ── zarr v3: wait for consolidated_metadata ──────────────────
+                print(f"[watcher] zarr.json exists={zarr_json.exists()}")
+                ready = False
                 try:
                     with open(zarr_json) as f:
                         meta = json.load(f)
@@ -145,12 +156,29 @@ class NewFileHandler(FileSystemEventHandler):
                 except Exception as exc:
                     print(f"[watcher] Error reading zarr.json: {exc}")
 
-            if ready:
-                print(f"[watcher] READY — emitting event for {store_path.name}")
+                if ready:
+                    print(f"[watcher] READY (v3) — emitting event for {store_path.name}")
+                    with self._stores_lock:
+                        self._emitted_stores.add(store_path)
+                    self._emit(store_path, vt)
+                elif attempt < 14:
+                    threading.Timer(
+                        2.0,
+                        lambda: self._schedule_zarr_check(store_path, vt, attempt + 1),
+                    ).start()
+                else:
+                    print(f"[watcher] Timed out waiting for zarr store to be ready: {store_path}")
+
+            elif zgroup.exists():
+                # ── zarr v2: .zgroup present — store is ready ────────────────
+                print(f"[watcher] READY (v2) — emitting event for {store_path.name}")
                 with self._stores_lock:
                     self._emitted_stores.add(store_path)
                 self._emit(store_path, vt)
-            elif attempt < 14:  # 15 checks × 2 s = 30 s max
+
+            elif attempt < 14:
+                # Neither format marker present yet — store directory just created
+                print(f"[watcher] zarr store not ready yet (attempt {attempt}), retrying…")
                 threading.Timer(
                     2.0,
                     lambda: self._schedule_zarr_check(store_path, vt, attempt + 1),
@@ -222,8 +250,9 @@ async def _poll_db_source(source_id: str, source, interval_seconds: int) -> None
         await asyncio.sleep(interval_seconds)
         try:
             table = getattr(source, 'table', 'points')
+            time_column = getattr(source, 'time_column', 'valid_time')
             sql   = text(
-                f"SELECT MAX(valid_time) FROM {table} WHERE source_id = :sid"
+                f"SELECT MAX({time_column}) FROM {table} WHERE source_id = :sid"
             )
             async with engine.connect() as conn:
                 latest = await conn.scalar(sql, {"sid": source_id})
@@ -265,11 +294,15 @@ def start_db_polling(interval_seconds: int = 30) -> list[asyncio.Task]:
     Returns the list of created Tasks so main.py can cancel them on shutdown.
     Call this from within an async context (e.g. FastAPI lifespan).
     """
-    from .sources.types.db_source import PointDBSource   # avoid circular import at module load
+    from .sources.types.db_source import (
+        PointDBSource,
+        ProfileDBSource,
+        CycloneTrackDBSource,
+    )  # avoid circular import at module load
 
     tasks = []
     for source_id, source in SOURCES.items():
-        if not isinstance(source, PointDBSource):
+        if not isinstance(source, (PointDBSource, ProfileDBSource, CycloneTrackDBSource)):
             continue
         task = asyncio.create_task(
             _poll_db_source(source_id, source, interval_seconds),

@@ -74,7 +74,7 @@ import math
 import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from metpy.io.gempak import GempakFile, FileTypes
@@ -639,6 +639,7 @@ class GempakFilesystemSource(FilesystemSource):
         after  : datetime | None = None,
         before : datetime | None = None,
         limit  : int             = 500,
+        params : dict[str, Any] | None = None,
     ) -> list[AvailableTime]:
         """
         Return one AvailableTime per individual obs time inside each file.
@@ -648,7 +649,7 @@ class GempakFilesystemSource(FilesystemSource):
         the obs times within it.
         """
         if self.gempak_file_type == 'grid':
-            return await super().list_times(after=after, before=before, limit=limit)
+            return await super().list_times(after=after, before=before, limit=limit, params=params)
 
         if not self._data_dir.exists():
             return []

@@ -11,6 +11,7 @@ import re
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .base import DataSource, AvailableTime
 
@@ -50,6 +51,7 @@ class RasterSource(DataSource):
         default_selected: int = 10,
         timeline_hours: int = 12,
         regions: list[str] | None = None,
+        zarr_transport: bool = False,
     ):
         self._source_id    = source_id_
         self._label        = label_
@@ -91,6 +93,11 @@ class RasterSource(DataSource):
         self.regions: list[str] = regions if regions is not None else []
         
         # For example, we can have CONUS, FullDisk, Alaska, Meso1, Meso2, etc.  These are informational tags to help users understand the spatial domain of the data and filter sources by region if desired.  They don't affect any internal logic in this class, but can be used by catalog.py or the frontend to group/filter sources.
+
+        # Transport mode: when True, the zarr_proxy endpoint serves raw compressed
+        # chunk bytes directly to the browser for decompression via zarr.js.
+        # When False (default), the protobuf path is used.
+        self.zarr_transport: bool = zarr_transport
 
     # ── DataSource interface ──────────────────────────────────────────────────
 
@@ -171,6 +178,7 @@ class RasterSource(DataSource):
         after  : datetime | None = None,
         before : datetime | None = None,
         limit  : int             = 200,
+        params : dict[str, Any] | None = None,
     ) -> list[AvailableTime]:
         """
         Scan the data directory and return AvailableTime objects.
@@ -241,8 +249,8 @@ class RasterSource(DataSource):
             await self.list_times()
         return self._cache.get(key)
 
-    async def most_recent(self) -> AvailableTime | None:
+    async def most_recent(self, params: dict[str, Any] | None = None) -> AvailableTime | None:
         """Return the single most recent available time."""
-        times = await self.list_times(limit=1)
+        times = await self.list_times(limit=1, params=params)
         print(times)
         return times[0] if times else None

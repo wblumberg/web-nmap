@@ -1,7 +1,10 @@
+import { smooth2D } from './utils.js';
+import COLORMAPS from '../../config/colormaps.js';
+
 export default {
 
     'mn_06_shear': {
-        label: 'Mean 0-6 km Shear',
+        label: '[MN] 0-6 km Shear',
         group: 'shear',
         available_for: ['NSSL_GEFS'],
         data_keys: ['mean_USHR_hght_6000_0', 'mean_VSHR_hght_6000_0'],
@@ -64,10 +67,117 @@ export default {
         },
     },
 
+    '01_shear': {
+        label: '0-1 km Shear Vector',
+        group: 'shear',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis 0-1 km Shear [kts]',
+        available_for: ['MESOANALYSIS_GRID'],
+        data_keys: ['sh1u', 'sh1v'],
+        // The make_layers() takes in the data object and a grid object and makes the layers we need to visualize
+        make_layers(data, grid) {
+            const u = data.sh1u.multiply(1.94384).renderCPU(); // Convert from m/s to knots
+            const v = data.sh1v.multiply(1.94384).renderCPU(); // Convert from m/s to knots
+
+            const wspd = apgl.RawScalarField.aggregateFields(Math.hypot, u, v).renderCPU();
+            const wspd_mask = wspd.data.map(val => val >= 10); // Mask values below 10 knots
+            const u_masked = new apgl.RawScalarField(grid, u.data.map((val, i) => wspd_mask[i] ? val : NaN));
+            const v_masked = new apgl.RawScalarField(grid, v.data.map((val, i) => wspd_mask[i] ? val : NaN));
+
+            const wind = new apgl.RawVectorField(grid, u_masked.data, v_masked.data, { relative_to: 'earth' });
+
+            const shear_cmap = new apgl.ColorMap(
+                [10, 15, 20, 25, 30],
+                ['#a1a9bd', '#91a5bc', '#7594c0', '#6974c8'],
+                { overflow_color:  '#5b5bbb' , underflow_color: '#ffffff' }
+            );
+            const wspdSmooth = new apgl.RawScalarField(grid, smooth2D(wspd.data, grid.ni, grid.nj));
+            const barbs = new apgl.Barbs(wind, { cmap: shear_cmap, thin_fac: 16 });
+            const shear_mag = new apgl.Contour(wspdSmooth, {
+                levels: [10,15,20,25,30], cmap: shear_cmap,
+                line_width: 2, line_style: '-',
+            });
+            const hght_lbls  = new apgl.ContourLabels(shear_mag, {
+                text_color: '#d6d6d6', halo: true, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            });
+
+            const shear_cbar = apgl.makeColorBar(shear_cmap, {
+                label: '0-1 km Shear [kt]', fontface: 'Trebuchet MS',
+                ticks: [10, 15, 20, 25, 30],
+                orientation: 'horizontal', tick_direction: 'bottom',
+            });
+
+            return {
+                layers: [
+                    new apgl.PlotLayer('01_shear_barbs', barbs),
+                    new apgl.PlotLayer('01_shear_mag', shear_mag),
+                    new apgl.PlotLayer('01_shear_lbls', hght_lbls),
+                    //new apgl.PlotLayer('500_hght_lbls',  hght_lbls),
+                ],
+                colorbar: [shear_cbar],
+                sampler: [],
+            };
+        },
+    },
+
+    '03_shear': {
+        label: '0-3 km Shear Vector',
+        group: 'shear',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis 0-3 km Shear [kts]',
+        available_for: ['MESOANALYSIS_GRID'],
+        data_keys: ['sh3u', 'sh3v'],
+        // The make_layers() takes in the data object and a grid object and makes the layers we need to visualize
+        make_layers(data, grid) {
+            const u = data.sh3u.multiply(1.94384).renderCPU(); // Convert from m/s to knots
+            const v = data.sh3v.multiply(1.94384).renderCPU(); // Convert from m/s to knots
+
+            const wspd = apgl.RawScalarField.aggregateFields(Math.hypot, u, v).renderCPU();
+            const wspd_mask = wspd.data.map(val => val >= 20); // Mask values below 20 knots
+            const u_masked = new apgl.RawScalarField(grid, u.data.map((val, i) => wspd_mask[i] ? val : NaN));
+            const v_masked = new apgl.RawScalarField(grid, v.data.map((val, i) => wspd_mask[i] ? val : NaN));
+
+            const wind = new apgl.RawVectorField(grid, u_masked.data, v_masked.data, { relative_to: 'earth' });
+
+            const shear_cmap = new apgl.ColorMap(
+                [20, 25, 30, 35, 40],
+                ['#a1a9bd', '#91a5bc', '#7594c0', '#6974c8'],
+                { overflow_color:  '#5b5bbb' , underflow_color: '#ffffff' }
+            );
+            const wspdSmooth = new apgl.RawScalarField(grid, smooth2D(wspd.data, grid.ni, grid.nj));
+            const barbs = new apgl.Barbs(wind, { cmap: shear_cmap, thin_fac: 16 });
+            const shear_mag = new apgl.Contour(wspdSmooth, {
+                levels: [20, 25, 30, 35, 40], cmap: shear_cmap,
+                line_width: 2, line_style: '-',
+            });
+            const hght_lbls  = new apgl.ContourLabels(shear_mag, {
+                text_color: '#d6d6d6', halo: true, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            });
+
+            const shear_cbar = apgl.makeColorBar(shear_cmap, {
+                label: '0-3 km Shear [kt]', fontface: 'Trebuchet MS',
+                ticks: [20, 25, 30, 35, 40],
+                orientation: 'horizontal', tick_direction: 'bottom',
+            });
+
+            return {
+                layers: [
+                    new apgl.PlotLayer('03_shear_barbs', barbs),
+                    new apgl.PlotLayer('03_shear_mag', shear_mag),
+                    new apgl.PlotLayer('03_shear_lbls', hght_lbls),
+                    //new apgl.PlotLayer('500_hght_lbls',  hght_lbls),
+                ],
+                colorbar: [shear_cbar],
+                sampler: [],
+            };
+        },
+    },
+
     '06_shear': {
-        label: 'Surface to 6 km Shear Vector',
+        label: '0-6 km Shear Vector',
         group: 'shear',
         available_for: ['MESOANALYSIS_GRID'],
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis 0-6 km Shear [kts]',
         data_keys: ['sh6u', 'sh6v'],
         // The make_layers() takes in the data object and a grid object and makes the layers we need to visualize
         make_layers(data, grid) {
@@ -86,9 +196,9 @@ export default {
                 ['#a1a9bd', '#91a5bc', '#7594c0', '#6974c8'],
                 { overflow_color:  '#5b5bbb' , underflow_color: '#ffffff' }
             );
-
+            const wspdSmooth = new apgl.RawScalarField(grid, smooth2D(wspd.data, grid.ni, grid.nj));
             const barbs = new apgl.Barbs(wind, { cmap: shear_cmap, thin_fac: 16 });
-            const shear_mag = new apgl.Contour(wspd, {
+            const shear_mag = new apgl.Contour(wspdSmooth, {
                 levels: [30,40,50,60,70], cmap: shear_cmap,
                 line_width: 2, line_style: '-',
             });
@@ -108,6 +218,71 @@ export default {
                     new apgl.PlotLayer('06_shear_barbs', barbs),
                     new apgl.PlotLayer('06_shear_mag', shear_mag),
                     new apgl.PlotLayer('06_shear_lbls', hght_lbls),
+                    //new apgl.PlotLayer('500_hght_lbls',  hght_lbls),
+                ],
+                colorbar: [shear_cbar],
+                sampler: [],
+            };
+        },
+    },
+
+
+    'eff_shear': {
+        label: 'Effective Shear Vector',
+        group: 'shear',
+        available_for: ['MESOANALYSIS_GRID'],
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Effective Bulk Wind Difference [kts]',
+        data_keys: ['ebwdu', 'ebwdv'],
+        // The make_layers() takes in the data object and a grid object and makes the layers we need to visualize
+        make_layers(data, grid) {
+            const u = data.ebwdu.multiply(1.94384).renderCPU(); // Convert from m/s to knots
+            const v = data.ebwdv.multiply(1.94384).renderCPU(); // Convert from m/s to knots
+
+            const wspd = apgl.RawScalarField.aggregateFields(Math.hypot, u, v).renderCPU();
+            // Detect missing: sentinel -9999 m/s becomes ~-19439 kt after conversion; hypot of two
+            // such values yields ~27490 kt — not -9999 — so mask from u/v directly.
+            const missing_mask = u.data.map((val, i) => val < -9000 || v.data[i] < -9000);
+            const wspdMasked = wspd.data.map((val, i) => missing_mask[i] ? NaN : val);
+
+            const wspd_mask = wspdMasked.map(val => val >= 20); // Mask values below 20 knots
+            const u_masked = new apgl.RawScalarField(grid, u.data.map((val, i) => wspd_mask[i] ? val : NaN));
+            const v_masked = new apgl.RawScalarField(grid, v.data.map((val, i) => wspd_mask[i] ? val : NaN));
+
+            const wind = new apgl.RawVectorField(grid, u_masked.data, v_masked.data, { relative_to: 'earth' });
+
+            const shear_cmap = new apgl.ColorMap(
+                [20, 30, 40, 50, 60],
+                ['#a1a9bd', '#91a5bc', '#7594c0', '#6974c8'],
+                { overflow_color:  '#5b5bbb' , underflow_color: '#ffffff' }
+            );
+            
+            const wspdSmooth = new apgl.RawScalarField(grid, smooth2D(wspdMasked, grid.ni, grid.nj));
+            const barbs = new apgl.Barbs(wind, { cmap: shear_cmap, thin_fac: 16 });
+            console.log('[eff_shear] wspdSmooth sample values:', wspdSmooth.data.slice(0, 10));
+            console.log('[eff_shear] wspd max:', Math.max(...wspd.data));
+            console.log('[eff_shear] wspdSmooth max:', Math.max(...wspdSmooth.data));
+
+            const shear_mag = new apgl.Contour(wspdSmooth, {
+                levels: [20, 25, 30, 35, 40, 45, 50, 55, 60], cmap: shear_cmap,
+                line_width: 2, line_style: '-',
+            });
+
+            const hght_lbls  = new apgl.ContourLabels(shear_mag, {
+                text_color: '#d6d6d6', halo: true, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            });
+
+            const shear_cbar = apgl.makeColorBar(shear_cmap, {
+                label: 'Effective Bulk Wind Difference [kt]', fontface: 'Trebuchet MS',
+                ticks: [20, 30, 40, 50, 60],
+                orientation: 'horizontal', tick_direction: 'bottom',
+            });
+
+            return {
+                layers: [
+                    new apgl.PlotLayer('eff_shear_barbs', barbs),
+                    new apgl.PlotLayer('eff_shear_mag', shear_mag),
+                    new apgl.PlotLayer('eff_shear_lbls', hght_lbls),
                     //new apgl.PlotLayer('500_hght_lbls',  hght_lbls),
                 ],
                 colorbar: [shear_cbar],

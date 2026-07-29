@@ -10,11 +10,14 @@ from pathlib import Path
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .metrics import REQUEST_COUNT, REQUEST_LATENCY, RESPONSE_SIZE
-from .routers import catalog, lightning, timematch, events, gridded, geometries, points_db
+from .routers import catalog, lightning, timematch, events, gridded, geometries, points_db, profiles_db, zarr_proxy
 from .watcher import start_watching, start_db_polling
 
 _observer = None
-_TRACKED_QUERY_PARAMS = ("center", "window_minutes", "level", "bbox", "cycle", "fhr")
+_TRACKED_QUERY_PARAMS = (
+    "center", "window_minutes", "level", "bbox", "cycle", "fhr",
+    "storm_id", "basin", "model",
+)
 
 
 def _sanitize_label_value(value: str, max_len: int = 48) -> str:
@@ -114,6 +117,14 @@ _openapi_tags = [
         ),
     },
     {
+        "name": "DB Profiles",
+        "description": (
+            "Query vertical profile observations stored in the TimescaleDB `profiles` hypertable "
+            "(for example VAD wind profiles). Returns GeoJSON point features with profile arrays "
+            "in properties."
+        ),
+    },
+    {
         "name": "Lightning",
         "description": (
             "Lightning strike data. Defaults to the TimescaleDB source; "
@@ -166,6 +177,7 @@ app.add_middleware(
         r"/api/v1/gridded/.*/forecast_stream",  # latency between frames
         r"/api/v1/gridded/.*/analysis_stream",
         r"/api/v1/events/.*",  # SSE — compression middleware buffers the stream
+        r"/api/v1/zarr/.*",    # zarr chunks are already Blosc-compressed; re-compressing wastes CPU
     ],
 )
 
@@ -264,6 +276,8 @@ app.include_router(events.router,       prefix="/api/v1/events")
 app.include_router(gridded.router,      prefix="/api/v1/gridded")
 app.include_router(geometries.router,   prefix="/api/v1/geometries")
 app.include_router(points_db.router,    prefix="/api/v1/db-points")
+app.include_router(profiles_db.router,  prefix="/api/v1/db-profiles")
+app.include_router(zarr_proxy.router,   prefix="/api/v1/zarr")
 
 PUBLIC_DIR = Path(__file__).resolve().parents[2] / "frontend" / "public"
 

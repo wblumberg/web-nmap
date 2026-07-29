@@ -200,7 +200,8 @@ async def get_db_points(
     binflag        = getattr(src, 'binflag',        False)
     before_minutes = getattr(src, 'before_minutes', 60)
     after_minutes  = getattr(src, 'after_minutes',  0)
-    most_recent    = getattr(src, 'most_recent',    False)
+    use_most_recent_filter = getattr(src, 'use_most_recent_filter', False)
+    most_recent_by = getattr(src, 'most_recent_by', 'geom')
     return_age     = getattr(src, 'return_age',     False)
 
     # ── Resolve time window ───────────────────────────────────────────────────
@@ -257,7 +258,8 @@ async def get_db_points(
             end=t_end,
             bbox=parsed_bbox,
             limit=limit,
-            most_recent=most_recent,
+            most_recent=use_most_recent_filter,
+            most_recent_by=most_recent_by,
             fields=parsed_fields,
         )
     except Exception as e:

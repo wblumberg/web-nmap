@@ -39,6 +39,7 @@ def _mrms_source(region: str, product_dir: str, zarr_var: str, label: str) -> Ra
         default_selected = 10,
         timeline_hours = 12,
         regions        = [region],
+        zarr_transport=True,
     )
 
 MRMS_SOURCES: dict[str, RasterSource] = {
@@ -78,6 +79,8 @@ def _goes_source(sat_num: int, region: str, channel: str) -> RasterSource:
         regions        = [region],
         source_id_   = f"GOES-{'E' if sat_num == 19 else 'W'}_{region}_{channel}",
         source_group = "GOES-E" if sat_num == 19 else "GOES-W",   # ← UI top level
+        zarr_transport=True,
+
     )
 
 # Build a dict  source_id → RasterSource  for all GOES-E combinations

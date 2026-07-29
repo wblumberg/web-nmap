@@ -30,7 +30,7 @@ async def ingest_station_rows(station_rows, source_id: str = 'SYNOPTIC'):
         props = {k: station.get(k) for k in station.keys() if k not in ('latitude', 'longitude', 'utc', 'stid', 'mid')}
         props['STID'] = mid
 
-        rows.append((source_id, dt, slon, slat, json.dumps(props)))
+        rows.append((source_id, dt, slon, slat, json.dumps(props), mid or None))
 
     if not rows:
         return 0, 0
@@ -40,8 +40,8 @@ async def ingest_station_rows(station_rows, source_id: str = 'SYNOPTIC'):
 
     engine = get_engine()
     insert_sql = text(
-        "INSERT INTO points (source_id, valid_time, geom, properties) VALUES "
-        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties)"
+        "INSERT INTO points (source_id, valid_time, geom, properties, station_id) VALUES "
+        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties, :station_id)"
     )
 
     async with engine.begin() as conn:
@@ -84,7 +84,7 @@ async def ingest_station_rows(station_rows, source_id: str = 'SYNOPTIC'):
             to_insert.append(r)
 
         for r in to_insert:
-            params = {"source_id": r[0], "valid_time": r[1], "lon": r[2], "lat": r[3], "properties": r[4]}
+            params = {"source_id": r[0], "valid_time": r[1], "lon": r[2], "lat": r[3], "properties": r[4], "station_id": r[5]}
             await conn.execute(insert_sql, params)
 
     return len(to_insert), len(rows) - len(to_insert)

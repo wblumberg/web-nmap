@@ -6,12 +6,14 @@ PointDBSource  — point-obs source that returns *distinct* valid_time bins from
                  so the catalog, timematch, and router code all work unchanged.
 AlertSource    — specialized source for NWS alerts from the `alerts` hypertable,
                  representing one significance level (Warning / Watch / Advisory).
+ProfileDBSource — source for vertical profile observations stored in `profiles`.
+CycloneTrackDBSource — source for ATCF cyclone forecast points in `atcf_tracks`.
 """
 from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -41,7 +43,13 @@ class DBSource(DataSource):
     def label(self) -> str:
         return f"DB-backed {self._source_id}"
 
-    async def list_times(self, after: Optional[datetime] = None, before: Optional[datetime] = None, limit: int = 200):
+    async def list_times(
+        self,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        limit: int = 200,
+        params: dict[str, Any] | None = None,
+    ):
         """Return recent available times for this source from the DB.
 
         This maps DB rows to `AvailableTime`. The `key` is set to a
@@ -87,8 +95,6 @@ class DBSource(DataSource):
         return the raw row as a dict. Routers that consume DB-backed
         sources should branch accordingly.
         """
-        if not key.endswith(''):
-            pass
         # parse db id suffix
         if '_db' not in key:
             return None
@@ -121,6 +127,9 @@ class PointDBSource(DataSource):
     It matches the FilesystemSource attribute interface expected by the
     catalog router (source_type, data_category, cycle_regex, fhr_regex,
     default_selected, timeline_hours) so no router changes are needed.
+    
+    This is meant to be a generic point-obs source for any data type stored in
+    the `points` hypertable, (e.g. lightning, surface obs, etc.)
 
     Parameters:
         source_id_      : Matches the ``source_id`` column in ``points``.
@@ -150,7 +159,8 @@ class PointDBSource(DataSource):
         binflag         : bool = False,   # e.g. "peak_current_ka" to bin lightning by current strength
         before_minutes  : Optional[int] = None, # if binflag=True, look for data points this many minutes before frame time
         after_minutes   : Optional[int] = None, # if binflag=True, look for data points this many minutes after frame time
-        most_recent     : bool = False, # if most_recent is True, return only the most recent point per station_id within the time window
+        use_most_recent_filter: bool = False, # if True, return only the most recent point per station_id within the time window
+        most_recent_by  : str  = 'geom', # column to deduplicate on: 'station_id' or 'geom'
         return_age      : bool = False, # whether to calculate and return age_minutes for each point based on valid_time and reference time
     ):
         self._source_id       = source_id_
@@ -163,7 +173,8 @@ class PointDBSource(DataSource):
         self.binflag          = binflag # Similar to binflag in datatype.tbl
         self.before_minutes   = before_minutes
         self.after_minutes    = after_minutes
-        self.most_recent      = most_recent
+        self.use_most_recent_filter = use_most_recent_filter
+        self.most_recent_by   = most_recent_by
         self.return_age       = return_age  # whether to calculate and return age_minutes for each point based on valid_time and reference time
         self._engine: AsyncEngine = get_engine()
 
@@ -180,6 +191,7 @@ class PointDBSource(DataSource):
         after  : Optional[datetime] = None,
         before : Optional[datetime] = None,
         limit  : int = 200,
+        params : dict[str, Any] | None = None,
     ) -> list[AvailableTime]:
         """Return distinct valid_time bins for this source, newest first."""
         after  = after  or datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -223,7 +235,7 @@ class PointDBSource(DataSource):
         """
         return None
 
-    async def most_recent(self) -> Optional[AvailableTime]:
+    async def most_recent(self, params: dict[str, Any] | None = None) -> Optional[AvailableTime]:
         """Return the most recent available time, or None if the table is empty."""
         sql = text(f"""
             SELECT MAX(valid_time) FROM {self.table}
@@ -243,6 +255,8 @@ class AlertSource(DataSource):
     Represents one significance level (Warning / Watch / Advisory) rather
     than one specific alert type.  Phenomenon filtering is applied at query
     time via the ``phen`` parameter on the geometries endpoint.
+    
+    These alerts are intended to be only watches, warnings, and advisories.
 
     Parameters
     ----------
@@ -289,6 +303,7 @@ class AlertSource(DataSource):
         after  : Optional[datetime] = None,
         before : Optional[datetime] = None,
         limit  : int = 200,
+        params : dict[str, Any] | None = None,
     ) -> list[AvailableTime]:
         """Return distinct start_utc values for this significance level, newest first.
 
@@ -323,7 +338,7 @@ class AlertSource(DataSource):
         """Alert sources have no file path — geometry is queried from the DB."""
         return None
 
-    async def most_recent(self) -> Optional[AvailableTime]:
+    async def most_recent(self, params: dict[str, Any] | None = None) -> Optional[AvailableTime]:
         """Return the most recent start_utc for this significance level."""
         sql = text("""
             SELECT MAX(start_utc) FROM alerts WHERE significance = :sig
@@ -334,4 +349,229 @@ class AlertSource(DataSource):
             return None
         key = vt.isoformat() if hasattr(vt, "isoformat") else str(vt)
         return AvailableTime(valid_time=vt, key=key, path=None)
+
+
+class ProfileDBSource(DataSource):
+    """DB-backed source for vertical profile observations.
+    
+    This is a generic source for any data type stored in the `profiles` hypertable.
+    Possible data sources that this is intended for:
+    - Radiosondes
+    - Dropsondes
+    - WSR-88D VAD Vertical Wind Profiles
+    - Radar Wind Profilers
+    - Thermodynamic Profilers
+    - ACARS Profiles
+
+    Rows are expected in a `profiles` hypertable with one row per station/time
+    and vertical arrays encoded in JSONB.
+    
+    """
+
+    cycle_regex:   None = None
+    fhr_regex:     None = None
+    endpoint_type: str  = "profile_obs"
+    time_column:   str  = "valid_time"
+
+    def __init__(
+        self,
+        source_id_: str,
+        label_: str,
+        source_type: str = "OBS_UPPERAIR",
+        data_category: str = "profile_obs",
+        default_selected: int = 1,
+        timeline_hours: int = 24,
+        table: str = "profiles",
+        use_most_recent_filter: bool = False,
+        most_recent_by: Optional[str] = None,
+        before_minutes: Optional[int] = None,
+        after_minutes: Optional[int] = None,
+    ):
+        self._source_id = source_id_
+        self._label = label_
+        self.source_type = source_type
+        self.data_category = data_category
+        self.default_selected = default_selected
+        self.timeline_hours = timeline_hours
+        self.table = table
+        self.use_most_recent_filter = use_most_recent_filter
+        self.most_recent_by = most_recent_by
+        self.before_minutes = before_minutes
+        self.after_minutes = after_minutes
+        self._engine: AsyncEngine = get_engine()
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    async def list_times(
+        self,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        limit: int = 200,
+        params: dict[str, Any] | None = None,
+    ) -> list[AvailableTime]:
+        """Return distinct observation-minute bins, newest first.
+
+        ``use_most_recent_filter`` applies when fetching a frame, not when
+        constructing the timeline.  Using one latest timestamp per station
+        here produces a list of unrelated station times; nearest-time matching
+        can then move a requested frame into the future before the profile
+        endpoint applies its backward-looking window.
+        """
+        after = after or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        before = before or datetime.now(tz=timezone.utc)
+
+        sql = text(f"""
+            SELECT DISTINCT time_bucket('1 minute', valid_time) AS valid_time
+            FROM {self.table}
+            WHERE source_id = :source_id
+              AND valid_time BETWEEN :after AND :before
+            ORDER BY valid_time DESC
+            LIMIT :limit
+        """)
+        
+        bind = {
+            "source_id": self._source_id,
+            "after": after,
+            "before": before,
+            "limit": limit,
+        }
+
+        async with self._engine.connect() as conn:
+            res = await conn.execute(sql, bind)
+            rows = res.fetchall()
+
+        out: list[AvailableTime] = []
+        for row in rows:
+            vt = row[0]
+            key = vt.strftime("%Y%m%d_%H%M") if hasattr(vt, "strftime") else str(vt)
+            out.append(AvailableTime(valid_time=vt, key=key, path=None))
+        return out
+
+    async def get_path(self, key: str):
+        return None
+
+    async def most_recent(self, params: dict[str, Any] | None = None) -> Optional[AvailableTime]:
+        sql = text(f"""
+            SELECT MAX(valid_time) FROM {self.table} WHERE source_id = :source_id
+        """)
+        async with self._engine.connect() as conn:
+            vt = await conn.scalar(sql, {"source_id": self._source_id})
+        if vt is None:
+            return None
+        key = vt.strftime("%Y%m%d_%H%M") if hasattr(vt, "strftime") else str(vt)
+        return AvailableTime(valid_time=vt, key=key, path=None)
+
+
+class CycloneTrackDBSource(DataSource):
+    """DB-backed source for ATCF cyclone forecast track points.
+    
+    This source is backed by the `atcf_tracks` hypertable.
+
+    This is a service to retrieve the ATCF forecast points for a given cycle or model.
+
+    Exposes cycles/fhrs through list_times by returning one AvailableTime per
+    (cycle_time, fhr) pair. This allows existing catalog cycle endpoints to
+    work with DB-backed tracks.
+    """
+
+    cycle_regex:   str  = "DB_CYCLE"
+    fhr_regex:     str  = "DB_FHR"
+    endpoint_type: str  = "geometry"
+    time_column:   str  = "valid_time"
+
+    def __init__(
+        self,
+        source_id_: str,
+        label_: str,
+        source_type: str = "MISC",
+        data_category: str = "cyclone_tracks",
+        default_selected: int = 1,
+        timeline_hours: int = 240,
+        table: str = "atcf_tracks",
+    ):
+        self._source_id = source_id_
+        self._label = label_
+        self.source_type = source_type
+        self.data_category = data_category
+        self.default_selected = default_selected
+        self.timeline_hours = timeline_hours
+        self.table = table
+        self._engine: AsyncEngine = get_engine()
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    async def list_times(
+        self,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        limit: int = 200,
+        params: dict[str, Any] | None = None,
+    ) -> list[AvailableTime]:
+        after = after or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        before = before or datetime.now(tz=timezone.utc)
+
+        sql = text(f"""
+            SELECT cycle_time, fhr, MIN(valid_time) AS valid_time
+            FROM {self.table}
+            WHERE source_id = :source_id
+              AND cycle_time BETWEEN :after AND :before
+            GROUP BY cycle_time, fhr
+            ORDER BY cycle_time DESC, fhr ASC
+            LIMIT :limit
+        """)
+        bind = {
+            "source_id": self._source_id,
+            "after": after,
+            "before": before,
+            "limit": limit,
+        }
+
+        async with self._engine.connect() as conn:
+            res = await conn.execute(sql, bind)
+            rows = res.fetchall()
+
+        out: list[AvailableTime] = []
+        for row in rows:
+            cycle_time = row[0]
+            fhr = row[1]
+            valid_time = row[2]
+            cycle = cycle_time.strftime("%Y%m%d%H") if hasattr(cycle_time, "strftime") else str(cycle_time)
+            key = f"{cycle}_f{int(fhr):03d}"
+            out.append(
+                AvailableTime(
+                    valid_time=valid_time,
+                    key=key,
+                    path=None,
+                    cycle=cycle,
+                    fhr=int(fhr),
+                    size_bytes=None,
+                )
+            )
+        return out
+
+    async def get_path(self, key: str):
+        return None
+
+    async def most_recent(self, params: dict[str, Any] | None = None) -> Optional[AvailableTime]:
+        sql = text(f"""
+            SELECT MAX(cycle_time) FROM {self.table} WHERE source_id = :source_id
+        """)
+        async with self._engine.connect() as conn:
+            cycle_time = await conn.scalar(sql, {"source_id": self._source_id})
+        if cycle_time is None:
+            return None
+        cycle = cycle_time.strftime("%Y%m%d%H") if hasattr(cycle_time, "strftime") else str(cycle_time)
+        return AvailableTime(valid_time=cycle_time, key=cycle, path=None, cycle=cycle, fhr=None)
 

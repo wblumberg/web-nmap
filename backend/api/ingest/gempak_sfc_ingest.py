@@ -113,7 +113,10 @@ def _obs_to_row(obs: dict, source_id: str) -> tuple | None:
     for k, v in values.items():
         props[k] = _nullify(v)
 
-    return (source_id, valid_time, lon, lat, json.dumps(props, default=str))
+    # Extract station_id as a direct column; keep it as None if absent or empty
+    station_id = props_meta.get("station_id") or None
+
+    return (source_id, valid_time, lon, lat, json.dumps(props, default=str), station_id)
 
 
 # ── Deduplication helper ──────────────────────────────────────────────────────
@@ -147,7 +150,7 @@ async def _existing_keys(conn, source_id: str, t_min: datetime, t_max: datetime)
 
 def _row_key(row: tuple) -> tuple:
     """(round_lon, round_lat, valid_time_str) key for deduplication."""
-    _, valid_time, lon, lat, _ = row
+    _, valid_time, lon, lat, *_ = row
     vt = valid_time
     if hasattr(vt, "astimezone"):
         vt = vt.astimezone(timezone.utc).replace(microsecond=0)
@@ -204,8 +207,8 @@ async def ingest_file(
 
     engine    = get_engine()
     insert_sql = text(
-        "INSERT INTO points (source_id, valid_time, geom, properties) VALUES "
-        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties)"
+        "INSERT INTO points (source_id, valid_time, geom, properties, station_id) VALUES "
+        "(:source_id, :valid_time, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), :properties, :station_id)"
     )
 
     async with engine.begin() as conn:
@@ -223,7 +226,7 @@ async def ingest_file(
         for i in range(0, len(to_insert), BATCH_SIZE):
             batch = to_insert[i : i + BATCH_SIZE]
             params = [
-                {"source_id": r[0], "valid_time": r[1], "lon": r[2], "lat": r[3], "properties": r[4]}
+                {"source_id": r[0], "valid_time": r[1], "lon": r[2], "lat": r[3], "properties": r[4], "station_id": r[5]}
                 for r in batch
             ]
             for p in params:

@@ -20,4 +20,5 @@ MESO_SOURCE = FilesystemSource(
   human_readable = True,
   default_selected = 10,
   timeline_hours = 24,
+  zarr_transport=True,
 )

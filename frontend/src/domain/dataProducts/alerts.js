@@ -260,6 +260,14 @@ export default {
         make_layers(data, _grid) { return _makeLayers('warnings_sv',   data, ['severe_thunderstorm']); },
     },
 
+    'warnings_convective': {
+        label:         'Tornado + Severe Thunderstorm Warnings',
+        group:         'alerts',
+        available_for: ['WARNINGS'],
+        data_keys:     ['tornado', 'severe_thunderstorm'],
+        make_layers(data, _grid) { return _makeLayers('warnings_convective', data, ['tornado', 'severe_thunderstorm']); },
+    },
+
     'warnings_flash_flood': {
         label:         'Flash Flood Warnings',
         group:         'alerts',
@@ -343,6 +351,14 @@ export default {
         available_for: ['WATCHES'],
         data_keys:     ['severe_thunderstorm'],
         make_layers(data, _grid) { return _makeLayers('watches_sv',   data, ['severe_thunderstorm']); },
+    },
+
+    'watches_convective': {
+        label:         'Tornado + Severe Thunderstorm Watches',
+        group:         'alerts',
+        available_for: ['WATCHES'],
+        data_keys:     ['tornado', 'severe_thunderstorm'],
+        make_layers(data, _grid) { return _makeLayers('watches_convective', data, ['tornado', 'severe_thunderstorm']); },
     },
 
     'watches_flood': {

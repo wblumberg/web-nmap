@@ -240,5 +240,30 @@ export default {
     },
 
 
+    '1hr_acpc': {
+        label: '1-hr Accumulated Precip.',
+        group: 'precip',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  1-hr Accumulated Precipitation [in]',
+        available_for:  ['NSSL_WRF', "HRRR", 'HRW_ARW', 'HRW_FV3', 'NAM_NEST', 'NSSL_MPAS_RN'],
+        data_keys: ['APCP_accum_1h'],
+        make_layers(data, grid) {
+            const field = data.APCP_accum_1h.multiply(0.0393701).renderCPU();
+
+            const fill = new apgl.ContourFill(field, { cmap: COLORMAPS['href_qpf'] });
+
+            const svg = apgl.makeColorBar(COLORMAPS['href_qpf'], {
+                label: 'Accumulated Precipitation [in]',
+                orientation: 'horizontal',
+                tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('accum_precip_1hr', fill)],
+                colorbar: [svg],
+                sampler: null,
+            };
+        },
+    },
 
 };

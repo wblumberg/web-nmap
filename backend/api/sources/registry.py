@@ -24,21 +24,23 @@ Example: mrms.20250302185943.MergedReflectivityQC.00.50.bin.gz
 import os
 from pathlib import Path
 
+from .types.base import DataSource
 from .types.filesystem import FilesystemSource
 from .types.db_source import AlertSource
 
 # Category modules
 from .imagery import MRMS_SOURCES, GOES_SOURCES
 from .observations import (
-    LIGHTNING_DB, AIRNOW_DB, SHIP_DB, SAO_DB, LSR_DB
+    LIGHTNING_DB, AIRNOW_DB, SHIP_DB, SAO_DB, LSR_DB, RECON_DB, VAD_PROFILE_DB
 )
-from .nwp_forecasts import ECMWF_HR, HREF, NCEP_GEFS, NCEP_GFS, ECMWF_ENS, NCEP_RRFS, REFS, NSSL_GEFS
+from .cyclones import ATCF_TRACKS_DB
+from .nwp_forecasts import ECMWF_HR, HREF, NCEP_GEFS, NCEP_GFS, ECMWF_ENS, NCEP_RRFS, REFS, NSSL_GEFS, NSSL_WRF, HRRR, HRW_ARW, HRW_FV3, NAM_NEST, NSSL_MPAS_RN
 from .gridded_analyses import MESO_SOURCE
 
 # Local DATA_ROOT (kept for backward compatibility / external usage)
 DATA_ROOT = Path(os.environ.get("WEBNMAP_DATA_ROOT", "/data/store/"))
 
-SOURCES: dict[str, FilesystemSource] = {
+SOURCES: dict[str, DataSource] = {
     # Imagery
     **GOES_SOURCES,
     **MRMS_SOURCES,
@@ -47,6 +49,12 @@ SOURCES: dict[str, FilesystemSource] = {
     "NCEP_RRFS": NCEP_RRFS,
     "ECMWF_HR": ECMWF_HR,
     "NCEP_GFS": NCEP_GFS,
+    "NSSL_WRF": NSSL_WRF,
+    "HRRR": HRRR,
+    "HRW_ARW": HRW_ARW,
+    "HRW_FV3": HRW_FV3,
+    "NAM_NEST": NAM_NEST,
+    "NSSL_MPAS_RN": NSSL_MPAS_RN,
 
     "HREF": HREF,
     "REFS": REFS,
@@ -63,6 +71,9 @@ SOURCES: dict[str, FilesystemSource] = {
     "AIRNOW"   : AIRNOW_DB,
     "SHIP"     : SHIP_DB,
     "SAO"      : SAO_DB,
+    "RECON"    : RECON_DB,
+    "VAD_PROFILE": VAD_PROFILE_DB,
+    "ATCF_TRACKS": ATCF_TRACKS_DB,
     
     # DB-backed NWS alert sources (TimescaleDB `alerts` hypertable)
     # Filter by phenomenon at query time via ?phen=TO (or ?phen=tornado)
@@ -72,7 +83,7 @@ SOURCES: dict[str, FilesystemSource] = {
 }
 
 
-def get_source(source_id: str) -> FilesystemSource:
+def get_source(source_id: str) -> DataSource:
     """Look up a source by ID. Raises a clear error if not found.
 
     Call this from routers to get the source object.

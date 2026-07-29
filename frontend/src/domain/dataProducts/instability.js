@@ -2,13 +2,15 @@
 // Covers: CAPE, CIN, LI, STP, SCP, EHI, etc.
 
 import COLORMAPS from '../../config/colormaps.js';
+import { smooth2D } from './utils.js';
 
 export default {
 
     'mlcape_fill': {
         label: 'MLCAPE (Filled)',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Mixed-Layer CAPE [J kg⁻¹]',
         group: 'instability',
-        available_for: ['GFS', 'NAM', 'HRRR', 'RAP', 'MESOANALYSIS_GRID'],
+        available_for: ['MESOANALYSIS_GRID'],
         data_keys: ['mlcape'],
         make_layers(data, grid) {
             /* console.warn('[mlcape_fill] make_layers CALLED');
@@ -21,14 +23,15 @@ export default {
             console.warn('[mlcape_fill] COLORMAPS.pw_cape:', COLORMAPS['pw_cape']);
             console.warn('[mlcape_fill] typeof apgl:', typeof apgl, '| window.apgl:', typeof window.apgl);
             */
-            const field = data.mlcape;
+            //const field = data.mlcape;
+            const field = new apgl.RawScalarField(grid, data.mlcape.data.map(v => Math.max(v, 0)));
             // console.warn('[mlcape_fill] RawScalarField created:', field);
 
             const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_cape'], opacity: 0.85 });
             // console.warn('[mlcape_fill] ContourFill created:', fill);
 
             const svg   = apgl.makeColorBar(COLORMAPS['pw_cape'], {
-                label: 'MLCAPE [J kg⁻¹]',
+                label: 'CAPE [J kg⁻¹]',
                 orientation: 'horizontal', tick_direction: 'bottom',
                 fontface: 'Trebuchet MS', size_long: 600, ticks: [0, 1000, 2000, 3000, 4000, 5000, 6000],
             });
@@ -45,8 +48,96 @@ export default {
         },
     },
 
+    'mlcape_contour': {
+        label: 'MLCAPE',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Mixed-Layer CAPE [J kg⁻¹]',
+        group: 'instability',
+        available_for: ['MESOANALYSIS_GRID'],
+        data_keys: ['mlcape'],
+        make_layers(data, grid) {
+            const cape = new apgl.RawScalarField(grid, smooth2D(data.mlcape.data, grid.ni, grid.nj));
+            //const cin = new apgl.RawScalarField(grid, data.mlcin.data.map(v => Math.max(v, 0)));
+            //                1    2    3   4     5     6     7     8     9     10    11    12    13    14
+            const levels = [100.01, 250.01, 500.01, 1000.01, 1500.01, 2000.01, 2500.01, 3000.01, 3500.01, 4000.01, 4500.01, 5000.01, 5500.01, 6000.01];
+            const colors = ['#FFB6C1', '#FFB6C1',  '#e83a4b', '#e83a4b', '#e83a4b', '#e83a4b', '#9c222e', '#9c222e', '#9c222e', '#b83c8f', '#b83c8f', '#b83c8f', '#b83c8f'];
+            
+            const cb = new apgl.ColorMap(levels, colors);
+            const contour  = new apgl.Contour(cape, { cmap: cb, opacity: 1, line_width: level => level < 1000 ? 1.0 : 2.5, levels: levels });
+    
+            const cape_lbls  = new apgl.ContourLabels(contour, {
+                cmap: cb, halo: true, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf', label_formatter: val => Math.round(val).toString(),
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('mlcape_contour', contour), new apgl.PlotLayer('mlcape_labels', cape_lbls)],
+                colorbar: [],
+                sampler: null,
+            };
+        },
+    },
+
+
+    'sbcape_contour': {
+        label: 'SBCAPE',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Surface-Based CAPE [J kg⁻¹]',
+        group: 'instability',
+        available_for: ['MESOANALYSIS_GRID'],
+        data_keys: ['sbcape'],
+        make_layers(data, grid) {
+            const cape = new apgl.RawScalarField(grid, smooth2D(data.sbcape.data, grid.ni, grid.nj));
+            //const cin = new apgl.RawScalarField(grid, data.mlcin.data.map(v => Math.max(v, 0)));
+            //                1    2    3   4     5     6     7     8     9     10    11    12    13    14
+            const levels = [100.01, 250.01, 500.01, 1000.01, 1500.01, 2000.01, 2500.01, 3000.01, 3500.01, 4000.01, 4500.01, 5000.01, 5500.01, 6000.01];
+            const colors = ['#FFB6C1', '#FFB6C1',  '#e83a4b', '#e83a4b', '#e83a4b', '#e83a4b', '#9c222e', '#9c222e', '#9c222e', '#b83c8f', '#b83c8f', '#b83c8f', '#b83c8f'];
+            
+            const cb = new apgl.ColorMap(levels, colors);
+            const contour  = new apgl.Contour(cape, { cmap: cb, opacity: 1, line_width: level => level < 1000 ? 1.0 : 2.5, levels: levels });
+            const cape_lbls  = new apgl.ContourLabels(contour, {
+                cmap: cb, halo: true, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf', label_formatter: val => Math.round(val).toString(),
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('sbcape_contour', contour), new apgl.PlotLayer('sbcape_labels', cape_lbls)],
+                colorbar: [],
+                sampler: null,
+            };
+        },
+    },
+
+
+    'mucape_contour': {
+        label: 'MUCAPE',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Most-Unstable CAPE [J kg⁻¹]',
+        group: 'instability',
+        available_for: ['MESOANALYSIS_GRID'],
+        data_keys: ['mucape'],
+        make_layers(data, grid) {
+            const cape = new apgl.RawScalarField(grid, smooth2D(data.mucape.data, grid.ni, grid.nj));
+            //const cin = new apgl.RawScalarField(grid, data.mlcin.data.map(v => Math.max(v, 0)));
+            //                1    2    3   4     5     6     7     8     9     10    11    12    13    14
+            const levels = [100.01, 250.01, 500.01, 1000.01, 1500.01, 2000.01, 2500.01, 3000.01, 3500.01, 4000.01, 4500.01, 5000.01, 5500.01, 6000.01];
+            const colors = ['#FFB6C1', '#FFB6C1',  '#e83a4b', '#e83a4b', '#e83a4b', '#e83a4b', '#9c222e', '#9c222e', '#9c222e', '#b83c8f', '#b83c8f', '#b83c8f', '#b83c8f'];
+            
+            const cb = new apgl.ColorMap(levels, colors);
+            const contour  = new apgl.Contour(cape, { cmap: cb, opacity: 1, line_width: level => level < 1000 ? 1.0 : 2.5, levels: levels });
+            const cape_lbls  = new apgl.ContourLabels(contour, {
+                cmap: cb, halo: true, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf', label_formatter: val => Math.round(val).toString(),
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('mucape_contour', contour), new apgl.PlotLayer('mucape_labels', cape_lbls)],
+                colorbar: [],
+                sampler: null,
+            };
+        },
+    },
+
     'sbcape_fill': {
-        label: 'Mean SBCAPE (Filled)',
+        label: '[MN] SBCAPE (Filled)',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Mean SBCAPE [J kg⁻¹]',
         group: 'instability',
         available_for: ['HREF'],
         data_keys: ['mean_CAPE'],
@@ -68,7 +159,7 @@ export default {
             // console.warn('[mlcape_fill] ContourFill created:', fill);
 
             const svg   = apgl.makeColorBar(COLORMAPS['pw_cape'], {
-                label: 'Mean SBCAPE [J kg⁻¹]',
+                label: 'CAPE [J kg⁻¹]',
                 orientation: 'horizontal', tick_direction: 'bottom',
                 fontface: 'Trebuchet MS', size_long: 600, ticks: [0, 1000, 2000, 3000, 4000, 5000, 6000],
             });
@@ -88,6 +179,7 @@ export default {
 
     'cape_gt1000_prob': {
         label: '[PR] MLCAPE > 1000 (Filled)',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Probability of MLCAPE > 1000 J kg⁻¹',
         group: 'instability',
         available_for: ['NSSL_GEFS'],
         data_keys: ['prob_MLCAPE_gt1000'],
@@ -113,7 +205,7 @@ export default {
 
             const fill = new apgl.ContourFill(field, { cmap: COLORMAPS['yrp_prob'] });
             const svg = apgl.makeColorBar(COLORMAPS['yrp_prob'], {
-                label: 'Probability of MLCAPE > 1000 J kg⁻¹ [%]',
+                label: 'Probability [%]',
                 orientation: 'horizontal',
                 tick_direction: 'bottom',
                 fontface: 'Trebuchet MS',
@@ -129,6 +221,7 @@ export default {
 
     'cape_gt2000_prob': {
         label: '[PR] MLCAPE > 2000 (Filled)',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Probability of MLCAPE > 2000 J kg⁻¹',
         group: 'instability',
         available_for: ['NSSL_GEFS'],
         data_keys: ['prob_MLCAPE_gt2000'],
@@ -154,7 +247,7 @@ export default {
 
             const fill = new apgl.ContourFill(field, { cmap: COLORMAPS['yrp_prob'] });
             const svg = apgl.makeColorBar(COLORMAPS['yrp_prob'], {
-                label: 'Probability of MLCAPE > 2000 J kg⁻¹ [%]',
+                label: 'Probability [%]',
                 orientation: 'horizontal',
                 tick_direction: 'bottom',
                 fontface: 'Trebuchet MS',
@@ -171,6 +264,7 @@ export default {
 
     'cape_gt3000_prob': {
         label: '[PR] MLCAPE > 3000 (Filled)',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Probability of MLCAPE > 3000 J kg⁻¹',
         group: 'instability',
         available_for: ['NSSL_GEFS'],
         data_keys: ['prob_MLCAPE_gt3000'],
@@ -196,7 +290,7 @@ export default {
 
             const fill = new apgl.ContourFill(field, { cmap: COLORMAPS['yrp_prob'] });
             const svg = apgl.makeColorBar(COLORMAPS['yrp_prob'], {
-                label: 'Probability of MLCAPE > 3000 J kg⁻¹ [%]',
+                label: 'Probability [%]',
                 orientation: 'horizontal',
                 tick_direction: 'bottom',
                 fontface: 'Trebuchet MS',

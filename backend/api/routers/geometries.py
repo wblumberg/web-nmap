@@ -28,12 +28,14 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
 
 from ..sources.registry import get_source
+from ..sources.types.db_source import AlertSource, CycloneTrackDBSource
 from ..readers import get_reader
 from ..utils.time_helper import _parse_key_to_dt
 from ..services.alerts_sql import (
     ALERT_PHEN_LABELS,
     query_alerts_geojson, query_alerts_geojson_unioned, resolve_phen,
 )
+from ..services.atcf_sql import query_atcf_tracks_geojson
 
 router = APIRouter(tags=["Geometry Data"])
 
@@ -61,6 +63,13 @@ async def list_alert_types():
 async def get_geometry_features(
     source_id    : str,
     key          : Optional[str] = Query(None, description="Valid time key (filesystem sources)"),
+    cycle        : Optional[str] = Query(None, description="Cycle key for track sources (YYYYMMDDHH or ISO datetime)."),
+    fhr          : Optional[int] = Query(None, description="Forecast hour filter for track sources."),
+    storm_id     : Optional[str] = Query(None, description="Storm identifier filter for track sources."),
+    basin        : Optional[str] = Query(None, description="Basin filter for track sources (e.g. AL, EP, WP)."),
+    model        : Optional[str] = Query(None, description="Model filter for track sources (e.g. OFCL, HWRF)."),
+    model_prefix : Optional[str] = Query(None, description="Model prefix filter for track sources (e.g. 'AP' matches AP00, AP01 …)."),
+    exclude_best : bool           = Query(False, description="When true, exclude the BEST track from ATCF results."),
     bbox         : Optional[str] = Query(None, description="lon_min,lat_min,lon_max,lat_max"),
     event_type   : Optional[str] = Query(None,
                                   description="Filter by event type, e.g. 'Tornado Warning' "
@@ -96,7 +105,7 @@ async def get_geometry_features(
         raise HTTPException(404, str(e))
 
     # ── DB-backed alert sources ───────────────────────────────────────────
-    if getattr(source, "source_type", None) == "MISC":
+    if isinstance(source, AlertSource):
         sig = source.sig
         parsed_bbox = _parse_bbox(bbox)
 
@@ -132,6 +141,51 @@ async def get_geometry_features(
                 _simplify_feature(f, simplify_deg) for f in fc["features"]
             ]
         print(fc)
+        return JSONResponse(fc)
+
+    # ── DB-backed ATCF track sources ─────────────────────────────────────
+    if isinstance(source, CycloneTrackDBSource):
+        parsed_bbox = _parse_bbox(bbox)
+
+        cycle_dt = _parse_cycle_param(cycle)
+        if cycle_dt is None and key and "_f" in key:
+            cycle_dt = _parse_cycle_param(key.split("_f", 1)[0])
+
+        fhr_effective = fhr
+        if fhr_effective is None and key and "_f" in key:
+            try:
+                fhr_effective = int(key.split("_f", 1)[1][:3])
+            except ValueError:
+                fhr_effective = None
+
+        if cycle_dt is None:
+            latest = await source.most_recent()
+            if latest is None:
+                raise HTTPException(404, f"No track data for '{source_id}'")
+            cycle_dt = _parse_cycle_param(latest.key)
+
+        if cycle_dt is None:
+            raise HTTPException(400, "Could not resolve a cycle time for ATCF track query")
+
+        try:
+            fc = await query_atcf_tracks_geojson(
+                source_id=source.source_id,
+                cycle_time=cycle_dt,
+                fhr=fhr_effective,
+                storm_id=storm_id,
+                basin=basin,
+                model=model,
+                model_prefix=model_prefix,
+                exclude_best=exclude_best,
+                bbox=parsed_bbox,
+            )
+        except Exception as e:
+            raise HTTPException(500, f"DB query error: {e}")
+
+        if simplify_deg is not None:
+            fc["features"] = [
+                _simplify_feature(f, simplify_deg) for f in fc["features"]
+            ]
         return JSONResponse(fc)
 
     # ── Filesystem-backed sources (existing logic) ────────────────────────
@@ -206,7 +260,7 @@ async def get_geometries_by_type(
         raise HTTPException(404, str(e))
 
     # ── DB-backed alert sources: union in PostGIS ─────────────────────────
-    if getattr(source, "source_type", None) == "MISC":
+    if isinstance(source, AlertSource):
         sig         = source.sig
         parsed_bbox = _parse_bbox(bbox)
 
@@ -279,3 +333,12 @@ def _simplify_feature(feature: dict, tolerance: float) -> dict:
         return {**feature, "geometry": mapping(simplified)}
     except Exception:
         return feature
+
+
+def _parse_cycle_param(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    s = value.strip()
+    if len(s) == 10 and s.isdigit():
+        return datetime.strptime(s, "%Y%m%d%H").replace(tzinfo=timezone.utc)
+    return _parse_key_to_dt(s)

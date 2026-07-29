@@ -36,7 +36,67 @@ class ZarrReader(Reader):
         # Zarr stores are directories with a .zattrs file, or .zarr extension
         if path.is_dir() and (path / ".zattrs").exists():
             return True
+        # Zarr v3 stores use zarr.json at the root
+        if path.is_dir() and (path / "zarr.json").exists():
+            return True
         return path.suffix in (".zarr",) or path.name.endswith(".zarr")
+
+    def _open_store(self, path: Path):
+        """Open a Zarr store, handling both v2 and v3 on-disk formats.
+
+        Opening priority:
+          1. v3 (zarr.json at root)  — open normally
+          2. v2 (.zgroup at root)    — open with zarr_format=2
+          3. v2 without .zgroup      — some writers omit .zgroup; write the
+                                       marker if child arrays have .zarray,
+                                       then retry.
+        """
+        import json
+        import zarr
+
+        def _is_no_group(exc: Exception) -> bool:
+            return 'No group found' in str(exc) or 'no group' in str(exc).lower()
+
+        # --- Attempt 1: let zarr auto-detect (handles v3 and well-formed v2) ---
+        try:
+            return zarr.open_group(str(path), mode='r')
+        except Exception as e1:
+            if not _is_no_group(e1):
+                raise
+
+        # --- Attempt 2: explicit v2 (in case auto-detect chose the wrong format) ---
+        try:
+            return zarr.open_group(str(path), mode='r', zarr_format=2)
+        except Exception as e2:
+            if not _is_no_group(e2):
+                raise RuntimeError(
+                    f"Could not open Zarr store at {path}: {e2}"
+                ) from e1
+
+        # --- Attempt 3: v2 store with missing .zgroup root marker ---
+        # Some writers (old xarray + zarr <2.12, or custom tools) write valid
+        # .zarray/.zattrs inside each variable subdirectory but omit the root
+        # .zgroup file.  We detect this pattern and write the trivial marker.
+        zgroup_path = path / '.zgroup'
+        if path.is_dir() and not zgroup_path.exists():
+            has_arrays = any(
+                (child / '.zarray').exists()
+                for child in path.iterdir()
+                if child.is_dir()
+            )
+            if has_arrays:
+                zgroup_path.write_text(json.dumps({"zarr_format": 2}))
+                try:
+                    return zarr.open_group(str(path), mode='r', zarr_format=2)
+                except Exception as e3:
+                    raise RuntimeError(
+                        f"Could not open Zarr store at {path} after writing .zgroup: {e3}"
+                    ) from e3
+
+        raise RuntimeError(
+            f"Could not open Zarr store at {path}: unrecognised format "
+            f"(no zarr.json, .zgroup, or child .zarray files found)"
+        )
 
     async def read_gridded(
         self,
@@ -57,7 +117,7 @@ class ZarrReader(Reader):
         except ImportError:
             raise ImportError("zarr is not installed. Run: pip install zarr")
 
-        store    = zarr.open(str(path), mode='r')
+        store    = self._open_store(path)
         results  = []
 
         # Read grid information from the store's global attributes
@@ -88,7 +148,7 @@ class ZarrReader(Reader):
                 else:
                     # Common fallback: first axis is time.
                     t_axis = 0
-                t_idx = fhr if fhr is not None else 0
+                t_idx = self._fhr_to_index(store, fhr) if fhr is not None else 0
                 t_idx = min(t_idx, data_array.shape[t_axis] - 1)
                 data_array = np.take(data_array, indices=t_idx, axis=t_axis)
 
@@ -100,12 +160,37 @@ class ZarrReader(Reader):
                     data_array = data_array.T
 
             print(f"[DEBUG zarr] data_array after time select: shape={data_array.shape} dtype={data_array.dtype} "
-                  f"min={np.nanmin(data_array):.4f} max={np.nanmax(data_array):.4f} "
-                  f"nan_count={np.isnan(data_array.astype(float)).sum()} "
                   f"first5={data_array.flatten()[:5].tolist()}")
 
-            # Quantize to int16 using CF-convention scale_factor / add_offset.
-            # physical = packed * scale_factor + add_offset
+            # ── Float16 pass-through ──────────────────────────────────────────
+            # If the source array is already float16, skip the int16 quantization
+            # round-trip.  Physical values and NaN fill are preserved exactly,
+            # saving CPU time and avoiding unnecessary precision loss.
+            if data_array.dtype == np.float16:
+                print(f"[DEBUG zarr] float16 pass-through '{generic_name}': shape={data_array.shape}")
+                results.append(GriddedResult(
+                    variable     = generic_name,
+                    units        = attrs.get('units', 'unknown'),
+                    data         = data_array.flatten(),
+                    grid         = grid,
+                    valid_time   = valid_time,
+                    cycle        = cycle,
+                    fhr          = fhr_val,
+                    fill_value   = float('nan'),
+                    scale_factor = 1.0,
+                    add_offset   = 0.0,
+                    data_type    = 'float16',
+                    metadata     = {
+                        "long_name"  : attrs.get('long_name', generic_name),
+                        "zarr_name"  : zarr_name,
+                        "level"      : level,
+                        "array_dims" : list(dims),
+                    },
+                ))
+                continue
+
+            # ── Quantize to int16 ────────────────────────────────────────────
+            # CF-convention: physical = packed * scale_factor + add_offset
             # Sentinel fill value: -32768 (int16 minimum)
             data_f32 = data_array.astype(np.float32)
             valid_mask = np.isfinite(data_f32)
@@ -174,15 +259,17 @@ class ZarrReader(Reader):
         except ImportError:
             raise ImportError("zarr is not installed. Run: pip install zarr")
 
-        store = zarr.open(str(path), mode='r')
+        store = self._open_store(path)
 
         # Prefer an explicit time coordinate array when present.
         if 'time' in store:
-            try:
-                return list(range(int(store['time'].shape[0])))
-            except Exception:
-                pass
+            fhrs = self._time_coord_to_fhrs(store)
+            if fhrs is not None:
+                return fhrs
+            # init time unknown — fall back to sequential indices
+            return list(range(int(store['time'].shape[0])))
 
+        # No 'time' coordinate — inspect data variable dimensions/shapes.
         candidates: list[str] = []
         if var_map:
             candidates.extend(var_map.values())
@@ -202,6 +289,8 @@ class ZarrReader(Reader):
             dims = tuple(dict(arr.attrs).get('_ARRAY_DIMENSIONS', ()))
             if 'time' in dims:
                 t_idx = dims.index('time')
+                # Try to compute real fhrs from a time coordinate if it
+                # appeared under a different name keyed off a dimension.
                 return list(range(int(shape[t_idx])))
 
             # Fallback heuristic for arrays shaped like (time, y, x) or (time, x, y).
@@ -217,7 +306,7 @@ class ZarrReader(Reader):
         except ImportError:
             raise ImportError("zarr is not installed. Run: pip install zarr")        
 
-        store = zarr.open(str(path), mode='r')
+        store = self._open_store(path)
         return self._read_grid_info(store)
 
     def _read_grid_info(self, store) -> GridInfo:
@@ -315,24 +404,144 @@ class ZarrReader(Reader):
             proj_params = attrs.get('proj_params', {}),
         )
 
+    def _parse_init_time(self, attrs: dict):
+        """Parse the model init datetime from Zarr store attributes.
+
+        Handles two common metadata patterns:
+          - run_id / init_time / cycle  = '2026041500'  (HREF style)
+          - init_date='20260422' + init_cycle='00Z'     (NSSL GEFS style)
+        Returns a timezone-aware datetime or None.
+        """
+        # Pattern 1: single string key that encodes YYYYMMDDHH
+        for key in ('run_id', 'init_time', 'cycle'):
+            val = attrs.get(key)
+            if val:
+                for fmt in ("%Y%m%d%H", "%Y%m%d%H%M"):
+                    try:
+                        return datetime.strptime(str(val), fmt).replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        continue
+
+        # Pattern 2: separate init_date + init_cycle keys
+        init_date  = attrs.get('init_date')
+        init_cycle = attrs.get('init_cycle')
+        if init_date and init_cycle:
+            try:
+                hour = int(str(init_cycle).replace('Z', '').strip())
+                return datetime.strptime(str(init_date), "%Y%m%d").replace(
+                    hour=hour, tzinfo=timezone.utc
+                )
+            except (ValueError, AttributeError):
+                pass
+
+        return None
+
+    def _time_coord_to_fhrs(self, store) -> list[int] | None:
+        """Convert a Zarr 'time' coordinate to a list of integer forecast hours.
+
+        Handles two common CF encodings:
+          1. float/int values with units="hours since <init>" — values are
+             already forecast hours, just cast to int.
+          2. int64 nanoseconds since epoch (xarray default) — compute delta
+             from parsed init time.
+
+        Returns None if the encoding cannot be determined.
+        """
+        time_arr = store['time'][:]
+        print(f"[zarr] _time_coord_to_fhrs: dtype={time_arr.dtype}, shape={time_arr.shape}, first={time_arr.flat[0] if time_arr.size else 'empty'}")
+
+        # --- Case 1: CF "hours since <date>" units ---
+        # The time variable carries a units attr like "hours since 2026-04-22"
+        time_attrs = {}
+        try:
+            time_attrs = dict(store['time'].attrs)
+        except Exception:
+            pass
+
+        units = time_attrs.get('units', '')
+        if isinstance(units, str) and units.lower().startswith('hours since'):
+            fhrs = [int(round(float(v))) for v in time_arr]
+            print(f"[zarr] _time_coord_to_fhrs (hours-since): fhrs[:5]={fhrs[:5]}")
+            return fhrs
+
+        # --- Case 2: int64 nanoseconds since epoch ---
+        if not np.issubdtype(time_arr.dtype, np.integer):
+            # Not a recognised encoding.
+            return None
+
+        attrs   = dict(store.attrs) if hasattr(store, 'attrs') else {}
+        init_dt = self._parse_init_time(attrs)
+        if init_dt is None:
+            print(f"[zarr] _time_coord_to_fhrs: could not parse init time from attrs")
+            return None
+
+        init_ns   = np.datetime64(init_dt.replace(tzinfo=None), 'ns').astype('int64')
+        deltas_ns = time_arr.astype('int64') - init_ns
+        ns_per_hour = int(3.6e12)
+        fhrs = [int(round(d / ns_per_hour)) for d in deltas_ns]
+        print(f"[zarr] _time_coord_to_fhrs (ns-epoch): init={init_dt.isoformat()}, fhrs[:5]={fhrs[:5]}")
+        return fhrs
+
+    def _fhr_to_index(self, store, fhr: int) -> int:
+        """Return the time-array index that corresponds to `fhr` hours after init.
+
+        Falls back to using fhr directly as an index when the store has no
+        'time' coordinate or when the encoding cannot be determined.
+        """
+        if 'time' not in store:
+            return fhr
+
+        try:
+            time_arr = store['time'][:]
+
+            # Case 1: CF "hours since <date>" — values are already forecast hours.
+            time_attrs = {}
+            try:
+                time_attrs = dict(store['time'].attrs)
+            except Exception:
+                pass
+            units = time_attrs.get('units', '')
+            if isinstance(units, str) and units.lower().startswith('hours since'):
+                fhr_arr = np.array([float(v) for v in time_arr])
+                deltas  = np.abs(fhr_arr - fhr)
+                return int(np.argmin(deltas))
+
+            # Case 2: int64 nanoseconds since epoch.
+            if np.issubdtype(time_arr.dtype, np.integer):
+                attrs   = dict(store.attrs) if hasattr(store, 'attrs') else {}
+                init_dt = self._parse_init_time(attrs)
+                if init_dt is not None:
+                    init_ns   = np.datetime64(init_dt.replace(tzinfo=None), 'ns').astype('int64')
+                    target_ns = init_ns + int(fhr) * int(3.6e12)
+                    deltas    = np.abs(time_arr.astype('int64') - target_ns)
+                    return int(np.argmin(deltas))
+
+        except Exception as e:
+            print(f"[zarr] _fhr_to_index: could not resolve fhr={fhr}: {e}")
+
+        return fhr
+
     def _read_time_info(self, store, fhr_override):
         """Extract valid_time, cycle, and fhr from the store."""
         attrs = dict(store.attrs) if hasattr(store, 'attrs') else {}
 
         print("Attributes:", attrs)
-        cycle      = attrs.get('init_time') or attrs.get('cycle') or attrs.get('run_id')
-        valid_time = attrs.get('valid_time')
         fhr_val    = fhr_override
+        valid_time = attrs.get('valid_time')
 
-        if valid_time is None and cycle and fhr_val is not None:
-            # Compute valid time from cycle + fhr
+        # Derive a canonical cycle string from whatever attribute pattern is present.
+        init_dt = self._parse_init_time(attrs)
+        if init_dt is not None:
+            cycle = init_dt.strftime("%Y%m%d%H")
+        else:
+            cycle = attrs.get('init_time') or attrs.get('cycle') or attrs.get('run_id')
+
+        if valid_time is None and init_dt is not None and fhr_val is not None:
             from datetime import timedelta
-            try:
-                c_dt = datetime.strptime(cycle, "%Y%m%d%H").replace(tzinfo=timezone.utc)
-                v_dt = c_dt + timedelta(hours=fhr_val)
-                valid_time = v_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            except ValueError:
-                valid_time = cycle
+            v_dt = init_dt + timedelta(hours=fhr_val)
+            valid_time = v_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        elif valid_time is None and cycle:
+            valid_time = cycle
 
         return (
             valid_time or "unknown",

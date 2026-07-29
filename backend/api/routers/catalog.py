@@ -24,9 +24,9 @@ New endpoints added:
 """
 
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..readers import get_reader
 from ..sources.registry import SOURCES, get_source
@@ -57,8 +57,13 @@ async def list_sources():
                 "default_selected": getattr(src, 'default_selected', False),
                 "timeline_hours": getattr(src, 'timeline_hours', None),
                 "regions": getattr(src, 'regions', []),
-                "source_group": getattr(src, 'source_group', src.source_id),  # for UI grouping, defaults to source_id
-                "endpoint_type": getattr(src, 'endpoint_type', 'gridded'),
+                "source_group"  : getattr(src, 'source_group', src.source_id),  # for UI grouping, defaults to source_id
+                "endpoint_type" : getattr(src, 'endpoint_type', 'gridded'),
+                "zarr_transport": getattr(src, 'zarr_transport', False),
+                # variable_map lets the zarr client resolve generic product key names
+                # (e.g. "mean_MSLMA") to the on-disk zarr array names without a
+                # server round-trip.  Empty dict means identity (name == zarr name).
+                "variable_map"  : getattr(src, 'variable_map', {}),
             }
             for src in SOURCES.values()
         ]
@@ -69,6 +74,7 @@ async def list_sources():
 
 @router.get("/{source_id}/times")
 async def list_times(
+    request   : Request,
     source_id : str,
     after     : Optional[str] = Query(None, description="ISO datetime lower bound"),
     before    : Optional[str] = Query(None, description="ISO datetime upper bound"),
@@ -88,7 +94,16 @@ async def list_times(
 
     after_dt  = _parse_datetime(after)  if after  else None
     before_dt = _parse_datetime(before) if before else None
-    times     = await source.list_times(after=after_dt, before=before_dt, limit=limit)
+    passthrough = _extract_passthrough_query_params(
+        request,
+        exclude_keys={"after", "before", "limit"},
+    )
+    times = await source.list_times(
+        after=after_dt,
+        before=before_dt,
+        limit=limit,
+        params=passthrough,
+    )
     return {
         "source_id": source_id,
         "count"    : len(times),
@@ -97,14 +112,15 @@ async def list_times(
 
 
 @router.get("/{source_id}/times/latest")
-async def latest_time(source_id: str):
+async def latest_time(request: Request, source_id: str):
     """Return the most recent available valid time for a source."""
     try:
         source = get_source(source_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
 
-    latest = await source.most_recent()
+    passthrough = _extract_passthrough_query_params(request)
+    latest = await source.most_recent(params=passthrough)
     if latest is None:
         raise HTTPException(404, f"No data found for source '{source_id}'")
 
@@ -113,6 +129,7 @@ async def latest_time(source_id: str):
 
 @router.get("/{source_id}/times/nearest")
 async def nearest_time(
+    request      : Request,
     source_id    : str,
     target       : str   = Query(..., description="Target key, e.g. 20250302_1800"),
     window_hours : float = Query(3.0),
@@ -128,8 +145,15 @@ async def nearest_time(
         raise HTTPException(422, f"Cannot parse target key '{target}'")
 
     window = timedelta(hours=window_hours)
+    passthrough = _extract_passthrough_query_params(
+        request,
+        exclude_keys={"target", "window_hours"},
+    )
     times  = await source.list_times(
-        after=target_dt - window, before=target_dt + window, limit=500
+        after=target_dt - window,
+        before=target_dt + window,
+        limit=500,
+        params=passthrough,
     )
     if not times:
         raise HTTPException(404, f"No times within ±{window_hours}h of {target}")
@@ -151,6 +175,7 @@ async def nearest_time(
 
 @router.get("/{source_id}/cycles")
 async def list_cycles(
+    request   : Request,
     source_id : str,
     after     : Optional[str] = Query(None),
     before    : Optional[str] = Query(None),
@@ -192,13 +217,22 @@ async def list_cycles(
             f"Use /times instead."
         )
 
-    print(after, before)
+    #print(after, before)
     after_dt = _parse_datetime(after) if after else None  # after should be None or str, not Query
     before_dt = _parse_datetime(before) if before else None
+    passthrough = _extract_passthrough_query_params(
+        request,
+        exclude_keys={"after", "before", "limit"},
+    )
 
     # Get all available times — we'll group them by cycle
-    all_times = await source.list_times(after=after_dt, before=before_dt, limit=5000)
-    print(f"Found {len(all_times)} times for source '{source_id}'")
+    all_times = await source.list_times(
+        after=after_dt,
+        before=before_dt,
+        limit=5000,
+        params=passthrough,
+    )
+    ##print(f"Found {len(all_times)} times for source '{source_id}'")
 
     # Group by cycle string
     from collections import defaultdict
@@ -236,7 +270,7 @@ async def list_cycles(
 
 
 @router.get("/{source_id}/cycles/latest")
-async def latest_cycle(source_id: str):
+async def latest_cycle(request: Request, source_id: str):
     """
     Return the most recently available model cycle and its forecast hours.
 
@@ -255,7 +289,13 @@ async def latest_cycle(source_id: str):
           "fhr_count": 41
         }
     """
-    result = await list_cycles(source_id=source_id, after=None, before=None, limit=1)
+    result = await list_cycles(
+        request=request,
+        source_id=source_id,
+        after=None,
+        before=None,
+        limit=1,
+    )
     if not result["cycles"]:
         raise HTTPException(404, f"No cycles found for '{source_id}'")
 
@@ -273,6 +313,7 @@ async def latest_cycle(source_id: str):
 
 @router.get("/{source_id}/cycles/{cycle}/fhrs")
 async def list_fhrs(
+    request   : Request,
     source_id : str,
     cycle     : str,
     fhr_min   : Optional[int] = Query(None, description="Only return fhrs >= this value"),
@@ -315,7 +356,11 @@ async def list_fhrs(
         raise HTTPException(400, f"'{source_id}' is not a forecast source")
 
     # Fetch all times and filter to this cycle
-    all_times = await source.list_times(limit=5000)
+    passthrough = _extract_passthrough_query_params(
+        request,
+        exclude_keys={"fhr_min", "fhr_max"},
+    )
+    all_times = await source.list_times(limit=5000, params=passthrough)
 
     # The issue here with loading the GEM_RAP dataset is that the forecast hours are None because
     # all of the forecast data is kept in each file
@@ -360,6 +405,7 @@ async def list_fhrs(
 
 @router.get("/{source_id}/cycles/{cycle}/fhrs/range")
 async def fhr_range(
+    request   : Request,
     source_id : str,
     cycle     : str,
 ):
@@ -369,7 +415,7 @@ async def fhr_range(
     Lighter-weight version of /fhrs for the UI to determine slider range
     without receiving the full fhr list.
     """
-    result = await list_fhrs(source_id=source_id, cycle=cycle)
+    result = await list_fhrs(request=request, source_id=source_id, cycle=cycle)
     return {
         "source_id" : source_id,
         "cycle"     : cycle,
@@ -383,6 +429,7 @@ async def fhr_range(
 
 @router.get("/{source_id}/grid_info")
 async def get_grid_info(
+    request   : Request,
     source_id : str,
     key       : Optional[str] = Query(None, description="Valid time key to inspect. "
                                             "Defaults to most recent."),
@@ -431,7 +478,12 @@ async def get_grid_info(
     except KeyError as e:
         raise HTTPException(404, str(e))
 
-    times_available = await source.list_times()
+    passthrough = _extract_passthrough_query_params(
+        request,
+        exclude_keys={"key", "variable", "cycle", "fhr"},
+    )
+
+    times_available = await source.list_times(params=passthrough)
 
     print(times_available)
 
@@ -439,7 +491,7 @@ async def get_grid_info(
     if key is None and cycle is not None and fhr is not None:
         key = f"{cycle}_f{str(fhr).zfill(3)}"
     if key is None:
-        latest = await source.most_recent()
+        latest = await source.most_recent(params=passthrough)
         if latest is None:
             raise HTTPException(404, f"No data for '{source_id}'")
         key = latest.key
@@ -596,3 +648,33 @@ async def _infer_fhrs_for_cycle(source, cycle: str, cycle_entries: list) -> list
         except (TypeError, ValueError):
             continue
     return sorted(unique)
+
+
+def _extract_passthrough_query_params(
+    request: Request,
+    exclude_keys: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """Extract non-reserved query params and coerce simple scalar types."""
+    excluded = exclude_keys or set()
+    passthrough: dict[str, Any] = {}
+
+    for key, value in request.query_params.items():
+        if key in excluded:
+            continue
+        passthrough[key] = _coerce_query_value(value)
+
+    return passthrough or None
+
+
+def _coerce_query_value(value: str) -> Any:
+    """Best-effort coercion for booleans and numeric query parameter values."""
+    lower = value.strip().lower()
+    if lower in {"true", "false"}:
+        return lower == "true"
+
+    try:
+        if value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
+            return int(value)
+        return float(value)
+    except ValueError:
+        return value
