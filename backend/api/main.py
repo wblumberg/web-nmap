@@ -128,7 +128,8 @@ _openapi_tags = [
         "name": "Lightning",
         "description": (
             "Lightning strike data. Defaults to the TimescaleDB source; "
-            "pass `?source=file` to fall back to file-based ingestion."
+            "pass `?source=file` to fall back to file-based ingestion.  This endpoint is depreciated"
+            "and you should use the DB Points endpoint instead to access the lightning data."
         ),
     },
     {
@@ -164,7 +165,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins = ["http://localhost:8080", "http://localhost:5173"],
+    allow_origins = ["http://localhost:5173"],
     allow_methods = ["GET"],
     allow_headers = ["*"],
 )
@@ -212,7 +213,7 @@ async def metrics_middleware(request: Request, call_next):
 
     # Streaming responses must NOT be consumed — pass them through as-is.
     content_type = response.headers.get("content-type", "")
-    is_streaming = "protobuf-stream" in content_type or "event-stream" in content_type
+    is_streaming = ("protobuf-stream" in content_type or "event-stream" in content_type or "zarr" in endpoint)
 
     if is_streaming:
         # Record count + latency only (no body-size measurement).
@@ -228,12 +229,6 @@ async def metrics_middleware(request: Request, call_next):
                 query_group=query_group,
             ).observe(duration)
         return response
-
-    # Non-streaming: consume body for size metric (unchanged behaviour).
-    body_chunks: list[bytes] = []
-    async for chunk in response.body_iterator:  # type: ignore[attr-defined]
-        body_chunks.append(chunk)
-    body = b"".join(body_chunks)
 
     # Avoid polluting metrics with Prometheus self-scrapes.
     if endpoint != "/metrics":
@@ -252,20 +247,29 @@ async def metrics_middleware(request: Request, call_next):
             variable_group=variable_group,
             query_group=query_group,
         ).observe(duration)
+        
+        # Extract size safely from the headers without exhausing the iterator
+        content_length = response.headers.get("content-length")
+        if content_length is not None and content_length.isdigit():
+            response_size = int(content_length)
+        else:
+            response_size = 0 # fallback if lenght isn't computed yet
+            
         RESPONSE_SIZE.labels(
             method=method,
             endpoint=endpoint,
             source_id=source_id,
             variable_group=variable_group,
             query_group=query_group,
-        ).observe(len(body))
-
-    return Response(
-        content=body,
-        status_code=response.status_code,
-        headers=dict(response.headers),
-        media_type=response.media_type,
-    )
+        ).observe(response_size)
+    # Return the original response object directly without rebuilding it
+    return response
+    #return Response(
+    #    content=body,
+    #    status_code=response.status_code,
+    #    headers=dict(response.headers),
+    #    media_type=response.media_type,
+    #)
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────

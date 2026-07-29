@@ -52,6 +52,10 @@ module.exports = {
             {
                 context: ['/api'],
                 target: 'http://localhost:8000',
+                changeOrigin: true, // Helps prevent host-header mismatches
+                secure: false,      // Useful if you switch to local HTTPS later
+                timeout: 600000,      // 10 minutes: Timeout for incoming requests to dev-server
+                proxyTimeout: 600000, // 10 minutes: Timeout for dev-server requests to FastAPI
             }
         ]
     },
