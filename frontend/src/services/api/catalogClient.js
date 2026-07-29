@@ -9,6 +9,17 @@
 
 const API_BASE = '/api/v1/catalog';
 
+function _appendQueryParams(url, queryParams = {}) {
+    Object.entries(queryParams || {}).forEach(([k, v]) => {
+        if (v === undefined || v === null || v === '') return;
+        if (Array.isArray(v)) {
+            url.searchParams.set(k, v.join(','));
+            return;
+        }
+        url.searchParams.set(k, String(v));
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Category constants
 // ---------------------------------------------------------------------------
@@ -76,6 +87,7 @@ export async function listTimes(sourceId, opts = {}) {
     if (opts.after)  url.searchParams.set('after',  opts.after);
     if (opts.before) url.searchParams.set('before', opts.before);
     if (opts.limit)  url.searchParams.set('limit',  opts.limit);
+    _appendQueryParams(url, opts.queryParams);
     const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`listTimes(${sourceId}) failed: ${resp.status}`);
     const json = await resp.json();
@@ -98,6 +110,7 @@ export async function listTimesDetailed(sourceId, opts = {}) {
     if (opts.after)  url.searchParams.set('after',  opts.after);
     if (opts.before) url.searchParams.set('before', opts.before);
     if (opts.limit)  url.searchParams.set('limit',  opts.limit);
+    _appendQueryParams(url, opts.queryParams);
     const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`listTimesDetailed(${sourceId}) failed: ${resp.status}`);
     const json = await resp.json();
@@ -109,8 +122,10 @@ export async function listTimesDetailed(sourceId, opts = {}) {
  * @param {string} sourceId
  * @returns {Promise<string>}
  */
-export async function latestTime(sourceId) {
-    const resp = await fetch(`${API_BASE}/${sourceId}/times/latest`);
+export async function latestTime(sourceId, opts = {}) {
+    const url = new URL(`${API_BASE}/${sourceId}/times/latest`, window.location.origin);
+    _appendQueryParams(url, opts.queryParams);
+    const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`latestTime(${sourceId}) failed: ${resp.status}`);
     const json = await resp.json();
     return json.latest.key;
@@ -129,10 +144,11 @@ export async function latestTime(sourceId) {
  * @param {number} [windowHours=3]
  * @returns {Promise<string>}
  */
-export async function nearestTime(sourceId, targetKey, windowHours = 3) {
+export async function nearestTime(sourceId, targetKey, windowHours = 3, opts = {}) {
     const url = new URL(`${API_BASE}/${sourceId}/times/nearest`, window.location.origin);
     url.searchParams.set('target', targetKey);
     url.searchParams.set('window_hours', windowHours);
+    _appendQueryParams(url, opts.queryParams);
     const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`nearestTime(${sourceId}/${targetKey}) failed`);
     const json = await resp.json();
@@ -161,6 +177,7 @@ export async function listCycles(sourceId, opts = {}) {
     if (opts.after)  url.searchParams.set('after',  opts.after);
     if (opts.before) url.searchParams.set('before', opts.before);
     if (opts.limit)  url.searchParams.set('limit',  opts.limit ?? 10);
+    _appendQueryParams(url, opts.queryParams);
     const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`listCycles(${sourceId}) failed: ${resp.status}`);
     const json = await resp.json();
@@ -175,8 +192,10 @@ export async function listCycles(sourceId, opts = {}) {
  * @param {string} sourceId
  * @returns {Promise<{cycle, cycle_time, fhrs, fhr_min, fhr_max, fhr_count}>}
  */
-export async function latestCycle(sourceId) {
-    const resp = await fetch(`${API_BASE}/${sourceId}/cycles/latest`);
+export async function latestCycle(sourceId, opts = {}) {
+    const url = new URL(`${API_BASE}/${sourceId}/cycles/latest`, window.location.origin);
+    _appendQueryParams(url, opts.queryParams);
+    const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`latestCycle(${sourceId}) failed: ${resp.status}`);
     return await resp.json();
 }
@@ -199,6 +218,7 @@ export async function listFhrs(sourceId, cycle, opts = {}) {
     );
     if (opts.fhrMin != null) url.searchParams.set('fhr_min', opts.fhrMin);
     if (opts.fhrMax != null) url.searchParams.set('fhr_max', opts.fhrMax);
+    _appendQueryParams(url, opts.queryParams);
     const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`listFhrs(${sourceId}/${cycle}) failed: ${resp.status}`);
     return await resp.json();

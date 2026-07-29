@@ -165,6 +165,12 @@ function buildMultiLayers(productSuite, dataByKey, gridOrGridFactory, orderedKey
         // Return true if there is a next key or previous key (time) available
         hasNext() { return orderedKeys.indexOf(currentKey) < orderedKeys.length - 1; },
         hasPrev() { return orderedKeys.indexOf(currentKey) > 0; },
+
+        // Hide all layers (render nothing) by clearing the active key.
+        // MultiPlotLayer.render() short-circuits when field_key is null.
+        hide() {
+            multiLayers.forEach(ml => ml.setActiveKey(null));
+        },
     };
 
     // After building all of the mulitlayers, return them, along with the colorbars, sampler, and controller
@@ -256,6 +262,28 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
         loadedKeys.push(key);
     }
 
+    /**
+     * Remove a frame from all MultiPlotLayers, freeing the CPU-side field data.
+     * If the key is currently displayed, the next frame is activated automatically.
+     */
+    function removeFrame(key) {
+        const idx = loadedKeys.indexOf(key);
+        if (idx === -1) return;
+
+        // If we're about to remove the active frame, advance to the next one first
+        if (currentKey === key) {
+            const nextKey = loadedKeys[idx + 1] ?? loadedKeys[idx - 1] ?? null;
+            if (nextKey) {
+                currentKey = nextKey;
+                multiLayers.forEach(ml => ml.setActiveKey(nextKey));
+            }
+        }
+
+        multiLayers.forEach(ml => ml.removeField(key));
+        samplerByKey.delete(key);
+        loadedKeys.splice(idx, 1);
+    }
+
     const controller = {
         // Expose loadedKeys as a live reference so callers always see the latest set
         get keys() { return loadedKeys; },
@@ -287,6 +315,12 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
         },
         hasNext() { return loadedKeys.indexOf(currentKey) < loadedKeys.length - 1; },
         hasPrev() { return loadedKeys.indexOf(currentKey) > 0; },
+
+        // Hide all layers (render nothing) by clearing the active key.
+        // MultiPlotLayer.render() short-circuits when field_key is null.
+        hide() {
+            multiLayers.forEach(ml => ml.setActiveKey(null));
+        },
     };
 
     return {
@@ -295,6 +329,7 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
         sampler:    templateResult.sampler  ?? null,
         controller,
         addFrame,
+        removeFrame,
     };
 }
 

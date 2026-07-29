@@ -25,6 +25,7 @@
 import { DataSelector } from "./dataSelector.js";
 import { getState } from '../../app/store.js';
 import * as CatalogClient from '../../services/api/catalogClient.js';
+import { PRODUCT_SUITES } from '../../domain/dataProducts/productIndex.js';
 
 export const LayerManager = (() => {
     'use strict';
@@ -114,11 +115,13 @@ export const LayerManager = (() => {
             has_forecast_hour: !!(apiSrc.has_fhrs || apiSrc.has_cycles),
             has_cycles:        !!(apiSrc.has_cycles),
             has_fhrs:          !!(apiSrc.has_fhrs),
+            zarr_transport:    !!(apiSrc.zarr_transport),
+            variable_map:      apiSrc.variable_map ?? {},
             // Defaults for fields no longer in the API
             temporal_frequency_min: null,
             forecast_hr_step:       null,
-            default_frame_no:       null,
-            default_range_hr:       48,
+            default_frame_no:       apiSrc.default_selected ?? null,
+            default_range_hr:       apiSrc.timeline_hours   ?? 48,
             max_forecast_hr:        null,
         };
     }
@@ -134,11 +137,32 @@ export const LayerManager = (() => {
         );
     }
 
-    // Format a source as CATEGORY / Subcategory / Name (NMAP2-style slash path).
+    // Format a source as CATEGORY / Name / Product (NMAP2-style slash path).
     function _srcLabel(src) {
         const e = src.entry;
         if (!e) return src.name;
-        return [e.category, e.subcategory, e.name].filter(Boolean).join(' / ');
+        const productLabel = src.productKey
+            ? (PRODUCT_SUITES[src.productKey]?.label ?? null)
+            : null;
+        return [e.category, e.name, productLabel].filter(Boolean).join(' / ');
+    }
+
+    function _defaultQueryParamsForProduct(productKey) {
+        const qp = PRODUCT_SUITES[productKey]?.default_query_params;
+        if (!qp || typeof qp !== 'object' || Array.isArray(qp)) return null;
+        return { ...qp };
+    }
+
+    function _productFrameMode(productKey, entry = null) {
+        const suite = productKey ? PRODUCT_SUITES[productKey] : null;
+        if (suite?.frame_mode) return suite.frame_mode;
+        if (entry?.has_forecast_hour) return 'fhr';
+        return 'valid_time';
+    }
+
+    function _dominantFrameMode() {
+        const src = _sources.find(s => s.id === _dominantId);
+        return src?.frameMode || _productFrameMode(src?.productKey || null, src?.entry || null);
     }
 
     // ------------------------------------------------------------------
@@ -284,10 +308,11 @@ export const LayerManager = (() => {
             _allFrames     = [];   // force full re-probe for new source
             _probedFrames  = [];
             _selWindowStart = null; // reset selection window to newest end
-            // If the newly selected dominant has a default frame count, adopt it
+            // If the newly selected dominant has a default frame count, adopt it.
+            // Skip -9999 (unlimited) — the probe will sync the slider after loading.
             try {
                 const domEntry = _getDomEntry();
-                if (domEntry && domEntry.default_frame_no) {
+                if (domEntry && domEntry.default_frame_no && domEntry.default_frame_no !== -9999) {
                     _numFrames = domEntry.default_frame_no;
                     const numInput = overlay.querySelector('#lm-frames-num');
                     const slider   = overlay.querySelector('#lm-frames-slider');
@@ -368,6 +393,8 @@ export const LayerManager = (() => {
     function _onDataSelected(id, productKey, cycleTime) {
         const entry = _makeEntry(id);
         if (!entry) return;
+        const queryParams = _defaultQueryParamsForProduct(productKey);
+        const frameMode = _productFrameMode(productKey, entry);
 
         // Only store a cycle time for datasets that actually have forecast hours
         const storedCycle = (entry.has_forecast_hour && cycleTime instanceof Date)
@@ -378,12 +405,22 @@ export const LayerManager = (() => {
             const idx = _sources.findIndex(s => s.uid === _editingUid);
             if (idx !== -1) {
                 const old = _sources[idx];
-                _sources[idx] = { uid: old.uid, id, name: entry.name, color: old.color, entry, productKey: productKey || null, cycleTime: storedCycle };
+                _sources[idx] = {
+                    uid: old.uid,
+                    id,
+                    name: entry.name,
+                    color: old.color,
+                    entry,
+                    productKey: productKey || null,
+                    frameMode,
+                    cycleTime: storedCycle,
+                    queryParams,
+                };
                 if (_dominantId === old.id) {
                     _dominantId = id;
                     try {
                         const domEntry = _getDomEntry();
-                        if (domEntry && domEntry.default_frame_no) {
+                        if (domEntry && domEntry.default_frame_no && domEntry.default_frame_no !== -9999) {
                             _numFrames = domEntry.default_frame_no;
                             const numInput = _overlay.querySelector('#lm-frames-num');
                             const slider   = _overlay.querySelector('#lm-frames-slider');
@@ -403,12 +440,22 @@ export const LayerManager = (() => {
             // Add new source
             const uid = ++_uidCounter;
             const color = _nextColor();
-            _sources.push({ uid, id, name: entry.name, color, entry, productKey: productKey || null, cycleTime: storedCycle });
+            _sources.push({
+                uid,
+                id,
+                name: entry.name,
+                color,
+                entry,
+                productKey: productKey || null,
+                frameMode,
+                cycleTime: storedCycle,
+                queryParams,
+            });
             if (_sources.length === 1) {
                 _dominantId = id; // auto-assign first dominant
                 try {
                     const domEntry = _getDomEntry();
-                    if (domEntry && domEntry.default_frame_no) {
+                    if (domEntry && domEntry.default_frame_no && domEntry.default_frame_no !== -9999) {
                         _numFrames = domEntry.default_frame_no;
                         const numInput = _overlay.querySelector('#lm-frames-num');
                         const slider   = _overlay.querySelector('#lm-frames-slider');
@@ -573,7 +620,7 @@ export const LayerManager = (() => {
 
         if (!_allFrames.length) {
             const dominantSrc = _sources.find(s => s.id === _dominantId);
-            if (dom && dom.has_forecast_hour && (!dominantSrc || !dominantSrc.cycleTime)) {
+            if (_dominantFrameMode() === 'fhr' && (!dominantSrc || !dominantSrc.cycleTime)) {
                 el.innerHTML = '<div class="lm-frameinfo"><span class="lm-fi-key" style="color:#aa8833">No cycle selected — remove/re-add source to choose a cycle.</span></div>';
             } else {
                 el.innerHTML = '<div class="lm-frameinfo"><span class="lm-fi-key" style="color:#aa5544">No data files found.</span></div>';
@@ -594,7 +641,7 @@ export const LayerManager = (() => {
 
         // For forecast datasets, show the cycle and forecast-hour range
         let fhrNote = '';
-        if (dom.has_forecast_hour) {
+        if (_dominantFrameMode() === 'fhr') {
             const dominantSrc = _sources.find(s => s.id === _dominantId);
             const cycleStr = dominantSrc && dominantSrc.cycleTime
                 ? `&nbsp; <span class="lm-fi-key">Cycle:</span> <span>${_fmtCycleShort(dominantSrc.cycleTime)}</span>`
@@ -603,6 +650,11 @@ export const LayerManager = (() => {
                 ? `F${String(_probedFrames[0].fhr).padStart(3,'0')}` : '—';
             fhrNote = cycleStr +
                 `&nbsp; <span class="lm-fi-key">Latest F-hr:</span> <span>${maxFhrActual}</span>`;
+        } else if (_dominantFrameMode() === 'cycle') {
+            const latestCycle = _probedFrames.length
+                ? _fmtCycleShort(_probedFrames[0].valid)
+                : '—';
+            fhrNote = `&nbsp; <span class="lm-fi-key">Latest Cycle:</span> <span>${latestCycle}</span>`;
         }
 
         el.innerHTML =
@@ -641,7 +693,7 @@ export const LayerManager = (() => {
             const dom = _getDomEntry();
             const dominantSrc = _sources.find(s => s.id === _dominantId);
             let msg;
-            if (dom && dom.has_forecast_hour && (!dominantSrc || !dominantSrc.cycleTime)) {
+            if (_dominantFrameMode() === 'fhr' && (!dominantSrc || !dominantSrc.cycleTime)) {
                 msg = 'No cycle time selected &#8212; remove and re-add this source to choose a cycle.';
             } else if (_dominantId) {
                 msg = 'No data files found.';
@@ -654,6 +706,7 @@ export const LayerManager = (() => {
         }
 
         const dom    = _getDomEntry();
+        const frameMode = _dominantFrameMode();
         const hasFhr = dom && dom.has_forecast_hour;
         // Derive frequency from actual frame data rather than catalog metadata
         const freqMin = _actualFreqMs(_allFrames) / 60000;
@@ -667,7 +720,7 @@ export const LayerManager = (() => {
         // so we don't need to distinguish data_store_catalog vs HEAD probing.
         let defaultEnd, defaultStart;
         const padMs = freqMin * 60000;
-        if (hasFhr) {
+        if (frameMode === 'fhr') {
             defaultEnd   = allNewest;
             defaultStart = allOldest;
         } else {
@@ -788,7 +841,7 @@ export const LayerManager = (() => {
             dot.style.left   = (left - 1) + 'px';
             dot.dataset.path = frame.path;
 
-            if (hasFhr) {
+            if (frameMode === 'fhr') {
                 dot.title = `Valid: ${_fmtDateUTC(frame.valid, false)}\n` +
                     `Cycle: ${_fmtDateUTC(frame.cycle, false)}  F${String(frame.fhr).padStart(3,'0')}` +
                     (isSelected ? '' : '\n(not loaded)');
@@ -862,15 +915,49 @@ export const LayerManager = (() => {
         if (!dom || !_dominantId) return [];
 
         const dominantSrc = _sources.find(s => s.id === _dominantId);
+        const frameMode = dominantSrc?.frameMode || _productFrameMode(dominantSrc?.productKey || null, dom);
 
-        if (dom.has_forecast_hour) {
+        if (frameMode === 'cycle') {
+            try {
+                const opts = { limit: 100 };
+                if (_rangeStart) {
+                    opts.after = _rangeStart.toISOString();
+                } else if (dom.default_range_hr) {
+                    opts.after = new Date(Date.now() - dom.default_range_hr * 3600000).toISOString();
+                }
+                if (_rangeEnd) opts.before = _rangeEnd.toISOString();
+                if (dominantSrc?.queryParams) opts.queryParams = dominantSrc.queryParams;
+
+                const cycles = await CatalogClient.listCycles(_dominantId, opts);
+                if (token !== _probeToken) return null;
+
+                const frames = (cycles || [])
+                    .map(c => ({
+                        valid: new Date(c.cycle_time),
+                        cycle: new Date(c.cycle_time),
+                        fhr: null,
+                        path: c.cycle,
+                    }))
+                    .filter(f => Number.isFinite(f.valid.getTime()));
+
+                frames.sort((a, b) => b.valid - a.valid);
+                LM.info(`Probed ${frames.length} cycle frames for "${_dominantId}"`);
+                return frames;
+            } catch (err) {
+                LM.warn(`Probe failed for cycle source "${_dominantId}": ${err.message}`);
+                return [];
+            }
+
+        } else if (frameMode === 'fhr' || dom.has_forecast_hour) {
             // ── Forecast source: fetch available fhrs for the selected cycle ──
             const cycle = dominantSrc?.cycleTime;
             if (!cycle) return [];
 
             try {
                 const cycleStr = _dateToCycleStr(cycle);
-                const fhrData = await CatalogClient.listFhrs(_dominantId, cycleStr);
+                const fhrData = await CatalogClient.listFhrs(_dominantId, cycleStr, {
+                    queryParams: dominantSrc?.queryParams || undefined,
+                });
                 if (token !== _probeToken) return null; // stale
 
                 const frames = [];
@@ -903,10 +990,18 @@ export const LayerManager = (() => {
         } else {
             // ── Analysis / observation source: fetch available valid times ──
             try {
-                const opts = { limit: 500 };
-                if (_rangeStart) opts.after  = _rangeStart.toISOString();
-                if (_rangeEnd)   opts.before = _rangeEnd.toISOString();
-
+                const opts = { limit: 100 };
+                if (_rangeStart) {
+                    opts.after = _rangeStart.toISOString();
+                } else if (dom.default_range_hr) {
+                    // Apply the source's timeline_hours as a default lookback window
+                    // when the user hasn't set a custom range.
+                    opts.after = new Date(Date.now() - dom.default_range_hr * 3600000).toISOString();
+                }
+                if (_rangeEnd) opts.before = _rangeEnd.toISOString();
+                if (dominantSrc?.queryParams) {
+                    opts.queryParams = dominantSrc.queryParams;
+                }
                 const times = await CatalogClient.listTimesDetailed(_dominantId, opts);
                 if (token !== _probeToken) return null; // stale
 
@@ -953,6 +1048,20 @@ export const LayerManager = (() => {
         _allFrames      = frames;
         _selWindowStart = null;          // reset selection window to newest end
         _updateSliderMax();
+        // For unlimited sources (default_selected === -9999), set the slider to
+        // the full available count so the UI accurately reflects what will load.
+        (() => {
+            const dom = _getDomEntry();
+            if (dom && dom.default_frame_no === -9999 && _allFrames.length) {
+                _numFrames = _allFrames.length;
+                const slider   = _overlay?.querySelector('#lm-frames-slider');
+                const numInput = _overlay?.querySelector('#lm-frames-num');
+                const label    = _overlay?.querySelector('#lm-frames-label');
+                if (slider)   { slider.max = Math.max(+slider.max, _numFrames); slider.value = _numFrames; }
+                if (numInput) { numInput.max = Math.max(+numInput.max, _numFrames); numInput.value = _numFrames; }
+                if (label)    label.textContent = _numFrames;
+            }
+        })();
         _probedFrames   = _computeSelected(_allFrames);
         _probing = false;
         if (_allFrames.length) {
@@ -1002,7 +1111,7 @@ export const LayerManager = (() => {
         const out = [];
         const unlimited = (() => {
             const dom = _getDomEntry();
-            return !!(dom && dom.default_frame_no === -1);
+            return !!(dom && dom.default_frame_no === -9999);
         })();
         const maxFrames = unlimited ? Infinity : _numFrames;
 
@@ -1227,12 +1336,11 @@ export const LayerManager = (() => {
         open(onApply) {
             _onApply = onApply;
 
-            // If a dominant source is present, prefer its defaults
-            const domEntry = _getDomEntry() || (_sources.length ? _sources[0].entry : null);
-            if (domEntry && domEntry.default_frame_no) {
-                _numFrames = domEntry.default_frame_no;
-            }
             // Sync UI controls to persisted state
+            // NOTE: do NOT reset _numFrames here — it is a persistent module-level
+            // variable intentionally preserved across dialog open/close cycles.
+            // The source default is applied once in _onDataSelected when a source
+            // is first added, not every time the dialog is re-opened.
             _overlay.querySelector('#lm-frames-num').value    = _numFrames;
             _overlay.querySelector('#lm-frames-slider').value = _numFrames;
             _overlay.querySelector('#lm-frames-label').textContent = _numFrames;

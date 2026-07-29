@@ -13,7 +13,7 @@
     "legend": "",
     "maxzoom": 8,
     "minzoom": 0,
-    "profile": "mercator",
+    "profile": "globe",
     "version": "1",
     "generator": "Python 3.9",
     "attribution": " ",

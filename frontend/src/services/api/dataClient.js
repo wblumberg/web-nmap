@@ -36,8 +36,46 @@ import { decodeGridResponse } from '../decoding/protobufGrid.js';
 import { decodePointResponse } from '../decoding/protobufPoints.js';
 import { makeApglGrid } from '../../domain/gridFactory.js';
 import * as apgl from 'autumnplot-gl';
+import {
+    fetchZarrFields,
+    fetchZarrForecastFields,
+    streamZarrAnalysisFrames,
+    streamZarrForecastFrames,
+    invalidateZarrSourceCache,
+} from './zarrClient.js';
 
 const API_BASE = '/api/v1';
+
+function _appendQueryParams(url, queryParams = {}) {
+    Object.entries(queryParams || {}).forEach(([k, v]) => {
+        if (v === undefined || v === null || v === '') return;
+        if (Array.isArray(v)) {
+            url.searchParams.set(k, v.join(','));
+            return;
+        }
+        url.searchParams.set(k, String(v));
+    });
+}
+
+function _stableStringify(value) {
+    if (Array.isArray(value)) {
+        return `[${value.map(_stableStringify).join(',')}]`;
+    }
+    if (value && typeof value === 'object') {
+        const keys = Object.keys(value).sort();
+        return `{${keys.map(k => `${JSON.stringify(k)}:${_stableStringify(value[k])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+}
+
+function _queryParamsCacheSuffix(queryParams) {
+    if (!queryParams || typeof queryParams !== 'object') return '';
+    const entries = Object.entries(queryParams)
+        .filter(([, v]) => v !== undefined && v !== null && v !== '');
+    if (!entries.length) return '';
+    const normalized = Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b)));
+    return `|qp=${_stableStringify(normalized)}`;
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Client-side field cache
@@ -248,7 +286,7 @@ function _buildResultFromJSON(json) {
  * }>}
  */
 export async function fetchAnalysisFields(sourceId, variables, key, opts = {}) {
-    const ck = _ck(sourceId, variables, key);
+    const ck = _ck(sourceId, variables, key) + _queryParamsCacheSuffix(opts.queryParams);
     const cached = _cacheGet(ck);
     if (cached) return cached;
 
@@ -257,6 +295,7 @@ export async function fetchAnalysisFields(sourceId, variables, key, opts = {}) {
     if (key)        url.searchParams.set('key', key);
     if (opts.level) url.searchParams.set('level', opts.level);
     if (opts.bbox)  url.searchParams.set('bbox', opts.bbox);
+    _appendQueryParams(url, opts.queryParams);
 
     const resp = await fetch(url.toString(), {
         headers: { 'Accept': 'application/x-protobuf' },
@@ -302,7 +341,7 @@ export async function fetchAnalysisFields(sourceId, variables, key, opts = {}) {
  */
 export async function fetchForecastFields(sourceId, variables, cycle, fhr, opts = {}) {
     const fcKey = `${cycle}_f${String(fhr).padStart(3, '0')}`;
-    const ck = _ck(sourceId, variables, fcKey);
+    const ck = _ck(sourceId, variables, fcKey) + _queryParamsCacheSuffix(opts.queryParams);
     const cached = _cacheGet(ck);
     if (cached) return cached;
 
@@ -311,6 +350,7 @@ export async function fetchForecastFields(sourceId, variables, cycle, fhr, opts 
     url.searchParams.set('cycle', cycle);
     url.searchParams.set('fhr', String(fhr));
     if (opts.level) url.searchParams.set('level', opts.level);
+    _appendQueryParams(url, opts.queryParams);
 
     const resp = await fetch(url.toString(), {
         headers: { 'Accept': 'application/x-protobuf' },
@@ -338,6 +378,50 @@ export async function fetchForecastFields(sourceId, variables, cycle, fhr, opts 
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Stream frame decompression helpers
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Decompress a gzip-compressed Uint8Array using the browser's native
+ * DecompressionStream API (Chrome 80+, Firefox 113+, Safari 16.4+).
+ * @param {Uint8Array} compressed
+ * @returns {Promise<Uint8Array>}
+ */
+async function _gunzipBytes(compressed) {
+    const ds  = new DecompressionStream('gzip');
+    const buf = await new Response(
+        new Blob([compressed]).stream().pipeThrough(ds)
+    ).arrayBuffer();
+    return new Uint8Array(buf);
+}
+
+/**
+ * Decode a stream frame that may be compressed.
+ *
+ * Wire format (set by the backend streaming endpoints):
+ *   [1-byte flag][payload bytes]
+ *   flag 0x00 → raw protobuf (no compression)
+ *   flag 0x01 → gzip-compressed protobuf
+ *
+ * Always returns a Uint8Array whose backing ArrayBuffer starts at offset 0
+ * so callers can safely pass `.buffer` to decodeGridResponse.
+ *
+ * @param {Uint8Array} msgBytes - the msgLen bytes after the 4-byte length header
+ * @returns {Promise<Uint8Array>}
+ */
+async function _decompressFrame(msgBytes) {
+    const flag    = msgBytes[0];
+    const payload = msgBytes.subarray(1);
+    if (flag === 0x01) {
+        return _gunzipBytes(payload);
+    }
+    // flag 0x00: raw — copy into a fresh aligned buffer
+    const out = new Uint8Array(payload.length);
+    out.set(payload);
+    return out;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Streaming Forecast Batch
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -356,11 +440,12 @@ export async function fetchForecastFields(sourceId, variables, cycle, fhr, opts 
  * @returns {Promise<void>}     - resolves when all frames have been streamed
  */
 export async function streamForecastFrames(sourceId, variables, cycle, fhrs, onFrame, opts = {}) {
+    const qpSuffix = _queryParamsCacheSuffix(opts.queryParams);
     // Serve any already-cached frames immediately without hitting the network.
     const uncachedFhrs = [];
     for (const fhr of fhrs) {
         const serverKey = `${cycle}_f${String(fhr).padStart(3, '0')}`;
-        const ck = _ck(sourceId, variables, serverKey);
+        const ck = _ck(sourceId, variables, serverKey) + qpSuffix;
         const cached = _cacheGet(ck);
         if (cached) {
             onFrame({ ...cached, key: serverKey, fhr });
@@ -376,6 +461,7 @@ export async function streamForecastFrames(sourceId, variables, cycle, fhrs, onF
     url.searchParams.set('cycle', cycle);
     url.searchParams.set('fhrs', uncachedFhrs.join(','));
     if (opts.level) url.searchParams.set('level', opts.level);
+    _appendQueryParams(url, opts.queryParams);
 
     const resp = await fetch(url.toString());
     if (!resp.ok) {
@@ -403,10 +489,11 @@ export async function streamForecastFrames(sourceId, variables, cycle, fhrs, onF
             const msgBytes = buffer.slice(4, 4 + msgLen);
             buffer = buffer.slice(4 + msgLen);
 
-            const decoded   = decodeGridResponse(msgBytes.buffer);
+            const pbBytes   = await _decompressFrame(msgBytes);
+            const decoded   = decodeGridResponse(pbBytes.buffer);
             const serverKey = decoded.key || `${cycle}_f${String(decoded.fhr >= 0 ? decoded.fhr : 0).padStart(3, '0')}`;
             const result    = _buildResult(decoded, serverKey);
-            _cachePut(_ck(sourceId, variables, serverKey), result);
+            _cachePut(_ck(sourceId, variables, serverKey) + qpSuffix, result);
             onFrame({ ...result, fhr: decoded.fhr });
 
             await new Promise(r => setTimeout(r, 0));
@@ -436,10 +523,11 @@ export async function streamForecastFrames(sourceId, variables, cycle, fhrs, onF
  * @returns {Promise<void>}     - resolves when all frames have been delivered
  */
 export async function streamAnalysisFrames(sourceId, variables, keys, onFrame, opts = {}) {
+    const qpSuffix = _queryParamsCacheSuffix(opts.queryParams);
     // Serve cached frames immediately; collect uncached keys for the HTTP request.
     const uncachedKeys = [];
     for (const key of keys) {
-        const ck = _ck(sourceId, variables, key);
+        const ck = _ck(sourceId, variables, key) + qpSuffix;
         const cached = _cacheGet(ck);
         if (cached) {
             onFrame({ ...cached, key });
@@ -455,6 +543,7 @@ export async function streamAnalysisFrames(sourceId, variables, keys, onFrame, o
     url.searchParams.set('variables', varStr);
     url.searchParams.set('keys', uncachedKeys.join(','));
     if (opts.level) url.searchParams.set('level', opts.level);
+    _appendQueryParams(url, opts.queryParams);
 
     const resp = await fetch(url.toString());
     if (!resp.ok) {
@@ -482,9 +571,10 @@ export async function streamAnalysisFrames(sourceId, variables, keys, onFrame, o
             const msgBytes = buffer.slice(4, 4 + msgLen);
             buffer = buffer.slice(4 + msgLen);
 
-            const decoded = decodeGridResponse(msgBytes.buffer);
+            const pbBytes = await _decompressFrame(msgBytes);
+            const decoded = decodeGridResponse(pbBytes.buffer);
             const result  = _buildResult(decoded, decoded.key);
-            _cachePut(_ck(sourceId, variables, decoded.key), result);
+            _cachePut(_ck(sourceId, variables, decoded.key) + qpSuffix, result);
             onFrame(result);
 
             await new Promise(r => setTimeout(r, 0));
@@ -558,7 +648,7 @@ export function invalidatePointCache(sourceId) {
  * @returns {Promise<object>}   GeoJSON FeatureCollection
  */
 export async function fetchPointData(sourceId, centerKey, opts = {}) {
-    const ck = `${sourceId}|${centerKey}`;
+    const ck = `${sourceId}|${centerKey}${_queryParamsCacheSuffix(opts.queryParams)}`;
     const cached = _pointCacheGet(ck);
     if (cached) return cached;
 
@@ -567,6 +657,7 @@ export async function fetchPointData(sourceId, centerKey, opts = {}) {
     if (opts.bbox)           url.searchParams.set('bbox', opts.bbox);
     if (opts.windowMinutes)  url.searchParams.set('window_minutes', String(opts.windowMinutes));
     if (opts.limit)          url.searchParams.set('limit', String(opts.limit));
+    _appendQueryParams(url, opts.queryParams);
     url.searchParams.set('format', 'geojson');
 
     const resp = await fetch(url.toString());
@@ -609,7 +700,7 @@ export async function fetchPointData(sourceId, centerKey, opts = {}) {
  */
 export async function fetchDbPoints(sourceId, fields, centerKey, opts = {}) {
     const fieldsKey = fields.length ? fields.join(',') : '__all__';
-    const ck = `${sourceId}|${centerKey}|${fieldsKey}`;
+    const ck = `${sourceId}|${centerKey}|${fieldsKey}${_queryParamsCacheSuffix(opts.queryParams)}`;
     const cached = _pointCacheGet(ck);
     if (cached) return cached;
 
@@ -619,6 +710,7 @@ export async function fetchDbPoints(sourceId, fields, centerKey, opts = {}) {
     if (opts.bbox)           url.searchParams.set('bbox', opts.bbox);
     if (opts.windowMinutes)  url.searchParams.set('window_minutes', String(opts.windowMinutes));
     if (opts.limit)          url.searchParams.set('limit', String(opts.limit));
+    _appendQueryParams(url, opts.queryParams);
 
     const resp = await fetch(url.toString(), {
         headers: { 'Accept': 'application/x-protobuf' },
@@ -631,6 +723,69 @@ export async function fetchDbPoints(sourceId, fields, centerKey, opts = {}) {
     const decoded = decodePointResponse(buffer);
 
     const result = { obs_json: decoded.points, meta: decoded.meta };
+    _pointCachePut(ck, result);
+    return result;
+}
+
+/**
+ * Fetch DB-backed vertical profile observations and normalize to obs_json.
+ *
+ * Endpoint:
+ *   GET /api/v1/db-profiles/{sourceId}?center={key}
+ *
+ * Response is GeoJSON FeatureCollection where profile payload lives under
+ * feature.properties.profile. This function reshapes that into the same
+ * obs_json shape used by point products:
+ *   { coord: {lon,lat}, valid_time, data: { ...properties } }
+ *
+ * @param {string} sourceId
+ * @param {string} centerKey
+ * @param {object} [opts]
+ * @param {string} [opts.bbox]
+ * @param {number} [opts.windowMinutes]
+ * @param {number} [opts.limit]
+ * @returns {Promise<{obs_json: Array, meta: object}>}
+ */
+export async function fetchDbProfiles(sourceId, centerKey, opts = {}) {
+    const ck = [
+        sourceId,
+        'profiles',
+        centerKey,
+        opts.bbox || '',
+        opts.windowMinutes ?? '',
+        opts.limit ?? '',
+        _queryParamsCacheSuffix(opts.queryParams),
+    ].join('|');
+    const cached = _pointCacheGet(ck);
+    if (cached) return cached;
+
+    const url = new URL(`${API_BASE}/db-profiles/${sourceId}`, window.location.origin);
+    if (centerKey)          url.searchParams.set('center', centerKey);
+    if (opts.bbox)          url.searchParams.set('bbox', opts.bbox);
+    if (opts.windowMinutes) url.searchParams.set('window_minutes', String(opts.windowMinutes));
+    if (opts.limit)         url.searchParams.set('limit', String(opts.limit));
+    _appendQueryParams(url, opts.queryParams);
+
+    const resp = await fetch(url.toString());
+    if (!resp.ok) {
+        throw new Error(`fetchDbProfiles(${sourceId}, key=${centerKey}) failed: HTTP ${resp.status}`);
+    }
+
+    const fc = await resp.json();
+    const obs_json = (fc?.features || []).map((f) => {
+        const coords = f?.geometry?.coordinates || [null, null];
+        const props = f?.properties || {};
+        return {
+            coord: { lon: coords[0], lat: coords[1] },
+            valid_time: props.valid_time || null,
+            data: { ...props },
+        };
+    });
+
+    const result = {
+        obs_json,
+        meta: fc?.metadata || {},
+    };
     _pointCachePut(ck, result);
     return result;
 }
@@ -658,9 +813,17 @@ export async function fetchGeometryFeatures(sourceId, key, opts = {}) {
         window.location.origin
     );
     if (key)               url.searchParams.set('key', key);
+    if (opts.cycle)        url.searchParams.set('cycle', opts.cycle);
+    if (opts.fhr != null)  url.searchParams.set('fhr', String(opts.fhr));
+    if (opts.storm_id)     url.searchParams.set('storm_id', opts.storm_id);
+    if (opts.basin)        url.searchParams.set('basin', opts.basin);
+    if (opts.model)        url.searchParams.set('model', opts.model);
+    if (opts.model_prefix)   url.searchParams.set('model_prefix', opts.model_prefix);
+    if (opts.exclude_best)   url.searchParams.set('exclude_best', 'true');
     if (opts.phen)         url.searchParams.set('type_name', opts.phen);
     if (opts.bbox)         url.searchParams.set('bbox', opts.bbox);
     if (opts.simplifyDeg)  url.searchParams.set('simplify_deg', String(opts.simplifyDeg));
+    _appendQueryParams(url, opts.queryParams);
 
     const resp = await fetch(url.toString());
     if (!resp.ok) {
@@ -732,4 +895,134 @@ export async function fetchLSRs(key, opts = {}) {
     const resp = await fetch(url.toString());
     if (!resp.ok) throw new Error(`fetchLSRs(key=${key}) → HTTP ${resp.status}`);
     return { lsr_geojson: await resp.json() };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Transport-aware wrapper functions
+//
+// These are the preferred call sites in appController.js.  They inspect
+// srcEntry.zarr_transport and route to either:
+//   • zarrClient  (compressed bytes on the wire, WASM decompression in browser)
+//   • protobuf/JSON path (existing behaviour — unchanged)
+//
+// Keeping the dispatch here means appController.js needs no transport logic.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Transport-aware analysis field fetcher.
+ *
+ * For zarr-transport sources: fetches raw compressed bytes via the zarr
+ * proxy endpoint and decompresses in the browser.
+ * For all other sources: uses the existing protobuf path unchanged.
+ *
+ * @param {string}   sourceId   - e.g. "MESOANALYSIS_GRID"
+ * @param {string[]} variables  - generic variable names
+ * @param {string}   key        - frame key
+ * @param {object}   gridInfo   - grid descriptor from CatalogClient.fetchGridInfoCached()
+ * @param {object}   srcEntry   - catalog source entry (contains zarr_transport flag)
+ * @param {object}   [opts]     - passed through to underlying fetcher
+ */
+export async function fetchAnalysisFieldsAuto(
+    sourceId, variables, key, gridInfo, srcEntry, opts = {}
+) {
+    if (srcEntry?.zarr_transport) {
+        return fetchZarrFields(
+            sourceId, key, variables, gridInfo,
+            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+        );
+    }
+    return fetchAnalysisFields(sourceId, variables, key, opts);
+}
+
+/**
+ * Transport-aware analysis frame streamer.
+ *
+ * For zarr-transport sources: fetches compressed chunk bytes per frame via
+ * the zarr proxy and decompresses in the browser using zarr.js.
+ * For all other sources: uses the existing protobuf stream path unchanged.
+ *
+ * @param {string}   sourceId  - e.g. "MESOANALYSIS_GRID"
+ * @param {string[]} variables - generic variable names
+ * @param {string[]} keys      - frame keys to load, oldest → newest
+ * @param {object}   gridInfo  - grid descriptor
+ * @param {function} onFrame   - called with ({ fields, grid, gridInfo, key }) per frame
+ * @param {object}   srcEntry  - catalog source entry (contains zarr_transport flag)
+ * @param {object}   [opts]    - passed through to underlying streamer
+ */
+export async function streamAnalysisFramesAuto(
+    sourceId, variables, keys, gridInfo, onFrame, srcEntry, opts = {}
+) {
+    if (srcEntry?.zarr_transport) {
+        return streamZarrAnalysisFrames(
+            sourceId, variables, keys, gridInfo, onFrame,
+            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+        );
+    }
+    return streamAnalysisFrames(sourceId, variables, keys, onFrame, opts);
+}
+
+/**
+ * Invalidate all cached data for a source, across both transport paths.
+ * @param {string} sourceId
+ */
+export function invalidateSourceCacheAll(sourceId) {
+    invalidateSourceCache(sourceId);
+    invalidateZarrSourceCache(sourceId);
+}
+
+// ─── Transport-aware forecast wrappers ────────────────────────────────────────
+
+/**
+ * Transport-aware forecast field fetcher.
+ *
+ * For zarr-transport sources: fetches one forecast hour via the fhr-slice
+ * zarr proxy (compressed bytes on the wire, browser-side decompression).
+ * For all other sources: uses the existing protobuf path unchanged.
+ *
+ * @param {string}   sourceId  - e.g. "HREF"
+ * @param {string[]} variables - generic variable names
+ * @param {string}   cycle     - model init time key, e.g. "2026050700"
+ * @param {number}   fhr       - forecast hour
+ * @param {object}   gridInfo  - grid descriptor from catalog
+ * @param {object}   srcEntry  - catalog source entry (contains zarr_transport flag)
+ * @param {object}   [opts]    - passed through to underlying fetcher
+ */
+export async function fetchForecastFieldsAuto(
+    sourceId, variables, cycle, fhr, gridInfo, srcEntry, opts = {}
+) {
+    if (srcEntry?.zarr_transport) {
+        return fetchZarrForecastFields(
+            sourceId, cycle, fhr, variables, gridInfo,
+            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+        );
+    }
+    return fetchForecastFields(sourceId, variables, cycle, fhr, opts);
+}
+
+/**
+ * Transport-aware forecast frame streamer.
+ *
+ * For zarr-transport sources: streams compressed chunk bytes per fhr via
+ * the fhr-slice zarr proxy and decompresses in the browser.
+ * For all other sources: uses the existing protobuf stream path unchanged.
+ *
+ * @param {string}   sourceId  - e.g. "HREF"
+ * @param {string[]} variables - generic variable names
+ * @param {string}   cycle     - model init time key
+ * @param {number[]} fhrs      - forecast hours to stream
+ * @param {object}   gridInfo  - grid descriptor from catalog
+ * @param {function} onFrame   - called with ({ fields, grid, gridInfo, key, fhr }) per frame
+ * @param {object}   srcEntry  - catalog source entry (contains zarr_transport flag)
+ * @param {object}   [opts]    - passed through to underlying streamer
+ */
+export async function streamForecastFramesAuto(
+    sourceId, variables, cycle, fhrs, gridInfo, onFrame, srcEntry, opts = {}
+) {
+    if (srcEntry?.zarr_transport) {
+        return streamZarrForecastFrames(
+            sourceId, cycle, fhrs, variables, gridInfo, onFrame,
+            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+        );
+    }
+    return streamForecastFrames(sourceId, variables, cycle, fhrs, onFrame, opts);
 }

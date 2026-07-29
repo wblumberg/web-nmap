@@ -144,6 +144,11 @@ export const DataRegistry = (() => {
 
 // ---------------------------------------------------------------------------
 // DataCatalog — async loader and helpers
+//
+// WARNING: This constant may be depreciated, I can't find any references to it
+// within the code base beyond that it gets replaced.  I don't think 
+// data/catalog.json is a file we're including in this app anymore.
+//
 // ---------------------------------------------------------------------------
 export const DataCatalog = (() => {
     let _entries = [];

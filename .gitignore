@@ -7,3 +7,5 @@ api_keys.js
 *.log
 *.pbf
 frontend/public/static/**
+.env
+.env.local
