@@ -18,6 +18,14 @@ import blues_probabilty_data from "./blues_probability.json";
 import red_purple_probabilty_data from "./red_purple_probability.json";
 import bgy_probability_data from "./bgy_probability.json";
 import yrp_probability_data from "./yrp_probability.json";
+import satellite_ir_rainbow from "./satellite_IR_enhanced-rainbow_warmer_yellow.json";
+import satellite_ir_winter from "./satellite_IR_Color_Clouds_Winter.json";
+import epa_aqi_pm25 from "./epa_aqi_pm25.json";
+import epa_aqi_pm10 from "./epa_aqi_pm10.json";
+import epa_aqi_o3 from "./epa_aqi_o3.json";
+import epa_aqi_co from "./epa_aqi_co.json";
+import epa_aqi_so2 from "./epa_aqi_so2.json";
+import epa_aqi_no2 from "./epa_aqi_no2.json";
 
 const COLORMAPS = {
 
@@ -34,19 +42,29 @@ const COLORMAPS = {
     'href_dwpt':  new apgl.ColorMap(href_dwpt_data.levels,  href_dwpt_data.colors),
     //'href_maxuh': new apgl.ColorMap(href_maxuh_data.levels, href_maxuh_data.colors),
     //'href_minuh': new apgl.ColorMap(href_minuh_data.levels, href_minuh_data.colors),
-    'href_qpf':   new apgl.ColorMap(href_qpf_data.levels,   href_qpf_data.colors),
+    'href_qpf':   new apgl.ColorMap(href_qpf_data.levels,   href_qpf_data.colors, {overflow_color: href_qpf_data.overflow_color}),
     'href_rh':    new apgl.ColorMap(href_rh_data.levels,    href_rh_data.colors),
     'pw_qpf':     new apgl.ColorMap(pw_qpf_data.levels,     pw_qpf_data.colors),
     'pw_refl':    new apgl.ColorMap(pw_refl_data.levels,    pw_refl_data.colors),
     'pw_snow':    new apgl.ColorMap(pw_snow_data.levels,    pw_snow_data.colors),
-    'pw_uh':      new apgl.ColorMap(pw_uh_data.levels,      pw_uh_data.colors),
+    'pw_uh':      new apgl.ColorMap(pw_uh_data.levels,      pw_uh_data.colors, {overflow_color: pw_uh_data.overflow_color}),
 
     'blues_prob': new apgl.ColorMap(blues_probabilty_data.levels, blues_probabilty_data.colors, {underflow_color: blues_probabilty_data.colors[0], overflow_color: blues_probabilty_data.colors[blues_probabilty_data.colors.length - 1]}),
     'red_purple_prob': new apgl.ColorMap(red_purple_probabilty_data.levels, red_purple_probabilty_data.colors, {underflow_color: red_purple_probabilty_data.underflow_color}),
     'bgy_prob': new apgl.ColorMap(bgy_probability_data.levels, bgy_probability_data.colors, {underflow_color: bgy_probability_data.underflow_color}),
     'yrp_prob': new apgl.ColorMap(yrp_probability_data.levels, yrp_probability_data.colors, {underflow_color: yrp_probability_data.underflow_color}),
     
-    'wv_tpc':     new apgl.ColorMap( wv_tpc_data.levels,  wv_tpc_data.colors)
+    'wv_tpc':     new apgl.ColorMap( wv_tpc_data.levels,  wv_tpc_data.colors),
+    'satellite_ir_rainbow': new apgl.ColorMap(satellite_ir_rainbow.levels, satellite_ir_rainbow.colors, {overflow_color: satellite_ir_rainbow.overflow_color}),
+    'satellite_ir_winter': new apgl.ColorMap(satellite_ir_winter.levels, satellite_ir_winter.colors),
+
+    // EPA AQI colormaps for various pollutants, based on https://www.airnow.gov/aqi/aqi-basics/
+    'epa_aqi_pm25': new apgl.ColorMap(epa_aqi_pm25.levels, epa_aqi_pm25.colors, {overflow_color: epa_aqi_pm25.overflow_color}),
+    'epa_aqi_pm10': new apgl.ColorMap(epa_aqi_pm10.levels, epa_aqi_pm10.colors, {overflow_color: epa_aqi_pm10.overflow_color}),
+    'epa_aqi_o3': new apgl.ColorMap(epa_aqi_o3.levels, epa_aqi_o3.colors, {overflow_color: epa_aqi_o3.overflow_color}),
+    'epa_aqi_co': new apgl.ColorMap(epa_aqi_co.levels, epa_aqi_co.colors, {overflow_color: epa_aqi_co.overflow_color}),
+    'epa_aqi_so2': new apgl.ColorMap(epa_aqi_so2.levels, epa_aqi_so2.colors, {overflow_color: epa_aqi_so2.overflow_color}),
+    'epa_aqi_no2': new apgl.ColorMap(epa_aqi_no2.levels, epa_aqi_no2.colors, {overflow_color: epa_aqi_no2.overflow_color}),
 };
 
 export default COLORMAPS;
