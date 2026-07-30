@@ -15,9 +15,9 @@ DATA_ROOT = Path(os.environ.get("WEBNMAP_DATA_ROOT", "/data/store/"))
 
 # MRMS Products to include in the catalog, with corresponding zarr variable names and labels
 _MRMS_PRODUCTS = {
-    "MergedBaseReflectivityQC_00.50": ("CREF_low", "Base Refl QC 0.5°"),
+    #"MergedBaseReflectivityQC_00.50": ("CREF_low", "Base Refl QC 0.5°"),
     "MergedBaseReflectivityQC":       ("MergedBaseReflectivityQC", "Reflectivity QC"),
-    "MergedReflectivityQCComposite":  ("CREF_qc",  "Merged Refl QC Composite"),
+    #"MergedReflectivityQCComposite":  ("CREF_qc",  "Merged Refl QC Composite"),
 }
 
 _MRMS_REGIONS = ["CONUS"]
@@ -58,7 +58,8 @@ _GOES_CHANNELS = {
     "C13": "Clean IR (10.3 µm)",
 }
 
-_GOES_REGIONS = ["CONUS", "FullDisk", "Meso1", "Meso2"]
+#_GOES_REGIONS = ["CONUS", "FullDisk", "Meso1", "Meso2"]
+_GOES_REGIONS = ["CONUS"]
 
 def _goes_source(sat_num: int, region: str, channel: str) -> RasterSource:
     satellite = f"GOES-{sat_num}"
