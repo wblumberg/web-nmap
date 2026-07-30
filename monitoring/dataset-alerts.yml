@@ -1,0 +1,20 @@
+groups:
+  - name: webnmap-datasets
+    rules:
+      - alert: WebNMAPDatasetUnavailable
+        expr: webnmap_dataset_available == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WebNMAP dataset {{ $labels.source_id }} is unavailable"
+          description: "The proactive inventory check has failed or found no data for 5 minutes."
+
+      - alert: WebNMAPDatasetStale
+        expr: webnmap_dataset_health == 0.5
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebNMAP dataset {{ $labels.source_id }} is stale"
+          description: "The latest cycle or valid time has exceeded its configured freshness limit for 15 minutes."

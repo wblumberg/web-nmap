@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: WebNMAP
+    orgId: 1
+    folder: WebNMAP
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

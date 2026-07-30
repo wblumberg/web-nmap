@@ -1,0 +1,54 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "webnmap-prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "0.5": {"text": "STALE", "color": "orange"}, "1": {"text": "HEALTHY", "color": "green"}}}
+          ],
+          "min": 0, "max": 1,
+          "thresholds": {"mode": "absolute", "steps": [{"color": "red"}, {"color": "orange", "value": 0.5}, {"color": "green", "value": 1}]}
+        }
+      },
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": true},
+      "targets": [{"expr": "webnmap_dataset_health", "legendFormat": "{{source_id}}", "refId": "A"}],
+      "title": "Current Dataset Health",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "webnmap-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]}}},
+      "gridPos": {"h": 10, "w": 12, "x": 0, "y": 10},
+      "id": 2,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "webnmap_dataset_age_seconds", "legendFormat": "{{source_id}}", "refId": "A"}],
+      "title": "Age of Latest Data",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "webnmap-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green"}, {"color": "orange", "value": 2}, {"color": "red", "value": 5}]}}},
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 10},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi"}},
+      "targets": [{"expr": "webnmap_dataset_check_duration_seconds", "legendFormat": "{{source_id}}", "refId": "A"}],
+      "title": "Inventory Check Duration",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["webnmap", "datasets"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timezone": "browser",
+  "title": "WebNMAP Dataset Health",
+  "uid": "webnmap-dataset-health",
+  "version": 1
+}
