@@ -77,9 +77,9 @@ SOURCES: dict[str, DataSource] = {
     
     # DB-backed NWS alert sources (TimescaleDB `alerts` hypertable)
     # Filter by phenomenon at query time via ?phen=TO (or ?phen=tornado)
-    "WARNINGS"  : AlertSource("WARNINGS",   "Warnings",   sig="W"),
-    "WATCHES"   : AlertSource("WATCHES",    "Watches",    sig="A"),
-    "ADVISORIES": AlertSource("ADVISORIES", "Advisories", sig="Y"),
+    "WARNINGS"  : AlertSource("WARNINGS",   "NWS Warnings",   sig="W"),
+    "WATCHES"   : AlertSource("WATCHES",    "NWS Watches",    sig="A"),
+    "ADVISORIES": AlertSource("ADVISORIES", "NWS Advisories", sig="Y"),
 }
 
 

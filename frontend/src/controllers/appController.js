@@ -76,6 +76,7 @@ import { buildMultiLayers, buildProgressiveMultiLayers } from '../domain/layerBu
 import { getState, setState } from '../app/store.js';
 import { LayerManager }    from '../views/panels/productManager.js';
 import { ProductGen }      from '../views/panels/productGenView.js';
+import { DatasetStatus }   from '../views/panels/datasetStatus.js';
 import { resolveTitle }    from '../domain/titleResolver.js';
 
 // Load TimeMatcher (IIFE side-effect import — sets window.TimeMatcher)
@@ -171,7 +172,8 @@ export async function init() {
 
     // ── Pre-initialize the autumnplot-gl WASM module ──
     // The marchingsquares.wasm binary (used for contour computation) must be
-    // loaded from a known URL.  We ship it in public/ so Vite serves it at '/'.
+    // loaded from a known URL. We ship it in public/ so webpack-dev-server
+    // serves it at '/'.
     apgl.initAutumnPlot({ wasm_base_url: '/', contour_workers: Math.max(2, Math.min(navigator.hardwareConcurrency ?? 4, 8)) });
 
     // Cache DOM elements so we don't re-query the DOM on every frame step
@@ -234,6 +236,7 @@ export async function init() {
         console.info('%c[NMAP]%c Map loaded — ready for layers',
             'color:#55d46a;font-weight:bold', 'color:inherit');
         ProductGen.init(_map);
+        DatasetStatus.init();
         _wireToolbar();
         _wireKeyboard();
         _updateFrameDisplay();
@@ -362,8 +365,11 @@ function _wireToolbar() {
         }
     });
 
-    // ── Template button (placeholder for future functionality) ──
-    wire('#btn-template', () => { /* TODO: implement restore/template system */ });
+    // ── Dataset availability / freshness monitor ──
+    wire('#btn-dataset-status', () => {
+        const open = DatasetStatus.toggle();
+        document.querySelector('#btn-dataset-status').classList.toggle('active', open);
+    });
 }
 
 function _wireKeyboard() {

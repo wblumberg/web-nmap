@@ -30,11 +30,20 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..readers import get_reader
 from ..sources.registry import SOURCES, get_source
+from ..services.catalog_inventory import list_times_cached, most_recent_cached
+from ..services.dataset_status import get_dataset_status
 
 router = APIRouter(tags=["Catalog"])
 
 
 # ─── Source listing ───────────────────────────────────────────────────────────
+
+@router.get("/status")
+async def dataset_status(
+    refresh: bool = Query(False, description="Bypass the short-lived status cache"),
+):
+    """Check availability and freshness of every configured dataset."""
+    return await get_dataset_status(force=refresh)
 
 @router.get("/sources")
 async def list_sources():
@@ -98,7 +107,8 @@ async def list_times(
         request,
         exclude_keys={"after", "before", "limit"},
     )
-    times = await source.list_times(
+    times = await list_times_cached(
+        source,
         after=after_dt,
         before=before_dt,
         limit=limit,
@@ -120,7 +130,7 @@ async def latest_time(request: Request, source_id: str):
         raise HTTPException(404, str(e))
 
     passthrough = _extract_passthrough_query_params(request)
-    latest = await source.most_recent(params=passthrough)
+    latest = await most_recent_cached(source, params=passthrough)
     if latest is None:
         raise HTTPException(404, f"No data found for source '{source_id}'")
 
@@ -149,7 +159,8 @@ async def nearest_time(
         request,
         exclude_keys={"target", "window_hours"},
     )
-    times  = await source.list_times(
+    times = await list_times_cached(
+        source,
         after=target_dt - window,
         before=target_dt + window,
         limit=500,
@@ -226,7 +237,8 @@ async def list_cycles(
     )
 
     # Get all available times — we'll group them by cycle
-    all_times = await source.list_times(
+    all_times = await list_times_cached(
+        source,
         after=after_dt,
         before=before_dt,
         limit=5000,
@@ -238,7 +250,6 @@ async def list_cycles(
     from collections import defaultdict
     by_cycle: dict[str, list] = defaultdict(list)
     for t in all_times:
-        print(f"Time {t.key}: cycle={t.cycle}, fhr={t.fhr}")
         if t.cycle is not None:
             by_cycle[t.cycle].append(t)
 
@@ -351,7 +362,6 @@ async def list_fhrs(
     except KeyError as e:
         raise HTTPException(404, str(e))
 
-    print(f"The source is: {source}")
     if source.cycle_regex is None:
         raise HTTPException(400, f"'{source_id}' is not a forecast source")
 
@@ -360,11 +370,10 @@ async def list_fhrs(
         request,
         exclude_keys={"fhr_min", "fhr_max"},
     )
-    all_times = await source.list_times(limit=5000, params=passthrough)
+    all_times = await list_times_cached(source, limit=5000, params=passthrough)
 
     # The issue here with loading the GEM_RAP dataset is that the forecast hours are None because
     # all of the forecast data is kept in each file
-    print(f"All times is: {all_times}")
     cycle_entries = [t for t in all_times if t.cycle == cycle]
     cycle_times = [t for t in cycle_entries if t.fhr is not None]
 
@@ -483,15 +492,13 @@ async def get_grid_info(
         exclude_keys={"key", "variable", "cycle", "fhr"},
     )
 
-    times_available = await source.list_times(params=passthrough)
-
-    print(times_available)
+    await list_times_cached(source, params=passthrough)
 
     # Resolve key
     if key is None and cycle is not None and fhr is not None:
         key = f"{cycle}_f{str(fhr).zfill(3)}"
     if key is None:
-        latest = await source.most_recent(params=passthrough)
+        latest = await most_recent_cached(source, params=passthrough)
         if latest is None:
             raise HTTPException(404, f"No data for '{source_id}'")
         key = latest.key

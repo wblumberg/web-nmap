@@ -65,6 +65,15 @@ export async function listSources() {
     return json.sources;
 }
 
+/** Return the latest availability/freshness snapshot for every source. */
+export async function getDatasetStatus({ refresh = false } = {}) {
+    const url = new URL(`${API_BASE}/status`, window.location.origin);
+    if (refresh) url.searchParams.set('refresh', 'true');
+    const resp = await fetch(url.toString());
+    if (!resp.ok) throw new Error(`getDatasetStatus failed: ${resp.status}`);
+    return resp.json();
+}
+
 // ─── Valid times (analysis / observation sources) ─────────────────────────────
 // These functions get the available valid-time keys for an observations or analysis
 // source such as:

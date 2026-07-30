@@ -29,7 +29,7 @@ http_response_size_bytes     Histogram — compressed response body size by endp
 
 """
 
-from prometheus_client import Counter, Histogram, REGISTRY  # noqa: F401  (re-exported)
+from prometheus_client import Counter, Gauge, Histogram, REGISTRY  # noqa: F401  (re-exported)
 
 # ── Request counter ───────────────────────────────────────────────────────────
 REQUEST_COUNT = Counter(
@@ -49,14 +49,44 @@ REQUEST_LATENCY = Histogram(
 )
 
 # ── Response size histogram ───────────────────────────────────────────────────
-# Tracks compressed (gzip) body size in bytes.  Useful for understanding payload
-# growth as observation counts increase.
+# Tracks bytes emitted by the application body iterator. Depending on middleware
+# ordering this is the compressed payload for compressed responses; Zarr chunks
+# are already compressed and are always counted exactly as served.
 RESPONSE_SIZE = Histogram(
     "http_response_size_bytes",
-    "HTTP response body size in bytes (after compression).",
+    "HTTP response payload bytes emitted by the application.",
     labelnames=["method", "endpoint", "source_id", "variable_group", "query_group"],
     buckets=(
         500, 1_000, 5_000, 10_000, 50_000,
         100_000, 500_000, 1_000_000, 5_000_000,
+        10_000_000, 25_000_000, 50_000_000, 100_000_000,
     ),
+)
+
+# ── Proactive dataset health ─────────────────────────────────────────────────
+# These are updated by dataset_status.py independently of normal user traffic.
+DATASET_HEALTH = Gauge(
+    "webnmap_dataset_health",
+    "Dataset health: 1 healthy, 0.5 stale, 0 unavailable/empty/error.",
+    labelnames=["source_id", "label", "data_category"],
+)
+DATASET_AVAILABLE = Gauge(
+    "webnmap_dataset_available",
+    "Whether the dataset inventory check succeeded and found at least one time.",
+    labelnames=["source_id", "label", "data_category"],
+)
+DATASET_LATEST_TIMESTAMP = Gauge(
+    "webnmap_dataset_latest_timestamp_seconds",
+    "Unix timestamp of the latest dataset cycle or valid time.",
+    labelnames=["source_id", "label", "data_category"],
+)
+DATASET_AGE = Gauge(
+    "webnmap_dataset_age_seconds",
+    "Age of the latest dataset cycle or valid time.",
+    labelnames=["source_id", "label", "data_category"],
+)
+DATASET_CHECK_DURATION = Gauge(
+    "webnmap_dataset_check_duration_seconds",
+    "Duration of the most recent dataset inventory check.",
+    labelnames=["source_id", "label", "data_category"],
 )

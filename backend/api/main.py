@@ -1,4 +1,5 @@
 import time
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
@@ -12,6 +13,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from .metrics import REQUEST_COUNT, REQUEST_LATENCY, RESPONSE_SIZE
 from .routers import catalog, lightning, timematch, events, gridded, geometries, points_db, profiles_db, zarr_proxy
 from .watcher import start_watching, start_db_polling
+from .services.dataset_status import status_refresh_loop
 
 _observer = None
 _TRACKED_QUERY_PARAMS = (
@@ -36,12 +38,21 @@ def _extract_source_id(request: Request) -> str:
 
 
 def _extract_variable_group(request: Request) -> str:
-    """Extract variables/variable query params into a bounded metric label."""
+    """Extract variables from query params or a Zarr chunk path."""
     raw_chunks = []
     for key in ("variables", "variable", "var"):
         raw_chunks.extend(request.query_params.getlist(key))
 
     if not raw_chunks:
+        # Zarr encodes the variable in the catch-all chunk path:
+        #   {variable}/0.0 or {variable}/.zarray
+        # Keep root/group metadata distinguishable from actual field payloads.
+        chunk_path = request.path_params.get("chunk_path")
+        if chunk_path:
+            first_segment = str(chunk_path).split("/", 1)[0]
+            if first_segment.startswith("."):
+                return "zarr_metadata"
+            return _sanitize_label_value(first_segment, max_len=64)
         return "none"
 
     values = []
@@ -88,12 +99,14 @@ async def lifespan(app: FastAPI):
     global _observer
     _observer = start_watching()
     _db_tasks = start_db_polling(interval_seconds=30)
+    _status_task = asyncio.create_task(status_refresh_loop())
     yield
     if _observer:
         _observer.stop()
         _observer.join()
     for task in _db_tasks:
         task.cancel()
+    _status_task.cancel()
 
 
 _openapi_tags = [
@@ -192,10 +205,9 @@ async def metrics_middleware(request: Request, call_next):
     (e.g. /api/v1/observations/surface) rather than the raw URL so
     that path parameters don't explode the cardinality of the metrics.
 
-    IMPORTANT: Streaming responses (e.g. forecast_stream) are passed
-    through WITHOUT buffering.  We still record count and latency but
-    skip the body-size metric to avoid consuming the entire stream
-    into memory (which would defeat progressive rendering).
+    Response bytes are counted as the existing body iterator emits them. This
+    works for finite streaming responses and Zarr chunks without buffering or
+    delaying delivery to the client.
     """
     start = time.perf_counter()
     response = await call_next(request)
@@ -210,25 +222,6 @@ async def metrics_middleware(request: Request, call_next):
     source_id = _extract_source_id(request)
     variable_group = _extract_variable_group(request)
     query_group = _build_query_group(request)
-
-    # Streaming responses must NOT be consumed — pass them through as-is.
-    content_type = response.headers.get("content-type", "")
-    is_streaming = ("protobuf-stream" in content_type or "event-stream" in content_type or "zarr" in endpoint)
-
-    if is_streaming:
-        # Record count + latency only (no body-size measurement).
-        if endpoint != "/metrics":
-            REQUEST_COUNT.labels(
-                method=method, endpoint=endpoint, status=status,
-                source_id=source_id, variable_group=variable_group,
-                query_group=query_group,
-            ).inc()
-            REQUEST_LATENCY.labels(
-                method=method, endpoint=endpoint,
-                source_id=source_id, variable_group=variable_group,
-                query_group=query_group,
-            ).observe(duration)
-        return response
 
     # Avoid polluting metrics with Prometheus self-scrapes.
     if endpoint != "/metrics":
@@ -247,29 +240,40 @@ async def metrics_middleware(request: Request, call_next):
             variable_group=variable_group,
             query_group=query_group,
         ).observe(duration)
-        
-        # Extract size safely from the headers without exhausing the iterator
-        content_length = response.headers.get("content-length")
-        if content_length is not None and content_length.isdigit():
-            response_size = int(content_length)
+
+        size_metric = RESPONSE_SIZE.labels(
+            method=method, endpoint=endpoint, source_id=source_id,
+            variable_group=variable_group, query_group=query_group,
+        )
+
+        # call_next exposes an async body iterator even for ordinary responses.
+        # Wrap it to count the bytes already flowing to the ASGI server. Do not
+        # eagerly consume it: finite streams retain progressive delivery and
+        # large Zarr chunks do not acquire an extra in-memory copy.
+        body_iterator = getattr(response, "body_iterator", None)
+        if body_iterator is not None:
+            async def count_response_bytes():
+                response_size = 0
+                completed = False
+                try:
+                    async for chunk in body_iterator:
+                        response_size += len(chunk)
+                        yield chunk
+                    completed = True
+                finally:
+                    # A disconnected client produced only a partial transfer,
+                    # so do not report it as the size of a complete response.
+                    if completed:
+                        size_metric.observe(response_size)
+
+            response.body_iterator = count_response_bytes()
         else:
-            response_size = 0 # fallback if lenght isn't computed yet
-            
-        RESPONSE_SIZE.labels(
-            method=method,
-            endpoint=endpoint,
-            source_id=source_id,
-            variable_group=variable_group,
-            query_group=query_group,
-        ).observe(response_size)
-    # Return the original response object directly without rebuilding it
+            # Defensive fallback for a custom Response without an iterator.
+            body = getattr(response, "body", b"")
+            size_metric.observe(len(body) if body is not None else 0)
+
+    # Return the original response; the iterator wrapper records as it streams.
     return response
-    #return Response(
-    #    content=body,
-    #    status_code=response.status_code,
-    #    headers=dict(response.headers),
-    #    media_type=response.media_type,
-    #)
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
@@ -308,4 +312,3 @@ async def index():
     return FileResponse(PUBLIC_DIR / "index.html")
 
 app.mount("/", StaticFiles(directory=str(PUBLIC_DIR), html=True), name="public")
-

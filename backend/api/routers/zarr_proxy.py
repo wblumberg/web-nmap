@@ -785,19 +785,29 @@ async def zarr_forecast_chunk(
             },
         )
 
-    # ── Slow path: chunk_t > 1, must decompress → slice → recompress ────────
-    # Log a warning so operators know to rechunk to chunk_t=1.
-    import warnings
-    warnings.warn(
-        f"[zarr_proxy] slow path for {source_id}/{cycle}/fhr/{fhr}/{chunk_path} "
-        f"(chunk_t={chunk_t}).  Rechunk with chunk_shape[0]=1 to enable the fast path.",
-        stacklevel=1,
-    )
+    # A chunk_t=1 array may be sparse (for example, a 4-hour HREF product has
+    # no chunks before its first complete window). Zarr supplies fill data for
+    # an absent chunk; this is not a rechunking problem. Only warn when a real
+    # multi-time chunk forces decode → slice → re-encode.
+    sparse_fill = chunk_t == 1 and not chunk_file.exists()
+    if not sparse_fill:
+        import warnings
+        warnings.warn(
+            f"[zarr_proxy] slow path for {source_id}/{cycle}/fhr/{fhr}/{chunk_path} "
+            f"(chunk_t={chunk_t}). Rechunk the time axis to chunk size 1 "
+            "to enable direct chunk serving.",
+            stacklevel=1,
+        )
     try:
         data = _serve_slow_path(store_path_str, var_name, spatial_key, t_idx)
     except Exception as exc:
         raise HTTPException(500, f"Could not serve chunk: {exc}") from exc
 
+    path_headers = (
+        {"X-Zarr-Sparse-Fill": "1"}
+        if sparse_fill
+        else {"X-Zarr-SlowPath": "1"}
+    )
     return Response(
         content=data,
         media_type="application/octet-stream",
@@ -807,7 +817,7 @@ async def zarr_forecast_chunk(
             "X-Content-Type-Options"    : "nosniff",
             "X-Zarr-Fhr"               : str(fhr),
             "X-Zarr-Tidx"              : str(t_idx),
-            "X-Zarr-SlowPath"          : "1",
+            **path_headers,
         },
     )
 

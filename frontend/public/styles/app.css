@@ -243,3 +243,36 @@ body {
     align-items: center;
     gap: 16px;
 }
+
+/* ── Dataset status ───────────────────────────────────────────────────────── */
+#btn-dataset-status { gap: 3px; font-size: 10px; }
+.dataset-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #778; }
+.dataset-status-healthy .dataset-status-dot { background: #55d46a; }
+.dataset-status-warning .dataset-status-dot { background: #ffb84d; box-shadow: 0 0 5px #ff8c35; }
+
+#dataset-status-panel {
+    position: fixed; z-index: 700; top: 52px; right: 12px;
+    width: min(920px, calc(100vw - 24px)); max-height: calc(100vh - 64px);
+    display: flex; flex-direction: column; background: #111126;
+    border: 1px solid #41416c; box-shadow: 0 8px 30px rgba(0,0,0,.65);
+}
+#dataset-status-panel.hidden { display: none; }
+#dataset-status-panel header { display:flex; justify-content:space-between; align-items:center; padding:12px 14px; border-bottom:1px solid #303052; }
+#dataset-status-panel h2 { font-size:16px; }
+#dataset-status-panel button { background:#242442; color:#eee; border:1px solid #51517d; padding:5px 9px; cursor:pointer; font-family:inherit; }
+#ds-status-close { margin-left:6px; }
+.ds-status-checked { color:#8888a8; font-size:10px; margin-top:3px; }
+.ds-status-summary { display:flex; gap:16px; padding:10px 14px; border-bottom:1px solid #252542; }
+.ds-status-summary .healthy { color:#55d46a; } .ds-status-summary .stale { color:#ffb84d; }
+.ds-status-summary .empty, .ds-status-summary .unavailable { color:#ff6767; }
+.ds-status-error { color:#ff7777; padding:0 14px; }
+.ds-status-table-wrap { overflow:auto; }
+#dataset-status-panel table { width:100%; border-collapse:collapse; font-size:11px; }
+#dataset-status-panel th { position:sticky; top:0; background:#1d1d36; color:#9999ba; text-align:left; padding:7px 9px; }
+#dataset-status-panel td { padding:7px 9px; border-top:1px solid #252542; vertical-align:top; }
+#dataset-status-panel td small { display:block; color:#777796; margin-top:2px; }
+.status-pill { display:inline-block; min-width:76px; text-align:center; padding:2px 5px; border-radius:9px; text-transform:uppercase; font-size:9px; }
+.status-pill.healthy { color:#80f0a0; background:#16402e; }
+.status-pill.stale { color:#ffd27d; background:#513b16; }
+.status-pill.empty, .status-pill.unavailable { color:#ff9292; background:#4c2029; }
+.status-message { max-width:250px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#aaaac1; }

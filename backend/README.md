@@ -2,9 +2,13 @@
 
 To start the API backend, use the following command and run it from the root of the web-nmap repository directory:
 
-`uvicorn backend.api.main:app --reload --port 8000 --workers 2`
+For local development:
 
-The port specifies the port the API will be accessible from, and the number of workers will help enable more connections to the API.
+`uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload`
+
+Binding to `0.0.0.0` is required when the Dockerized Prometheus service
+scrapes the host API through `host.docker.internal`. For a production-style
+multi-worker launch, omit `--reload` and use `--workers 2`.
 
 # Backend Infrastructure
 
