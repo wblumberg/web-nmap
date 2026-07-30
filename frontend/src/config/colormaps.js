@@ -20,12 +20,25 @@ import bgy_probability_data from "./bgy_probability.json";
 import yrp_probability_data from "./yrp_probability.json";
 import satellite_ir_rainbow from "./satellite_IR_enhanced-rainbow_warmer_yellow.json";
 import satellite_ir_winter from "./satellite_IR_Color_Clouds_Winter.json";
+
 import epa_aqi_pm25 from "./epa_aqi_pm25.json";
 import epa_aqi_pm10 from "./epa_aqi_pm10.json";
 import epa_aqi_o3 from "./epa_aqi_o3.json";
 import epa_aqi_co from "./epa_aqi_co.json";
 import epa_aqi_so2 from "./epa_aqi_so2.json";
 import epa_aqi_no2 from "./epa_aqi_no2.json";
+
+// Probability colormaps for precipitation types, custom colors.
+import ptype_snow_probability from "./ptype_snow_probability.json";
+import ptype_rain_probability from "./ptype_rain_probability.json";
+import ptype_frzr_probability from "./ptype_frzr_probability.json";
+import ptype_icep_probability from "./ptype_icep_probability.json";
+
+// Reflectivity colormaps for precipitation types, based on PivotalWeather.
+import ptype_snow_reflectivity from "./ptype_snow_reflectivity.json";
+import ptype_rain_reflectivity from "./ptype_rain_reflectivity.json";
+import ptype_frzr_reflectivity from "./ptype_frzr_reflectivity.json";
+import ptype_icep_reflectivity from "./ptype_icep_reflectivity.json";
 
 const COLORMAPS = {
 
@@ -65,6 +78,18 @@ const COLORMAPS = {
     'epa_aqi_co': new apgl.ColorMap(epa_aqi_co.levels, epa_aqi_co.colors, {overflow_color: epa_aqi_co.overflow_color}),
     'epa_aqi_so2': new apgl.ColorMap(epa_aqi_so2.levels, epa_aqi_so2.colors, {overflow_color: epa_aqi_so2.overflow_color}),
     'epa_aqi_no2': new apgl.ColorMap(epa_aqi_no2.levels, epa_aqi_no2.colors, {overflow_color: epa_aqi_no2.overflow_color}),
+
+    // Precipitation type probability colormaps
+    'ptype_snow_probability': new apgl.ColorMap(ptype_snow_probability.levels, ptype_snow_probability.colors),
+    'ptype_rain_probability': new apgl.ColorMap(ptype_rain_probability.levels, ptype_rain_probability.colors),
+    'ptype_frzr_probability': new apgl.ColorMap(ptype_frzr_probability.levels, ptype_frzr_probability.colors),
+    'ptype_icep_probability': new apgl.ColorMap(ptype_icep_probability.levels, ptype_icep_probability.colors),
+
+    // Precipitation type reflectivity colormaps
+    'ptype_snow_reflectivity': new apgl.ColorMap(ptype_snow_reflectivity.levels, ptype_snow_reflectivity.colors, {overflow_color: ptype_snow_reflectivity.overflow_color}),
+    'ptype_rain_reflectivity': new apgl.ColorMap(ptype_rain_reflectivity.levels, ptype_rain_reflectivity.colors, {overflow_color: ptype_rain_reflectivity.overflow_color}),
+    'ptype_frzr_reflectivity': new apgl.ColorMap(ptype_frzr_reflectivity.levels, ptype_frzr_reflectivity.colors, {overflow_color: ptype_frzr_reflectivity.overflow_color}),
+    'ptype_icep_reflectivity': new apgl.ColorMap(ptype_icep_reflectivity.levels, ptype_icep_reflectivity.colors, {overflow_color: ptype_icep_reflectivity.overflow_color}),
 };
 
 export default COLORMAPS;

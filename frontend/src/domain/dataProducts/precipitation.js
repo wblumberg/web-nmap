@@ -266,4 +266,82 @@ export default {
         },
     },
 
+    'mean_1hr_acpc': {
+        label: '[MN] 1-hr Accumulated Precip.',
+        group: 'precip',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Mean 1-hr Accumulated Precipitation [in]',
+        available_for:  ['HREF'],
+        data_keys: ['mean_1h_precip_in'],
+        make_layers(data, grid) {
+            const field = data.mean_1h_precip_in
+            //console.log(grid)
+            const fill = new apgl.ContourFill(field, { cmap: COLORMAPS['href_qpf'] });
+
+            const svg = apgl.makeColorBar(COLORMAPS['href_qpf'], {
+                label: 'Accumulated Precipitation [in]',
+                orientation: 'horizontal',
+                tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('accum_precip_1hr', fill)],
+                colorbar: [svg],
+                sampler: null,
+            };
+        },
+    },
+
+    'median_1hr_acpc': {
+        label: '[P50] 1-hr Accumulated Precip.',
+        group: 'precip',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Median 1-hr Accumulated Precipitation [in]',
+        available_for:  ['HREF'],
+        data_keys: ['median_1h_precip_in'],
+        make_layers(data, grid) {
+            const field = data.median_1h_precip_in
+
+            const fill = new apgl.ContourFill(field, { cmap: COLORMAPS['href_qpf'] });
+
+            const svg = apgl.makeColorBar(COLORMAPS['href_qpf'], {
+                label: 'Accumulated Precipitation [in]',
+                orientation: 'horizontal',
+                tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('median_precip_1hr', fill)],
+                colorbar: [svg],
+                sampler: null,
+            };
+        },
+    },
+
+    'max_1hr_acpc': {
+        label: '[MX] 1-hr Accumulated Precip.',
+        group: 'precip',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Max 1-hr Accumulated Precipitation [in]',
+        available_for:  ['HREF'],
+        data_keys: ['max_1h_precip_in'],
+        make_layers(data, grid) {
+            const field = data.max_1h_precip_in
+
+            const fill = new apgl.ContourFill(field, { cmap: COLORMAPS['href_qpf'] });
+
+            const svg = apgl.makeColorBar(COLORMAPS['href_qpf'], {
+                label: 'Max 1-hr Precipitation [in]',
+                orientation: 'horizontal',
+                tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('max_precip_1hr', fill)],
+                colorbar: [svg],
+                sampler: null,
+            };
+        },
+    },    
+
 };

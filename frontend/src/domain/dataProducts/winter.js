@@ -78,5 +78,143 @@ export default {
         },
     },
 
+    'dom_ptype_mean_1km_refd': {
+        label: '[MN] Base Reflectivity \& Dominant Precip. Type',
+        group: 'winter',
+        available_for: ['HREF'],
+        data_keys: ['dominant_precipitation_type', 'mean_REFD_hght_1000'],
+        make_layers(data, _grid) {
+            // Get the colormaps and set them to constants
+            const crain_cmap = COLORMAPS['ptype_rain_reflectivity'];
+            const csnow_cmap = COLORMAPS['ptype_snow_reflectivity'];
+            const cicep_cmap = COLORMAPS['ptype_icep_reflectivity'];
+            const cfrzr_cmap = COLORMAPS['ptype_frzr_reflectivity'];
 
+            console.log("Our Data:", data);
+            // Make the colorbars
+            const svg_crain = apgl.makeColorBar(crain_cmap, {label: "Rain Reflectivity (dBZ)", size_long: 320, size_short: 67, 
+                                                     fontface: 'Trebuchet MS', 
+                                                     ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                     orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_csnow = apgl.makeColorBar(csnow_cmap, {label: "Snow Reflectivity (dBZ)", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_cicep = apgl.makeColorBar(cicep_cmap, {label: "Sleet Reflectivity (dBZ)", size_long: 320, size_short: 67,     
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_cfrzr = apgl.makeColorBar(cfrzr_cmap, {label: "Freezing Rain Reflectivity (dBZ)", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const cmap_mask = new Uint8Array(data.dominant_precipitation_type.data);
+
+            // Create the raster layer for the dominant precipitation type and reflectivity
+            const raster_cref = new apgl.Raster(data.mean_REFD_hght_1000, {cmap: [crain_cmap, cicep_cmap, cfrzr_cmap, csnow_cmap], 
+                                                                 cmap_mask: cmap_mask});
+            const raster_layer = new apgl.PlotLayer('meanREFD_dom_ptype_href', raster_cref);
+
+            return { layers: [raster_layer], colorbar: [svg_crain, svg_csnow, svg_cicep, svg_cfrzr], sampler: null };
+        },
+    },
+
+    'dom_ptype_median_1km_refd': {
+        label: '[P50] Base Reflectivity \& Dominant Precip. Type',
+        group: 'winter',
+        available_for: ['HREF'],
+        data_keys: ['dominant_precipitation_type', 'median_REFD_hght_1000'],
+        make_layers(data, _grid) {
+            // Get the colormaps and set them to constants
+            const crain_cmap = COLORMAPS['ptype_rain_reflectivity'];
+            const csnow_cmap = COLORMAPS['ptype_snow_reflectivity'];
+            const cicep_cmap = COLORMAPS['ptype_icep_reflectivity'];
+            const cfrzr_cmap = COLORMAPS['ptype_frzr_reflectivity'];
+
+            console.log("Our Data:", data);
+            // Make the colorbars
+            const svg_crain = apgl.makeColorBar(crain_cmap, {label: "Rain Reflectivity (dBZ)", size_long: 320, size_short: 67, 
+                                                     fontface: 'Trebuchet MS', 
+                                                     ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                     orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_csnow = apgl.makeColorBar(csnow_cmap, {label: "Snow Reflectivity (dBZ)", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_cicep = apgl.makeColorBar(cicep_cmap, {label: "Sleet Reflectivity (dBZ)", size_long: 320, size_short: 67,     
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_cfrzr = apgl.makeColorBar(cfrzr_cmap, {label: "Freezing Rain Reflectivity (dBZ)", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [-20, -10, 0, 10, 20, 30, 40, 50],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const cmap_mask = new Uint8Array(data.dominant_precipitation_type.data);
+
+            // Create the raster layer for the dominant precipitation type and reflectivity
+            const raster_cref = new apgl.Raster(data.median_REFD_hght_1000, {cmap: [crain_cmap, cicep_cmap, cfrzr_cmap, csnow_cmap], 
+                                                                 cmap_mask: cmap_mask});
+            const raster_layer = new apgl.PlotLayer('medianREFD_dom_ptype_href', raster_cref);
+
+            return { layers: [raster_layer], colorbar: [svg_crain, svg_csnow, svg_cicep, svg_cfrzr], sampler: null };
+        },
+    },
+
+    'prob_qpf_0p01_ptype': {
+        label: '[PR] QPF>0.01 in by Precip. Type ',
+        group: 'winter',
+        available_for: ['HREF'],
+        data_keys: ['prob_qpf_gt0p01in_freezing_rain', 'prob_qpf_gt0p01in_rain', 'prob_qpf_gt0p01in_sleet', 'prob_qpf_gt0p01in_snow'],
+        make_layers(data, _grid) {
+            // Get the colormaps and set them to constants
+            const crain_cmap = COLORMAPS['ptype_rain_probability'];
+            const csnow_cmap = COLORMAPS['ptype_snow_probability'];
+            const cicep_cmap = COLORMAPS['ptype_icep_probability'];
+            const cfrzr_cmap = COLORMAPS['ptype_frzr_probability'];
+
+            //console.log("Our Data:", Math.max(...data.prob_qpf_gt0p01in_rain.data), Math.max(...data.prob_qpf_gt0p01in_snow.data), Math.max(...data.prob_qpf_gt0p01in_sleet.data), Math.max(...data.prob_qpf_gt0p01in_freezing_rain.data));
+            // Make the colorbars
+            const svg_crain = apgl.makeColorBar(crain_cmap, {label: "Probability of Rain", size_long: 320, size_short: 67, 
+                                                     fontface: 'Trebuchet MS', 
+                                                     ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                                                     orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_csnow = apgl.makeColorBar(csnow_cmap, {label: "Probability of Snow", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_cicep = apgl.makeColorBar(cicep_cmap, {label: "Probability of Ice Pellets", size_long: 320, size_short: 67,     
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_cfrzr = apgl.makeColorBar(cfrzr_cmap, {label: "Probability of Freezing Rain", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            
+            // Create the raster layer for the dominant precipitation type and reflectivity
+            const prob_rain = new apgl.Raster(data.prob_qpf_gt0p01in_rain, {cmap: crain_cmap, alpha: 0.5, });
+            const prob_snow = new apgl.Raster(data.prob_qpf_gt0p01in_snow, {cmap: csnow_cmap, alpha: 0.5, });
+            const prob_icep = new apgl.Raster(data.prob_qpf_gt0p01in_sleet, {cmap: cicep_cmap, alpha: 0.5, });
+            const prob_frzr = new apgl.Raster(data.prob_qpf_gt0p01in_freezing_rain, {cmap: cfrzr_cmap, alpha: 0.5, });
+
+            const pr_rain_layer = new apgl.PlotLayer('prob_rain', prob_rain);
+            const pr_snow_layer = new apgl.PlotLayer('prob_snow', prob_snow);
+            const pr_icep_layer = new apgl.PlotLayer('prob_icep', prob_icep);
+            const pr_frzr_layer = new apgl.PlotLayer('prob_frzr', prob_frzr);
+
+            return { layers: [pr_snow_layer, pr_icep_layer, pr_frzr_layer, pr_rain_layer], colorbar: [svg_crain, svg_csnow, svg_cicep, svg_cfrzr], sampler: null };
+        },
+    }
 };

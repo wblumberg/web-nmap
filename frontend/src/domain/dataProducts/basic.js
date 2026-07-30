@@ -59,6 +59,39 @@ export default {
         },
     },
 
+    'sfc_temp_fill_mean': {
+        label: '[MN] 2m Temperature and MSLP',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Mean 2-m Temperature & Mean Sea Level Pressure [mb]',
+        group: 'basic',
+        available_for: ['HREF'],
+        data_keys: ['mean_TMP_hght_2', 'mean_MSLMA'],
+        make_layers(data, grid) {
+            const field = data.mean_TMP_hght_2;
+            const fill  = new apgl.ContourFill(field, { cmap: COLORMAPS['pw_t2m'] });
+            const svg   = apgl.makeColorBar(COLORMAPS['pw_t2m'], {
+                label: '2-m Temperature (°F)',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS',
+                ticks: [-40, -20, 0, 20, 40, 60, 80, 100, 120],
+            });
+            const mslmaRaw  = data.mean_MSLMA.renderCPU();
+            const mslmaSmth = new apgl.RawScalarField(grid, smooth2D(mslmaRaw.data, grid.ni, grid.nj));
+            const cntr = new apgl.Contour(
+                mslmaSmth,
+                { interval: 4, color: '#000000', line_width: 3 }
+            );
+            const lbls  = new apgl.ContourLabels(cntr, {
+                text_color: '#ffffff', halo: true, font_size: 16, halo_color: '#000000',
+                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            });
+            return {
+                layers: [new apgl.PlotLayer('2m_fill', fill), new apgl.PlotLayer('mslp_cntr', cntr), new apgl.PlotLayer('mslp_lbls', lbls)],
+                colorbar: [svg],
+                sampler: (lon, lat) => ({ mean_TMP_hght_2: field.sampleField(lon, lat) }),
+            };
+        },
+    },
+
     'sfc_dwpt_fill_mean': {
         label: '[MN] 2m Dewpoint and MSLP',
         title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  Mean 2-m Dewpoint & Mean Sea Level Pressure [mb]',
