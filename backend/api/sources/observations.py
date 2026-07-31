@@ -104,6 +104,24 @@ RECON_DB = PointDBSource(
     return_age       = False,
 )
 
+# ASCAT scatterometer wind-vector cells.  Individual platforms (currently
+# ASCAT-B and ASCAT-C) share one source and are identified by the ``platform``
+# property.  A frame represents a trailing six-hour composite rather than one
+# instantaneous scan.
+ASCAT_DB = PointDBSource(
+    source_id_       = "ASCAT",
+    label_           = "ASCAT Scatterometer Winds",
+    source_type      = "SATELLITE",
+    data_category    = "point_obs",
+    default_selected = 1,
+    timeline_hours   = 24,
+    binflag          = True,
+    before_minutes   = 360,
+    after_minutes    = 0,
+    use_most_recent_filter = False,
+    return_age       = True,
+)
+
 
 # VAD profile observations (vertical wind profiles).
 VAD_PROFILE_DB = ProfileDBSource(

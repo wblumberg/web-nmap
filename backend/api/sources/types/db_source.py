@@ -575,3 +575,84 @@ class CycloneTrackDBSource(DataSource):
         cycle = cycle_time.strftime("%Y%m%d%H") if hasattr(cycle_time, "strftime") else str(cycle_time)
         return AvailableTime(valid_time=cycle_time, key=cycle, path=None, cycle=cycle, fhr=None)
 
+
+class AircraftTrackDBSource(DataSource):
+    """Rolling FAA aircraft tracks backed by ``aircraft_positions``."""
+
+    cycle_regex: None = None
+    fhr_regex: None = None
+    endpoint_type: str = "geometry"
+    time_column: str = "observation_time"
+
+    def __init__(
+        self,
+        source_id_: str = "FAA_ASDI",
+        label_: str = "FAA ASDI Flight Tracks",
+        default_selected: int = 1,
+        timeline_hours: int = 6,
+        table: str = "aircraft_positions",
+    ):
+        self._source_id = source_id_
+        self._label = label_
+        self.source_type = "AVIATION"
+        self.data_category = "aircraft_tracks"
+        self.default_selected = default_selected
+        self.timeline_hours = timeline_hours
+        self.table = table
+        self._engine: AsyncEngine = get_engine()
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    async def list_times(
+        self,
+        after: Optional[datetime] = None,
+        before: Optional[datetime] = None,
+        limit: int = 200,
+        params: dict[str, Any] | None = None,
+    ) -> list[AvailableTime]:
+        after = after or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        before = before or datetime.now(tz=timezone.utc)
+        sql = text(f"""
+            SELECT time_bucket('1 minute', observation_time) AS valid_time
+            FROM {self.table}
+            WHERE observation_time BETWEEN :after AND :before
+            GROUP BY time_bucket('1 minute', observation_time)
+            ORDER BY valid_time DESC
+            LIMIT :limit
+        """)
+        async with self._engine.connect() as connection:
+            result = await connection.execute(sql, {
+                "after": after, "before": before, "limit": limit,
+            })
+            rows = result.fetchall()
+        return [
+            AvailableTime(
+                valid_time=row[0],
+                key=row[0].strftime("%Y%m%d_%H%M"),
+                path=None,
+            )
+            for row in rows
+        ]
+
+    async def get_path(self, key: str):
+        return None
+
+    async def most_recent(
+        self, params: dict[str, Any] | None = None
+    ) -> Optional[AvailableTime]:
+        sql = text(f"SELECT MAX(observation_time) FROM {self.table}")
+        async with self._engine.connect() as connection:
+            valid_time = await connection.scalar(sql)
+        if valid_time is None:
+            return None
+        return AvailableTime(
+            valid_time=valid_time,
+            key=valid_time.strftime("%Y%m%d_%H%M"),
+            path=None,
+        )

@@ -69,6 +69,7 @@
 
 // ─── Shared formatter helpers ─────────────────────────────────────────────────
 
+import { colormaps } from 'autumnplot-gl';
 import COLORMAPS from '../../config/colormaps.js';
 
 // Temperature: round to integer, blank if missing
@@ -187,7 +188,7 @@ function buildObsLayer(layerId, obsJson, spConfig, opts = {}) {
 
     const grid = new apgl.UnstructuredGrid(obsJson.map(o => o.coord));
     const field = new apgl.RawObsField(grid, obsJson.map(o => o.data));
-    console.log(field);
+    // console.log(field);
     const plot = new apgl.StationPlot(field, {
         config: spConfig,
         thin_fac,
@@ -199,6 +200,64 @@ function buildObsLayer(layerId, obsJson, spConfig, opts = {}) {
     return new apgl.PlotLayer(layerId, plot);
 }
 
+function buildScatterometerLayer(layerId, obsJson, opts = {}) {
+    const {
+        thin_fac = 16,
+        cmap = COLORMAPS['pw_speed850mb'],
+    } = opts;
+
+    // UnstructuredGrid cannot represent 4096 or more observations correctly:
+    // its internal texture dimensions no longer match the vector-array length.
+    // Keep one bounded GPU field instead of creating dozens of Barbs instances,
+    // each of which would allocate its own textures and render pass.
+    const MAX_RENDER_POINTS = 4000;
+    const validObs = obsJson.filter(o => {
+        const speed = Number(o?.data?.wind_speed_kt);
+        const direction = Number(o?.data?.wind_direction_deg);
+        return Number.isFinite(o?.coord?.lon)
+            && Number.isFinite(o?.coord?.lat)
+            && Number.isFinite(speed)
+            && Number.isFinite(direction);
+    });
+
+    if (!validObs.length) return null;
+
+    // Evenly sample the complete response so all swaths and observation times
+    // remain represented. Array.slice(0, limit) would bias the map toward one
+    // end of the time-ordered database response.
+    const renderObs = validObs.length <= MAX_RENDER_POINTS
+        ? validObs
+        : Array.from({ length: MAX_RENDER_POINTS }, (_, i) => (
+            validObs[Math.floor(i * validObs.length / MAX_RENDER_POINTS)]
+        ));
+
+    const grid = new apgl.UnstructuredGrid(renderObs.map(o => o.coord));
+    const u = new Float32Array(renderObs.length);
+    const v = new Float32Array(renderObs.length);
+
+    renderObs.forEach((o, i) => {
+        const speed = Number(o.data.wind_speed_kt);
+        const radians = Number(o.data.wind_direction_deg) * Math.PI / 180;
+
+        // Direction is meteorological "from": u is positive eastward and
+        // v is positive northward.
+        u[i] = -speed * Math.sin(radians);
+        v[i] = -speed * Math.cos(radians);
+    });
+
+    const wind = new apgl.RawVectorField(
+        grid,
+        u,
+        v,
+        { relative_to: 'earth' },
+    );
+    const barbs = new apgl.Barbs(wind, {
+        cmap,
+        thin_fac,
+        line_width: 2,
+    });
+    return new apgl.PlotLayer(layerId, barbs);
+}
 
 // ─── Product definitions ──────────────────────────────────────────────────────
 
@@ -778,6 +837,36 @@ export default {
             //                                               ticks: [-40, -30, -20, -10, 0, 10, 20, 30, 40, 50, 60, 70, 80],
             //                                                orientation: 'horizontal', tick_direction: 'bottom'});
             return { layers: [layer], colorbar: [], sampler: null };
+        },
+    },
+
+    'ascat_winds': {
+        label: 'ASCAT Scatterometer Winds',
+        group: 'point',
+        available_for: ['ASCAT'],
+        data_keys: ['wind_speed_kt', 'wind_direction_deg', 'valid_time'],
+
+        make_layers(data, _grid) {
+            const cmap = COLORMAPS['pw_speed850mb'];
+            const layer = buildScatterometerLayer(
+                'ascat_winds',
+                data.obs_json || [],
+                // Scatterometer WVCs are dense.  Keep the initial continental
+                // view responsive; the renderer exposes more cells on zoom.
+                { thin_fac: 16, cmap }
+            );
+            const colorbar = apgl.makeColorBar(cmap, {
+                label: 'ASCAT Wind Speed (kt)',
+                fontface: 'Trebuchet MS',
+                ticks: [0, 10, 20, 30, 40, 50, 60, 70],
+                orientation: 'horizontal',
+                tick_direction: 'bottom',
+            });
+            return {
+                layers: layer ? [layer] : [],
+                colorbar: [colorbar],
+                sampler: null,
+            };
         },
     },
 
