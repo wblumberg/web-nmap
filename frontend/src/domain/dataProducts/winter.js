@@ -216,5 +216,57 @@ export default {
 
             return { layers: [pr_snow_layer, pr_icep_layer, pr_frzr_layer, pr_rain_layer], colorbar: [svg_crain, svg_csnow, svg_cicep, svg_cfrzr], sampler: null };
         },
+    },
+
+    'prob_ptype': {
+        label: '[PR] Probability of Precip. Type ',
+        group: 'winter',
+        available_for: ['ECMWF_ENS'],
+        data_keys: ['prob_PTYPE_rain', 'prob_PTYPE_snow', 'prob_PTYPE_fzra'],
+        //'prob_PTYPE_icep', 
+        make_layers(data, _grid) {
+            // Get the colormaps and set them to constants
+            const crain_cmap = COLORMAPS['ptype_rain_probability'];
+            const csnow_cmap = COLORMAPS['ptype_snow_probability'];
+            //const cicep_cmap = COLORMAPS['ptype_icep_probability'];
+            const cfrzr_cmap = COLORMAPS['ptype_frzr_probability'];
+
+            //console.log("Our Data:", Math.max(...data.prob_qpf_gt0p01in_rain.data), Math.max(...data.prob_qpf_gt0p01in_snow.data), Math.max(...data.prob_qpf_gt0p01in_sleet.data), Math.max(...data.prob_qpf_gt0p01in_freezing_rain.data));
+            // Make the colorbars
+            const svg_crain = apgl.makeColorBar(crain_cmap, {label: "Probability of Rain", size_long: 320, size_short: 67, 
+                                                     fontface: 'Trebuchet MS', 
+                                                     ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                                                     orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_csnow = apgl.makeColorBar(csnow_cmap, {label: "Probability of Snow", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            //const svg_cicep = apgl.makeColorBar(cicep_cmap, {label: "Probability of Ice Pellets", size_long: 320, size_short: 67,     
+            //                                                fontface: 'Trebuchet MS', 
+            //                                                ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+            //                                                orientation: 'horizontal', tick_direction: 'bottom'});
+
+            const svg_cfrzr = apgl.makeColorBar(cfrzr_cmap, {label: "Probability of Freezing Rain", size_long: 320, size_short: 67, 
+                                                            fontface: 'Trebuchet MS', 
+                                                            ticks: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+                                                            orientation: 'horizontal', tick_direction: 'bottom'});
+
+            
+            // Create the raster layer for the dominant precipitation type and reflectivity
+            const prob_rain = new apgl.Raster(data.prob_PTYPE_rain, {cmap: crain_cmap, alpha: 0.5, });
+            const prob_snow = new apgl.Raster(data.prob_PTYPE_snow, {cmap: csnow_cmap, alpha: 0.5, });
+            const prob_fzra = new apgl.Raster(data.prob_PTYPE_fzra, {cmap: cfrzr_cmap, alpha: 0.5, });
+            //const prob_icep = new apgl.Raster(data.prob_qpf_gt0p01in_sleet, {cmap: cicep_cmap, alpha: 0.5, });
+            const prob_frzr = new apgl.Raster(data.prob_PTYPE_frzr, {cmap: cfrzr_cmap, alpha: 0.5, });
+
+            const pr_rain_layer = new apgl.PlotLayer('prob_rain', prob_rain);
+            const pr_snow_layer = new apgl.PlotLayer('prob_snow', prob_snow);
+            //const pr_icep_layer = new apgl.PlotLayer('prob_icep', prob_icep);
+            const pr_frzr_layer = new apgl.PlotLayer('prob_frzr', prob_frzr);
+
+            return { layers: [pr_snow_layer, pr_frzr_layer, pr_rain_layer], colorbar: [svg_crain, svg_csnow, svg_cfrzr], sampler: null };
+        },
     }
 };
