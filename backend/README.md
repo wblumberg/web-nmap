@@ -92,10 +92,10 @@ Here's some information on the structure of the Web-NMAP backend:
 |   |-- ingest_1min.sh*                     <-- Run ingest on data that has 1-min update intervals
 |   |-- ingest_20min.sh*                    <-- Run ingest on data that has approximately 20-min update intervals
 |   |-- ingest_5min.sh*                     <-- Run ingest on data that has approximately 5-min update intervals
-|   |-- ingest_atcf.py                      <-- DEPRECIATED script to download the a-decks from the ATCF.
+|   |-- ingest_atcf.py                      <-- |DEPRECIATED| script to download the a-decks from the ATCF.
 |   |-- lightning_ingest.py                 <-- Ingest the lightning strikes from NLDN into TimescaleDB
 |   |-- lsr_ingest.py                       <-- Ingest the local storm reports into TimescaleDB
-|   |-- rechunk_forecast_zarr.py            <-- DEPRECIATED (old script to rechunk forecast grid zarrs.)
+|   |-- rechunk_forecast_zarr.py            <-- |DEPRECIATED| (old script to rechunk forecast grid zarrs.)
 |   |-- recon_ingest.py                     <-- Ingest the NHC Aircraft Reconnaisssance High Frequency Observations into TimescaleDB
 |   |-- synoptic_ingest.py                  <-- Ingest observations from the SynopticAPI into the TimescaleDB
 |   |-- vad_ingest.py                       <-- Parses NEXRAD VAD Vertical Wind Profiles.
