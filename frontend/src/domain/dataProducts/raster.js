@@ -35,7 +35,7 @@ export default {
     },
 
 
-    'goes_conus_vis': {
+    'goese_conus_vis': {
         label: 'Ch 02: Visible [0.64 µm]',
         title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  {source}  GOES-East CONUS Visible [0.64 µm]',
         group: 'goes_conus',
@@ -64,7 +64,7 @@ export default {
         },
     },
 
-    'goes_conus_wv': {
+    'goese_conus_wv': {
         label: 'Ch 08: Upper-Level WV [6.2 µm]',
         title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  GOES-East CONUS Upper-Level Water Vapor [6.2 µm]',
         group: 'goes_conus',
@@ -81,7 +81,7 @@ export default {
         },
     },
 
-    'goes_conus_ir': {
+    'goese_conus_ir': {
         label: 'Ch 13: Clean IR [10.7 µm]',
         title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  GOES-East CONUS Clean IR [10.7 µm]',
         group: 'goes_conus',
@@ -102,6 +102,76 @@ export default {
             };
         },
     },
+
+
+    'goesw_conus_vis': {
+        label: 'Ch 02: Visible [0.64 µm]',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  {source}  GOES-West CONUS Visible [0.64 µm]',
+        group: 'goes_conus',
+        available_for: ['GOES-W_CONUS_C02'],
+        data_keys: ['CMI'],
+        make_layers(data, grid) {
+            const field = data.CMI;
+
+            // CMI is uint16 (0–65535). Matplotlib shows clouds at low values and
+            // ground at high values, so map low → white and high → dark (linear).
+            const N = 257;  // 257 levels → 256 color bins
+            const levels = Array.from({ length: N }, (_, i) =>
+                Math.round(i * (65535) / (N - 1))
+            );
+            const colors = Array.from({ length: N - 1 }, (_, i) => {
+                const gray = Math.round((1 - i / (N - 2)) * 255);  // white→black
+                const hex = gray.toString(16).padStart(2, '0');
+                return `#${hex}${hex}${hex}`;
+            });
+            const cmaps = new apgl.ColorMap(levels, colors.slice().reverse());
+            const raster = new apgl.Raster(field, { cmap: cmaps });
+            return {
+                layers: [new apgl.PlotLayer('goes_conus_vis', raster)],
+                colorbar: []
+            };
+        },
+    },
+
+    'goesw_conus_wv': {
+        label: 'Ch 08: Upper-Level WV [6.2 µm]',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  GOES-West CONUS Upper-Level Water Vapor [6.2 µm]',
+        group: 'goes_conus',
+        available_for: ['GOES-W_CONUS_C08'],
+        data_keys: ['CMI'],
+        make_layers(data, grid) {
+            const field = data.CMI;
+            const cmaps = COLORMAPS['wv_tpc'];
+            const raster = new apgl.Raster(field, { cmap: cmaps });
+            return {
+                layers: [new apgl.PlotLayer('goes_conus_wv', raster)],
+                colorbar: []
+            };
+        },
+    },
+
+    'goesw_conus_ir': {
+        label: 'Ch 13: Clean IR [10.7 µm]',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  GOES-West CONUS Clean IR [10.7 µm]',
+        group: 'goes_conus',
+        available_for: ['GOES-W_CONUS_C13'],
+        data_keys: ['CMI'],
+        make_layers(data, grid) {
+            const field = data.CMI.subtract(273.15).renderCPU();  // convert K → °C for more intuitive colormap
+            const cmaps = COLORMAPS['satellite_ir_winter'];
+            const raster = new apgl.Raster(field, { cmap: cmaps });
+            const svg = apgl.makeColorBar(cmaps, {
+                label: 'Brightness Temperature (°C)',
+                orientation: 'horizontal', tick_direction: 'bottom',
+                fontface: 'Trebuchet MS', ticks: [0,50],
+            });
+            return {
+                layers: [new apgl.PlotLayer('goes_conus_ir', raster)],
+                colorbar: [svg]
+            };
+        },
+    },
+
 
     'mrms_base_refl_qc': {
         label: 'MRMS Base Reflectivity QC',

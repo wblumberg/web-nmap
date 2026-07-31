@@ -31,9 +31,11 @@ from .types.db_source import AlertSource
 # Category modules
 from .imagery import MRMS_SOURCES, GOES_SOURCES
 from .observations import (
-    LIGHTNING_DB, AIRNOW_DB, SHIP_DB, SAO_DB, LSR_DB, RECON_DB, VAD_PROFILE_DB
+    LIGHTNING_DB, AIRNOW_DB, SHIP_DB, SAO_DB, LSR_DB, RECON_DB, ASCAT_DB,
+    VAD_PROFILE_DB
 )
 from .cyclones import ATCF_TRACKS_DB
+from .aviation import FAA_ASDI_DB
 from .nwp_forecasts import ECMWF_HR, HREF, NCEP_GEFS, NCEP_GFS, ECMWF_ENS, NCEP_RRFS, REFS, NSSL_GEFS, NSSL_WRF, HRRR, HRW_ARW, HRW_FV3, NAM_NEST, NSSL_MPAS_RN
 from .gridded_analyses import MESO_SOURCE
 
@@ -46,19 +48,19 @@ SOURCES: dict[str, DataSource] = {
     **MRMS_SOURCES,
 
     # Gridded forecasts / models
-    "NCEP_RRFS": NCEP_RRFS,
+    #"NCEP_RRFS": NCEP_RRFS,
     "ECMWF_HR": ECMWF_HR,
-    "NCEP_GFS": NCEP_GFS,
+    #"NCEP_GFS": NCEP_GFS,
     "NSSL_WRF": NSSL_WRF,
     "HRRR": HRRR,
     "HRW_ARW": HRW_ARW,
     "HRW_FV3": HRW_FV3,
     "NAM_NEST": NAM_NEST,
-    "NSSL_MPAS_RN": NSSL_MPAS_RN,
+    #"NSSL_MPAS_RN": NSSL_MPAS_RN,
 
     "HREF": HREF,
-    "REFS": REFS,
-    "NCEP_GEFS": NCEP_GEFS,
+    #"REFS": REFS,
+    #"NCEP_GEFS": NCEP_GEFS,
     "ECMWF_ENS": ECMWF_ENS,
     "NSSL_GEFS": NSSL_GEFS,
 
@@ -72,8 +74,10 @@ SOURCES: dict[str, DataSource] = {
     "SHIP"     : SHIP_DB,
     "SAO"      : SAO_DB,
     "RECON"    : RECON_DB,
+    "ASCAT"    : ASCAT_DB,
     "VAD_PROFILE": VAD_PROFILE_DB,
     "ATCF_TRACKS": ATCF_TRACKS_DB,
+    "FAA_ASDI"    : FAA_ASDI_DB,
     
     # DB-backed NWS alert sources (TimescaleDB `alerts` hypertable)
     # Filter by phenomenon at query time via ?phen=TO (or ?phen=tornado)
