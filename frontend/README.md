@@ -83,6 +83,7 @@ Below describes the `frontend` directory structure:
 |   |-- domain/                                                 <-- Core business logic (rules, models, data types for app)
 |   |   |-- dataProducts/                                       <-- Data product scripts using APGL (like NMAP restore files)
 |   |   |   |-- README.md                                       <-- README to help you understand how the dataProducts work.
+|   |   |   |-- aircraft.js                                     <-- Scripts to draw FAA aircraft tracks, positions, and labels.
 |   |   |   |-- alerts.js                                       <-- Scripts to draw advisiories/watches/warnings (NWS CAP geometries)
 |   |   |   |-- atcf.js                                         <-- Scripts to draw ATCF forecast tracks and points.
 |   |   |   |-- basic.js                                        <-- Scripts to draw basic maps (e.g., 850 mb, MSLP, etc.)
@@ -133,6 +134,7 @@ Below describes the `frontend` directory structure:
 |       |-- components/                                         <-- Empty.
 |       `-- panels/                                             <-- Code for individual panels that can be called up within the app.
 |           |-- dataSelector.js                                 <-- Logic for the Data Selector panel w/ data products & sources
+|           |-- datasetStatus.js                                <-- Displays backend dataset health and freshness status.
 |           |-- productGenView.js                               <-- Logic for the Product Generation panel.
 |           `-- productManager.js                               <-- Logic for the Map Builder panel (timeline, layering, src priority)
 |

@@ -66,11 +66,15 @@ Here's some information on the structure of the Web-NMAP backend:
 |   |   |-- 004_add_station_id.sql
 |   |   |-- 005_backfill_station_id.sql
 |   |   |-- 006_create_profiles.sql
-|   |   `-- 007_create_atcf_tracks.sql
+|   |   |-- 007_create_atcf_tracks.sql
+|   |   |-- 008_create_aircraft_positions.sql                  <-- Creates the FAA aircraft-position hypertable.
+|   |   |-- 009_index_aircraft_carrier.sql                     <-- Adds an index for filtering aircraft by carrier.
+|   |   `-- 010_aircraft_retention_24h.sql                     <-- Applies the aircraft-position retention policy.
 |   |-- README.md
 |   `-- Untitled.ipynb
 |
 |-- ingest/                                 <-- Scripts to help ingest Wx data to the TimescaleDB
+|   |-- README_faa_asdi.md                  <-- Setup and operation notes for the FAA ASDI ingest.
 |   |-- a-deck.example                      <-- Example A-Deck from ATCF to guide its ingest into the TimescaleDB
 |   |-- airnow_ingest.py                    <-- Ingest Hourly AirNow Observations
 |   |-- alerts/
@@ -81,7 +85,9 @@ Here's some information on the structure of the Web-NMAP backend:
 |   |   |-- ingest.py                       <-- Helpers to insert alert into TimescaleDB/PostGRES
 |   |   |-- run_ingest.py                   <-- Ingest current NWS Alerts (Advisory, Watch, Warnings) into TimescaleDB
 |   |   `-- weather_alerts.json             <-- Example alerts JSON response from NWS CAP Service
+|   |-- ascat_ingest.py                     <-- Downloads and ingests ASCAT-B/C ocean wind-vector cells.
 |   |-- atcf_db_ingest.py                   <-- Ingest the ATCF A-Deck Tracks for different cyclones
+|   |-- faa_asdi_ingest.py                  <-- Streams FAA SWIM/ASDI aircraft positions into TimescaleDB.
 |   |-- gempak_sfc_ingest.py                <-- Ingest the GEMPAK Surface files that have been decoded (SAO/SHIP/METAR)
 |   |-- ingest_1min.sh*                     <-- Run ingest on data that has 1-min update intervals
 |   |-- ingest_20min.sh*                    <-- Run ingest on data that has approximately 20-min update intervals
@@ -92,7 +98,8 @@ Here's some information on the structure of the Web-NMAP backend:
 |   |-- rechunk_forecast_zarr.py            <-- DEPRECIATED (old script to rechunk forecast grid zarrs.)
 |   |-- recon_ingest.py                     <-- Ingest the NHC Aircraft Reconnaisssance High Frequency Observations into TimescaleDB
 |   |-- synoptic_ingest.py                  <-- Ingest observations from the SynopticAPI into the TimescaleDB
-|   `-- vad_ingest.py                       <-- Ingest the NEXRAD VAD Vertical Wind Profiles into the TimescaleDB
+|   |-- vad_ingest.py                       <-- Parses NEXRAD VAD Vertical Wind Profiles.
+|   `-- vad_profiles_db_ingest.py           <-- Inserts parsed VAD profiles into TimescaleDB.
 |
 |-- __init__.py
 |-- main.py                                 <-- Setup FastAPI service.
@@ -125,14 +132,18 @@ Here's some information on the structure of the Web-NMAP backend:
 |
 |-- services/
 |   |-- __init__.py
+|   |-- aircraft_sql.py                     <-- Queries rolling FAA ASDI aircraft tracks.
 |   |-- alerts_sql.py                       <-- Queries TimescaleDB for Alerts (Advisories/Watch/Warnings and filters them)
 |   |-- atcf_sql.py                         <-- Queries TimescaleDB ATCF for a LineString per storm/model/cycle or PointFeatures at a fhr
+|   |-- catalog_inventory.py                <-- Caches and coalesces source inventory scans.
+|   |-- dataset_status.py                   <-- Performs cached health and freshness checks for registered datasets.
 |   |-- grid_cache.py                       <-- Caches grid requests to avoid rereading Zarr data or reserializing ProtoBufs
 |   |-- points_sql.py                       <-- Queries TimescaleDB for Point data.  Spatial filtering done by PostGIS.
 |   |-- profiles_sql.py                     <-- Queries TimescaleDB for Profile data.
 |
 |-- sources/                                <-- Describes the DataSources available to be served by the API.
 |   |-- __init__.py
+|   |-- aviation.py                         <-- Instantiates FAA aircraft-track data sources.
 |   |-- cyclones.py                         <-- Instantiates the ATCF Database source.
 |   |-- gridded_analyses.py                 <-- Instantiates Gridded Analysis sources (e.g., the mesoanalysis)
 |   |-- imagery.py                          <-- Instantiates Imagery data sources (e.g., GOES imagery, MRMS)
@@ -145,6 +156,12 @@ Here's some information on the structure of the Web-NMAP backend:
 |       |-- db_source.py                    <-- Classes for TimescaleDB Data Sources (e.g., Point, Generic, Profile, Alert, etc.)
 |       |-- filesystem.py                   <-- Classes for FileSystem-based Data Sources
 |       `-- raster_source.py                <-- Classes for Raster-like Data Sources (e.g., GOES-E/CONUS)
+|
+|-- tests/                                  <-- Unit tests for ingestion, catalog caching, and dataset status.
+|   |-- test_ascat_ingest.py
+|   |-- test_catalog_inventory.py
+|   |-- test_dataset_status.py
+|   `-- test_faa_asdi_ingest.py
 |
 |-- utils/                                  <-- Utilities for the API
 |   |-- human_regex.py                      <-- Helpers for converting human-readable to regex mapping for date/times
