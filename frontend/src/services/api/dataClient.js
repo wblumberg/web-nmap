@@ -827,7 +827,11 @@ export async function fetchGeometryFeatures(sourceId, key, opts = {}) {
 
     const resp = await fetch(url.toString());
     if (!resp.ok) {
-        throw new Error(`fetchGeometryFeatures(${sourceId}, key=${key}) failed: HTTP ${resp.status}`);
+        const detail = await resp.text().catch(() => '');
+        throw new Error(
+            `fetchGeometryFeatures(${sourceId}, key=${key}) failed: HTTP ${resp.status}` +
+            (detail ? ` — ${detail.slice(0, 500)}` : '')
+        );
     }
     return resp.json();
 }

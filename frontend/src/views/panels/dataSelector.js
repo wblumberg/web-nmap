@@ -61,13 +61,14 @@ export const DataSelector = (() => {
         RADAR_NEXRAD: 'NEXRAD (Single Site)',
         OBS_UPPERAIR: 'Upper Air Observations',
         OBS_SURFACE:  'Surface Observations',
+        AVIATION:     'Aviation',
         MISC:         'Miscellaneous',
     };
 
     const CAT_ORDER = [
         'MODEL_DET','MODEL_ENS','ANALYSIS',
         'SATELLITE','RADAR_MOSAIC','RADAR_NEXRAD',
-        'OBS_UPPERAIR','OBS_SURFACE','MISC',
+        'OBS_UPPERAIR','OBS_SURFACE','AVIATION','MISC',
     ];
 
     // Friendly display labels for multi-source groups that don't expose a label

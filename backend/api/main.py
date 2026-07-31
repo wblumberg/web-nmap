@@ -18,7 +18,8 @@ from .services.dataset_status import status_refresh_loop
 _observer = None
 _TRACKED_QUERY_PARAMS = (
     "center", "window_minutes", "level", "bbox", "cycle", "fhr",
-    "storm_id", "basin", "model",
+    "storm_id", "basin", "model", "airports", "carriers", "operation",
+    "max_implied_speed_kt", "max_gap_minutes",
 )
 
 

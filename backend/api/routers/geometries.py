@@ -28,7 +28,9 @@ from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
 
 from ..sources.registry import get_source
-from ..sources.types.db_source import AlertSource, CycloneTrackDBSource
+from ..sources.types.db_source import (
+    AlertSource, AircraftTrackDBSource, CycloneTrackDBSource,
+)
 from ..readers import get_reader
 from ..utils.time_helper import _parse_key_to_dt
 from ..services.alerts_sql import (
@@ -36,6 +38,8 @@ from ..services.alerts_sql import (
     query_alerts_geojson, query_alerts_geojson_unioned, resolve_phen,
 )
 from ..services.atcf_sql import query_atcf_tracks_geojson
+from ..services.aircraft_sql import query_aircraft_tracks_geojson
+from ..services.aircraft_sql import MAJOR_CARRIER_CODES
 
 router = APIRouter(tags=["Geometry Data"])
 
@@ -86,6 +90,20 @@ async def get_geometry_features(
     simplify_deg : Optional[float] = Query(None, ge=0.0001, le=1.0,
                                   description="Simplify polygon vertices to this tolerance "
                                               "in degrees. Reduces payload size for small screens."),
+    window_minutes: int = Query(30, ge=1, le=180,
+                                  description="Trailing window for aircraft tracks."),
+    airports      : Optional[str] = Query(None,
+                                  description="Comma-separated ICAO/IATA airport identifiers."),
+    carriers      : Optional[str] = Query(None,
+                                  description="Comma-separated ICAO carrier codes, or 'major'."),
+    operation     : str = Query("both",
+                                  description="Aircraft filter: arrival, departure, or both."),
+    max_positions : int = Query(250_000, ge=1_000, le=500_000,
+                                  description="Maximum aircraft positions considered."),
+    max_implied_speed_kt: float = Query(750.0, ge=100, le=2000,
+                                  description="Split aircraft tracks above this implied speed."),
+    max_gap_minutes: int = Query(10, ge=1, le=60,
+                                  description="Split aircraft tracks across larger time gaps."),
 ):
     """
     Return a GeoJSON FeatureCollection of polygon/polyline geometries.
@@ -141,6 +159,68 @@ async def get_geometry_features(
                 _simplify_feature(f, simplify_deg) for f in fc["features"]
             ]
         print(fc)
+        return JSONResponse(fc)
+
+    # ── DB-backed FAA aircraft tracks ────────────────────────────────────
+    if isinstance(source, AircraftTrackDBSource):
+        parsed_bbox = _parse_bbox(bbox)
+        if at is not None:
+            end_dt = _parse_key_to_dt(at)
+        elif key is not None:
+            end_dt = _parse_key_to_dt(key)
+        else:
+            latest = await source.most_recent()
+            end_dt = latest.valid_time if latest else None
+        if end_dt is None:
+            raise HTTPException(404, f"No track data for '{source_id}'")
+
+        airport_list = None
+        if airports:
+            airport_list = []
+            for airport in airports.split(","):
+                normalized = airport.strip().upper()
+                if not normalized:
+                    continue
+                if not (3 <= len(normalized) <= 4 and normalized.isalnum()):
+                    raise HTTPException(
+                        422, f"Invalid airport identifier {airport!r}"
+                    )
+                airport_list.append(normalized)
+            airport_list = list(dict.fromkeys(airport_list))
+
+        carrier_list = None
+        if carriers:
+            if carriers.strip().lower() == "major":
+                carrier_list = sorted(MAJOR_CARRIER_CODES)
+            else:
+                carrier_list = []
+                for carrier in carriers.split(","):
+                    normalized = carrier.strip().upper()
+                    if not normalized:
+                        continue
+                    if len(normalized) != 3 or not normalized.isalnum():
+                        raise HTTPException(
+                            422, f"Invalid ICAO carrier code {carrier!r}"
+                        )
+                    carrier_list.append(normalized)
+                carrier_list = list(dict.fromkeys(carrier_list))
+
+        try:
+            fc = await query_aircraft_tracks_geojson(
+                end=end_dt,
+                window_minutes=window_minutes,
+                airports=airport_list,
+                carriers=carrier_list,
+                operation=operation,
+                bbox=parsed_bbox,
+                max_positions=max_positions,
+                max_implied_speed_kt=max_implied_speed_kt,
+                max_gap_minutes=max_gap_minutes,
+            )
+        except ValueError as error:
+            raise HTTPException(422, str(error))
+        except Exception as error:
+            raise HTTPException(500, f"DB query error: {error}")
         return JSONResponse(fc)
 
     # ── DB-backed ATCF track sources ─────────────────────────────────────

@@ -17,6 +17,7 @@ import overlays      from './overlays.js';
 import alerts        from './alerts.js';
 import vad           from './vad.js';
 import atcf          from './atcf.js';
+import aircraft      from './aircraft.js';
 
 // Merge all groups into a single flat registry.
 // Duplicate IDs across files will throw at import time (good — fail loudly).
@@ -37,6 +38,7 @@ export const PRODUCT_SUITES = {
     ...alerts,
     ...vad,
     ...atcf,
+    ...aircraft,
 };
 
 // Define the order of product groups for display in the UI.
@@ -84,4 +86,3 @@ export function getAvailableDatasets() {
 }
 
 export default PRODUCT_SUITES;
-

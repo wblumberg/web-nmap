@@ -1007,6 +1007,9 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
     if (progressive.sampler) _activeSampler = progressive.sampler;
     onFirstFrame?.();
     let loaded = 1;
+    let lastNonEmptyData = _geometryDataHasFeatures(firstResult.data)
+        ? firstResult.data
+        : null;
     onProgress?.(loaded, totalFrames);
 
     // Fetch remaining frames in small parallel batches.
@@ -1021,6 +1024,7 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
         for (const { frameKey, data } of results) {
             if (data) {
                 progressive.addFrame(frameKey, data);
+                if (_geometryDataHasFeatures(data)) lastNonEmptyData = data;
                 loaded++;
             }
         }
@@ -1035,7 +1039,15 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
         controller: progressive.controller, isPointObs: false, isGeometry: true, isForecast: false, dataKeys: slugs,
         productSuite, cycleTime: null,
         queryParams,
+        lastNonEmptyData,
     });
+}
+
+function _geometryDataHasFeatures(data) {
+    if (!data || typeof data !== 'object') return false;
+    return Object.values(data).some(value =>
+        Array.isArray(value?.features) && value.features.length > 0
+    );
 }
 
 
@@ -2028,12 +2040,35 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
                         }
                         data[slug] = await DataClient.fetchGeometryFeatures(secState.srcId, key, fetchOpts);
                     }));
-                    secState.addFrame(key, data);
+                    if (_geometryDataHasFeatures(data)) {
+                        secState.lastNonEmptyData = data;
+                        secState.addFrame(key, data);
+                    } else if (
+                        secState.srcId === 'FAA_ASDI' &&
+                        secState.lastNonEmptyData
+                    ) {
+                        console.warn(
+                            `[NMAP] FAA_ASDI returned no tracks for ${key}; ` +
+                            'carrying forward the last valid frame'
+                        );
+                        secState.addFrame(key, secState.lastNonEmptyData);
+                    } else {
+                        secState.addFrame(key, data);
+                    }
                 } catch (err) {
                     console.warn(
                         `[NMAP] Auto-update: failed to fetch geometry ${secState.srcId} key=${key}:`,
                         err.message
                     );
+                    if (
+                        secState.srcId === 'FAA_ASDI' &&
+                        secState.lastNonEmptyData
+                    ) {
+                        console.warn(
+                            `[NMAP] Carrying forward the last FAA_ASDI frame for ${key}`
+                        );
+                        secState.addFrame(key, secState.lastNonEmptyData);
+                    }
                 }
                 continue;
             }
