@@ -18,6 +18,7 @@ from backend.api.db.engine import get_engine
 
 def parse_valid_time(vt: str) -> datetime:
     # expected format: 'YYYY-mm-dd HH:MM:SS+00'
+    """Parse valid time."""
     try:
         return datetime.strptime(vt, "%Y-%m-%d %H:%M:%S+00").replace(tzinfo=timezone.utc)
     except Exception:
@@ -29,6 +30,7 @@ def parse_valid_time(vt: str) -> datetime:
 
 
 async def ingest_features(features: List[dict], source_id: str = 'LSR'):
+    """Ingest features."""
     rows = []
     for feat in features:
         props = feat.get('properties', {}) or {}
@@ -105,6 +107,7 @@ async def ingest_features(features: List[dict], source_id: str = 'LSR'):
 
 def main_from_geojson(geojson: dict, dry_run: bool = False):
     # This function is synchronous wrapper that calls async ingest
+    """Run LSR ingestion for an in-memory GeoJSON document."""
     features = geojson.get('features', [])
     return asyncio.run(ingest_features(features))
 

@@ -13,6 +13,7 @@ from backend.api.db.engine import get_engine
 
 
 async def ingest_station_rows(station_rows, source_id: str = 'SYNOPTIC'):
+    """Ingest station rows."""
     rows = []
     for station in station_rows:
         try:
@@ -91,6 +92,7 @@ async def ingest_station_rows(station_rows, source_id: str = 'SYNOPTIC'):
 
 
 def main_from_rows(rows):
+    """Run synoptic ingestion for normalized station rows."""
     return asyncio.run(ingest_station_rows(rows))
 
 

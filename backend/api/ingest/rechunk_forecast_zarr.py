@@ -447,6 +447,7 @@ def _worker(args):
 
 
 def main():
+    """Run the command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Rechunk forecast zarr stores to chunk_t=1 for the zarr_proxy fast path.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

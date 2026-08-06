@@ -1,3 +1,5 @@
+"""Download ATCF forecast aids and hand them to the database ingester."""
+
 import os
 import gzip
 import shutil
@@ -90,6 +92,7 @@ def _parse_gz_atcf_points(src_path, source_id):
 
 
 def ensure_dir(path):
+    """Ensure dir."""
     os.makedirs(path, exist_ok=True)
 
 
@@ -99,6 +102,7 @@ def main(
     persist_files=False,
     dry_run=False,
 ):
+    """Run the command-line entry point."""
     ensure_dir(DOWNLOAD_DIR)
     if persist_files:
         ensure_dir(OUTPUT_DIR)
@@ -158,6 +162,7 @@ def main(
 
 
 def _build_parser():
+    """Build parser."""
     p = argparse.ArgumentParser(
         description="Download ATCF A-deck files and ingest directly to atcf_tracks"
     )

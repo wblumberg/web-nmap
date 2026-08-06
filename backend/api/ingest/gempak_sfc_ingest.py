@@ -266,6 +266,7 @@ async def ingest_directory(
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build parser."""
     p = argparse.ArgumentParser(
         prog="gempak_sfc_ingest.py",
         description=__doc__,
@@ -308,6 +309,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Run the command-line entry point."""
     parser = _build_parser()
     args   = parser.parse_args()
 
@@ -325,6 +327,7 @@ def main() -> None:
     if args.files:
         # Explicit file list
         async def run_files():
+            """Run files."""
             total_ins = total_skip = 0
             for path in args.files:
                 ins, skip = await ingest_file(

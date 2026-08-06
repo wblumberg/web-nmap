@@ -24,10 +24,12 @@ PATH2DATA = "https://files.airnowtech.org/airnow/{year}/{ymd}/HourlyAQObs_{ymdh}
 
 
 def make_url(dt):
+    """Construct url."""
     return PATH2DATA.format(year=dt.strftime("%Y"), ymd=dt.strftime("%Y%m%d"), ymdh=dt.strftime("%Y%m%d%H"))
 
 
 def fetch_hour_data(dt, session, timeout=30):
+    """Fetch hour data."""
     url = make_url(dt)
     resp = session.get(url, timeout=timeout, stream=True)
     try:
@@ -39,6 +41,7 @@ def fetch_hour_data(dt, session, timeout=30):
 
 async def ingest_text_to_db(csv_text, source_id: str = "AIRNOW"):
     # parse CSV
+    """Ingest text to db."""
     df = pd.read_csv(io.StringIO(csv_text))
     if df.empty:
         return 0, 0
@@ -165,6 +168,7 @@ async def ingest_hours(start_dt: datetime, hours: int, verbose: bool = False,
 
 
 def main():
+    """Run the command-line entry point."""
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--hours", "-n", type=int, default=1)

@@ -48,6 +48,7 @@ BATCH_SIZE = 2000
 
 @dataclass(frozen=True)
 class AtcfPoint:
+    """Represent atcf point."""
     source_id: str
     basin: str
     storm_id: str
@@ -65,6 +66,7 @@ class AtcfPoint:
 
 
 def _to_int(value: str | None) -> int | None:
+    """Convert the input to int."""
     if value is None:
         return None
     s = value.strip()
@@ -77,6 +79,7 @@ def _to_int(value: str | None) -> int | None:
 
 
 def _parse_cycle(value: str) -> datetime | None:
+    """Parse cycle."""
     s = value.strip()
     if len(s) != 10 or not s.isdigit():
         return None
@@ -87,6 +90,7 @@ def _parse_cycle(value: str) -> datetime | None:
 
 
 def _parse_latlon(token: str) -> float | None:
+    """Parse latlon."""
     s = token.strip().upper()
     if len(s) < 2:
         return None
@@ -109,6 +113,7 @@ def _parse_latlon(token: str) -> float | None:
 
 def _parse_line(line: str, source_id: str) -> AtcfPoint | None:
     # Keep raw comma tokenization because optional trailing fields are common.
+    """Parse line."""
     cols = [c.strip() for c in line.split(",")]
     if len(cols) < 8:
         return None
@@ -155,6 +160,7 @@ def _parse_line(line: str, source_id: str) -> AtcfPoint | None:
 
 
 def _iter_files(input_dir: Path, glob_pattern: str, explicit_files: list[Path]) -> list[Path]:
+    """Iterate over files."""
     files = []
     for p in explicit_files:
         if p.exists() and p.is_file():
@@ -175,6 +181,7 @@ def _iter_files(input_dir: Path, glob_pattern: str, explicit_files: list[Path]) 
 
 
 def _parse_files(files: Iterable[Path], source_id: str) -> tuple[list[AtcfPoint], int]:
+    """Parse files."""
     points: list[AtcfPoint] = []
     bad_lines = 0
 
@@ -194,6 +201,7 @@ def _parse_files(files: Iterable[Path], source_id: str) -> tuple[list[AtcfPoint]
 
 
 async def _ingest_points(points: list[AtcfPoint], dry_run: bool) -> tuple[int, int]:
+    """Ingest points."""
     if not points:
         return 0, 0
 
@@ -287,6 +295,7 @@ async def _ingest_points(points: list[AtcfPoint], dry_run: bool) -> tuple[int, i
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build parser."""
     p = argparse.ArgumentParser(description="Ingest ATCF A-deck .dat files into atcf_tracks")
     p.add_argument("--input-dir", type=Path, default=DEFAULT_INPUT_DIR)
     p.add_argument("--glob", default=DEFAULT_GLOB, help="Glob within --input-dir (default: %(default)s)")
@@ -298,6 +307,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    """Run ATCF parsing and ingestion with parsed CLI arguments."""
     files = _iter_files(args.input_dir, args.glob, args.input_file)
     if args.max_files and args.max_files > 0:
         files = files[:args.max_files]
@@ -320,6 +330,7 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def main() -> None:
+    """Run the command-line entry point."""
     args = _build_parser().parse_args()
     raise SystemExit(asyncio.run(_run(args)))
 

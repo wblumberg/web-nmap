@@ -143,6 +143,7 @@ def _obs_to_row(o: HDOBObservation) -> tuple | None:
 # ── Deduplication ──────────────────────────────────────────────────────────────
 
 async def _existing_keys(conn, t_min: datetime, t_max: datetime) -> set:
+    """Return existing reconnaissance row keys from the database."""
     res = await conn.execute(
         text(
             "SELECT ST_X(geom) AS lon, ST_Y(geom) AS lat, valid_time "
@@ -166,6 +167,7 @@ async def _existing_keys(conn, t_min: datetime, t_max: datetime) -> set:
 
 
 def _row_key(row: tuple) -> tuple:
+    """Build the stable identity key for a reconnaissance row."""
     _, valid_time, lon, lat, *_ = row
     vt = valid_time
     if hasattr(vt, "astimezone"):
@@ -298,6 +300,7 @@ def fetch_and_parse(
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build parser."""
     p = argparse.ArgumentParser(
         prog="recon_ingest.py",
         description=__doc__,
@@ -363,6 +366,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    """Run the command-line entry point."""
     args = _build_parser().parse_args(argv)
 
     logging.basicConfig(

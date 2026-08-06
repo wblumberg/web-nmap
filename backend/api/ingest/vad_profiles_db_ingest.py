@@ -40,6 +40,7 @@ def _utc(value: datetime) -> datetime:
 
 
 def _validate_row(row: ProfileRow) -> ProfileRow:
+    """Validate row."""
     if not row.source_id:
         raise ValueError("ProfileRow.source_id must not be empty")
     if not -90.0 <= float(row.lat) <= 90.0:

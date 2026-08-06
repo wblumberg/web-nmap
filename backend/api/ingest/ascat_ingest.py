@@ -43,18 +43,35 @@ DEFAULT_FTP_HOST = "ftppro.knmi.nl"
 DEFAULT_FTP_DIRECTORIES = ("netcdf/ascat_b/", "netcdf/ascat_c/")
 DEFAULT_STATE_PATH = Path("ascat_ftp_state.json")
 
+# CF flag meanings vary slightly between scatterometer products.  Match the
+# stable semantic parts instead of baking one vendor's numeric bit layout into
+# the importer.  Rain-contaminated winds are intentionally retained for now;
+# they remain identifiable through qc_flag and can become a display option.
+_REJECTED_QUALITY_MEANING_PARTS = (
+    "land",
+    "ice",
+    "invalid",
+    "no_wind",
+    "no-wind",
+    "missing",
+    "unusable",
+)
+
 
 def _open_dataset(path: Path) -> xr.Dataset:
+    """Open an ASCAT dataset from a local path."""
     return _open_dataset_bytes(path.read_bytes(), path.name)
 
 
 def _open_dataset_bytes(data: bytes, name: str) -> xr.Dataset:
+    """Open an ASCAT NetCDF dataset from raw or gzip-compressed bytes."""
     if name.lower().endswith(".gz"):
         data = gzip.decompress(data)
     return xr.open_dataset(io.BytesIO(data))
 
 
 def _ftp_connect(host: str, username: str, password: str, use_tls: bool) -> FTP:
+    """Open and authenticate an FTP or FTP-TLS connection."""
     ftp_class = FTP_TLS if use_tls else FTP
     ftp = ftp_class(timeout=60)
     ftp.connect(host)
@@ -66,6 +83,7 @@ def _ftp_connect(host: str, username: str, password: str, use_tls: bool) -> FTP:
 
 
 def _remote_mtime(ftp: FTP, filename: str) -> datetime:
+    """Read a remote file modification time from the FTP server."""
     response = ftp.sendcmd(f"MDTM {filename}")
     stamp = response.split()[-1]
     return datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
@@ -101,6 +119,7 @@ def _list_remote_files(ftp: FTP, directory: str) -> list[tuple[str, datetime]]:
 
 
 def _download_remote(ftp: FTP, directory: str, filename: str) -> bytes:
+    """Download one remote FTP file into memory."""
     current = ftp.pwd()
     buffer = io.BytesIO()
     try:
@@ -112,6 +131,7 @@ def _download_remote(ftp: FTP, directory: str, filename: str) -> bytes:
 
 
 def _load_state(path: Path) -> dict[str, str]:
+    """Load state."""
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
@@ -120,6 +140,7 @@ def _load_state(path: Path) -> dict[str, str]:
 
 
 def _save_state(path: Path, state: dict[str, str]) -> None:
+    """Persist state."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(
@@ -130,6 +151,7 @@ def _save_state(path: Path, state: dict[str, str]) -> None:
 
 
 def _platform(ds: xr.Dataset) -> str:
+    """Resolve the ASCAT platform name from dataset metadata."""
     title = str(ds.attrs.get("title_short_name", "")).strip()
     if title in _TITLE_TO_PLATFORM:
         return _TITLE_TO_PLATFORM[title]
@@ -150,12 +172,46 @@ def _platform(ds: xr.Dataset) -> str:
 
 
 def _speed_to_knots(values: np.ndarray, units: str) -> np.ndarray:
+    """Convert wind-speed values to knots using declared units."""
     normalized = units.lower().replace(" ", "")
     if normalized in {"m/s", "ms-1", "m*s-1", "metersecond-1", "meterssecond-1"}:
         return values * 1.9438444924406
     if normalized in {"kt", "kts", "knot", "knots"}:
         return values
     raise ValueError(f"Unsupported wind_speed units {units!r}; refusing to guess")
+
+
+def _quality_reject_mask(quality: xr.DataArray) -> int:
+    """Return the product-declared bit mask for unusable ocean winds.
+
+    KNMI NetCDF variables follow the CF ``flag_masks``/``flag_meanings``
+    convention.  Reading those attributes keeps this ingest independent of a
+    particular ASCAT resolution or future scatterometer bit assignment.
+    Unknown flags are preserved rather than silently discarding observations.
+    """
+    raw_masks = quality.attrs.get("flag_masks")
+    raw_meanings = quality.attrs.get("flag_meanings")
+    if raw_masks is None or raw_meanings is None:
+        return 0
+
+    meanings = str(raw_meanings).split()
+    try:
+        masks = np.asarray(raw_masks).reshape(-1)
+    except (TypeError, ValueError):
+        return 0
+    if len(masks) != len(meanings):
+        return 0
+
+    reject_mask = 0
+    for raw_mask, raw_meaning in zip(masks, meanings):
+        meaning = raw_meaning.lower()
+        if not any(part in meaning for part in _REJECTED_QUALITY_MEANING_PARTS):
+            continue
+        try:
+            reject_mask |= int(raw_mask)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return reject_mask
 
 
 def rows_from_dataset(ds: xr.Dataset, source_file: str) -> list[dict]:
@@ -178,7 +234,9 @@ def rows_from_dataset(ds: xr.Dataset, source_file: str) -> list[dict]:
         str(ds["wind_speed"].attrs.get("units", "")),
     )
     directions = np.asarray(ds["wind_dir"].values, dtype=float)
-    qc = np.asarray(ds["wvc_quality_flag"].values)
+    quality = ds["wvc_quality_flag"]
+    qc = np.asarray(quality.values)
+    quality_reject_mask = _quality_reject_mask(quality)
 
     try:
         times, lats, lons, speeds, directions, qc = np.broadcast_arrays(
@@ -212,6 +270,13 @@ def rows_from_dataset(ds: xr.Dataset, source_file: str) -> list[dict]:
         except (TypeError, ValueError, OverflowError):
             pass
 
+        if (
+            quality_reject_mask
+            and qc_value is not None
+            and qc_value & quality_reject_mask
+        ):
+            continue
+
         valid_time = datetime.fromisoformat(
             np.datetime_as_string(when, unit="ms") + "+00:00"
         ).astimezone(timezone.utc)
@@ -240,6 +305,7 @@ def rows_from_dataset(ds: xr.Dataset, source_file: str) -> list[dict]:
 
 
 async def insert_rows(rows: list[dict], dry_run: bool = False) -> tuple[int, int]:
+    """Insert rows."""
     if not rows or dry_run:
         return (len(rows), 0)
 
@@ -282,6 +348,7 @@ async def insert_rows(rows: list[dict], dry_run: bool = False) -> tuple[int, int
 
 
 async def ingest_paths(paths: list[Path], dry_run: bool = False) -> tuple[int, int]:
+    """Ingest paths."""
     inserted = skipped = 0
     for path in paths:
         with _open_dataset(path) as ds:
@@ -361,6 +428,7 @@ async def ingest_ftp(
 
 
 def main() -> None:
+    """Run the command-line entry point."""
     parser = argparse.ArgumentParser(
         description="Download and ingest ASCAT-B/C winds into TimescaleDB"
     )

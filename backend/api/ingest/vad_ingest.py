@@ -1,3 +1,5 @@
+"""Parse NEXRAD VAD products and ingest normalized wind profiles."""
+
 import argparse
 from datetime import datetime, timezone
 import asyncio
@@ -16,6 +18,7 @@ from backend.api.ingest.vad_profiles_db_ingest import ProfileRow, _ingest_rows
 
 
 def parse_vad_output(file_content):
+    """Parse vad output."""
     lines = file_content.strip().split('\n')
     headers = re.split(r'\s{2,}', lines[1].strip())
     units = re.split(r'\s{2,}', lines[2].strip())
@@ -38,6 +41,7 @@ def parse_vad_output(file_content):
     return df
 
 def _normalize_prod_time(raw_time):
+    """Normalize prod time."""
     if raw_time is None:
         return None
     if isinstance(raw_time, datetime):
@@ -178,6 +182,7 @@ def get_vad_groups(vad_dir='/data/base/vads', lookback_minutes=5, files_per_stat
     return out
 
 def _build_dataset(vad_data, date):
+    """Build dataset."""
     variable_mapping = {
         'ALT_KM_MSL': ('altitude', 'km'),
         'U_MS': ('u_wind', 'm/s'),
@@ -239,6 +244,7 @@ def _build_dataset(vad_data, date):
 
 
 def _dataset_to_profile_rows(ds, source_id):
+    """Convert a VAD dataset into database profile rows."""
     rows = []
     valid_time = datetime.now(timezone.utc)
     if 'time_matching' in ds.attrs:
@@ -329,6 +335,7 @@ def main(
     lookback_minutes=5,
     files_per_station=2,
 ):
+    """Run the command-line entry point."""
     vad_groups = get_vad_groups(
         vad_dir,
         lookback_minutes=lookback_minutes,
