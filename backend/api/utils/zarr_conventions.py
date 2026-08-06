@@ -1,3 +1,5 @@
+"""Normalize Zarr metadata and dimensions used by backend readers."""
+
 # zarr_conventions.py
 import zarr
 from numcodecs import Blosc

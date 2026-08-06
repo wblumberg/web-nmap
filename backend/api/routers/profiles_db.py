@@ -19,6 +19,7 @@ router = APIRouter(tags=["DB Profiles"])
 
 
 def _parse_bbox(bbox_str: Optional[str]) -> Optional[tuple[float, float, float, float]]:
+    """Parse a comma-separated geographic bounding box."""
     if not bbox_str:
         return None
     try:
@@ -31,6 +32,7 @@ def _parse_bbox(bbox_str: Optional[str]) -> Optional[tuple[float, float, float, 
 
 
 def _to_iso(dt: datetime) -> str:
+    """Convert the input to iso."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

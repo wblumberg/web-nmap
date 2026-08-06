@@ -17,6 +17,7 @@ from ..db.engine import get_engine
 
 
 def _build_bbox_clause() -> str:
+    """Build bbox clause."""
     return (
         "AND ST_Intersects(geom, ST_MakeEnvelope(:xmin, :ymin, :xmax, :ymax, 4326))\n"
     )

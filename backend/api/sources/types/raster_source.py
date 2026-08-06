@@ -1,10 +1,7 @@
-"""
-sources/filesystem.py — Filesystem-based DataSource  (fixed)
+"""Raster-backed filesystem data-source implementation.
 
-Fix: save cycle_regex and fhr_regex as public instance attributes so that
-catalog.py (and any other code) can inspect them with src.cycle_regex and
-src.fhr_regex.  Previously only the *compiled* versions (_cycle_re, _fhr_re)
-were saved, so the raw strings were lost after __init__ returned.
+The source exposes cycle and forecast-hour expressions publicly so catalog
+inventory code can derive available raster times without reopening datasets.
 """
 
 import re
@@ -53,6 +50,7 @@ class RasterSource(DataSource):
         regions: list[str] | None = None,
         zarr_transport: bool = False,
     ):
+        """Initialize the instance."""
         self._source_id    = source_id_
         self._label        = label_
         self._data_dir     = Path(data_dir)
@@ -103,10 +101,12 @@ class RasterSource(DataSource):
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return self._label
 
     # ── Filename parsing ──────────────────────────────────────────────────────

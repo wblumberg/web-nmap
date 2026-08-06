@@ -96,6 +96,7 @@ class MatchedSource(BaseModel):
 
 
 class MatchResponse(BaseModel):
+    """Represent match response."""
     dominant_source_id : str
     dominant_key       : str
     dominant_time      : str   # ISO datetime

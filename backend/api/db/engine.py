@@ -16,6 +16,7 @@ _engine: AsyncEngine | None = None
 
 
 def get_db_dsn() -> str:
+    """Return the configured asynchronous database connection string."""
     dsn = os.environ.get("TIMESCALE_CONN")
     if not dsn:
         raise RuntimeError(
@@ -27,6 +28,7 @@ def get_db_dsn() -> str:
 
 
 def get_engine() -> AsyncEngine:
+    """Return the shared SQLAlchemy asynchronous engine."""
     global _engine
     if _engine is None:
         dsn = get_db_dsn()

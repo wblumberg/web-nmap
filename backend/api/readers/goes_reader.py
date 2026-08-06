@@ -1,5 +1,4 @@
-"""
-readers/goes_reader.py — Specalized Zarr Store format reader
+"""Specialized Zarr reader for GOES satellite imagery.
 
 The GOES satellite data comes with multiple variations each with its own quirks:
 - GOES-E vs. GOES-W
@@ -45,9 +44,11 @@ from .base import Reader, GriddedResult, GridInfo
 
 
 class GOESReader(Reader):
+    """Represent goesreader."""
     format_name = "zarr"
 
     def can_read(self, path: Path) -> bool:
+        """Return whether this reader supports the supplied path."""
         if path.is_dir() and (path / ".goes").exists():
             return True
         return path.suffix in (".goes",) or path.name.endswith(".goes")

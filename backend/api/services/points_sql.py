@@ -26,11 +26,12 @@ async def query_points(
     most_recent: bool = False,
     most_recent_by: str = 'geom',
     fields: Optional[list[str]] = None,
+    cursor: Optional[tuple[datetime, int]] = None,
 ) -> list[dict]:
     """Query the `points` hypertable and return a list of dicts.
 
     Each dict has keys:
-        lat, lon, valid_time (datetime), properties (dict)
+        lat, lon, valid_time (datetime), station_id, properties (dict)
 
     Args:
         source_id:      Matches the ``source_id`` column (e.g. "LIGHTNING", "AIRNOW").
@@ -57,6 +58,7 @@ async def query_points(
         end = end.replace(tzinfo=timezone.utc)
 
     bbox_clause = ""
+    cursor_clause = ""
     params: dict = {
         "source_id": source_id,
         "start": start,
@@ -71,6 +73,18 @@ async def query_points(
         )
         params.update(lon_min=lon_min, lat_min=lat_min, lon_max=lon_max, lat_max=lat_max)
 
+    if cursor is not None:
+        cursor_time, cursor_row_id = cursor
+        if cursor_time.tzinfo is None:
+            cursor_time = cursor_time.replace(tzinfo=timezone.utc)
+        cursor_clause = (
+            "AND (valid_time, id) < (:cursor_time, :cursor_row_id)"
+        )
+        params.update(
+            cursor_time=cursor_time,
+            cursor_row_id=cursor_row_id,
+        )
+
     if most_recent:
         if most_recent_by == 'station_id':
             # Deduplicate by station_id — correct for networks with stable station
@@ -83,12 +97,15 @@ async def query_points(
                     ST_Y(geom)   AS lat,
                     ST_X(geom)   AS lon,
                     valid_time,
-                    properties
+                    station_id,
+                    properties,
+                    id
                 FROM points
                 WHERE source_id = :source_id
                   AND valid_time BETWEEN :start AND :end
                   AND station_id IS NOT NULL
                   {bbox_clause}
+                  {cursor_clause}
                 ORDER BY station_id, valid_time DESC
                 LIMIT :limit
             """)
@@ -100,11 +117,14 @@ async def query_points(
                     ST_Y(geom)   AS lat,
                     ST_X(geom)   AS lon,
                     valid_time,
-                    properties
+                    station_id,
+                    properties,
+                    id
                 FROM points
                 WHERE source_id = :source_id
                   AND valid_time BETWEEN :start AND :end
                   {bbox_clause}
+                  {cursor_clause}
                 ORDER BY geom, valid_time DESC
                 LIMIT :limit
             """)
@@ -114,12 +134,15 @@ async def query_points(
                 ST_Y(geom)   AS lat,
                 ST_X(geom)   AS lon,
                 valid_time,
-                properties
+                station_id,
+                properties,
+                id
             FROM points
             WHERE source_id = :source_id
               AND valid_time BETWEEN :start AND :end
               {bbox_clause}
-            ORDER BY valid_time DESC
+              {cursor_clause}
+            ORDER BY valid_time DESC, id DESC
             LIMIT :limit
         """)
 
@@ -133,7 +156,7 @@ async def query_points(
 
     result = []
     for row in rows:
-        lat, lon, valid_time, props = row[0], row[1], row[2], row[3]
+        lat, lon, valid_time, station_id, props, row_id = row
         if isinstance(props, str):
             import json
             props = json.loads(props)
@@ -144,7 +167,9 @@ async def query_points(
             "lat": float(lat),
             "lon": float(lon),
             "valid_time": valid_time,
+            "station_id": station_id,
             "properties": props,
+            "_row_id": int(row_id),
         })
     return result
 

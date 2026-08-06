@@ -22,6 +22,7 @@ def _cache_key(
     limit: int,
     params: dict[str, Any] | None,
 ) -> tuple[Any, ...]:
+    """Build a stable key for an inventory cache entry."""
     frozen_params = json.dumps(
         params or {}, sort_keys=True, separators=(",", ":"), default=str
     )
@@ -88,6 +89,7 @@ async def list_times_cached(
 async def most_recent_cached(
     source: Any, *, params: dict[str, Any] | None = None
 ) -> Any | None:
+    """Return the most recent cached inventory entry for a source."""
     times = await list_times_cached(source, limit=1, params=params)
     return times[0] if times else None
 

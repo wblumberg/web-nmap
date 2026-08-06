@@ -1,3 +1,5 @@
+"""Declare and configure backend data sources for cyclones."""
+
 from .types.db_source import CycloneTrackDBSource
 
 # ATCF forecast tracks ingested into the `atcf_tracks` hypertable.

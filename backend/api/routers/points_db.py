@@ -14,6 +14,8 @@ GET /api/v1/db-points/{source_id}
                         Defaults to the most recently ingested valid_time.
         window_minutes  Window ± around centre (default 60, max 1440).
         start / end     Explicit ISO 8601 UTC range (overrides center+window).
+        raw             With start/end, return raw rows and the source's frame
+                        selection policy for client-side loop construction.
         bbox            lon_min,lat_min,lon_max,lat_max
         limit           Max rows (default 100 000, hard cap 500 000).
         format          "proto" (default) or "geojson".
@@ -35,14 +37,14 @@ GET /api/v1/db-points/{source_id}
 Numeric properties from the JSONB `properties` column go into
 ``PointObs.variables``; everything else goes into ``PointObs.metadata``.
 
-TODO: Require SOURCE_ID to essential to finding the points.
-TODO: Add obs binning capability to return most recent obs per station using a time window (with defaults).
-TODO: Add a query filter to pull only points with certain variable keys (e.g. "peak_current_ka" for lightning).
-TODO: Add the ability to also return the age of each observation in minutes (relative to the reference time) as a variable.
+TODO: Reject unknown source IDs before querying the points table.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -65,12 +67,14 @@ _ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def _to_iso(dt: datetime) -> str:
+    """Convert the input to iso."""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).strftime(_ISO_FMT)
 
 
 def _parse_bbox(bbox_str: Optional[str]) -> Optional[tuple]:
+    """Parse a comma-separated geographic bounding box."""
     if not bbox_str:
         return None
     try:
@@ -80,6 +84,35 @@ def _parse_bbox(bbox_str: Optional[str]) -> Optional[tuple]:
         return tuple(parts)   # (lon_min, lat_min, lon_max, lat_max)
     except ValueError:
         return None
+
+
+def _encode_cursor(row: dict) -> str:
+    """Encode a pagination row into an opaque cursor token."""
+    valid_time = row["valid_time"]
+    if valid_time.tzinfo is None:
+        valid_time = valid_time.replace(tzinfo=timezone.utc)
+    payload = json.dumps(
+        [valid_time.astimezone(timezone.utc).isoformat(), row["_row_id"]],
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_cursor(value: Optional[str]) -> Optional[tuple[datetime, str]]:
+    """Decode and validate an opaque pagination cursor token."""
+    if not value:
+        return None
+    try:
+        padding = "=" * (-len(value) % 4)
+        raw_time, row_id = json.loads(
+            base64.urlsafe_b64decode(value + padding).decode("utf-8")
+        )
+        parsed_time = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+        if parsed_time.tzinfo is None:
+            parsed_time = parsed_time.replace(tzinfo=timezone.utc)
+        return parsed_time, int(row_id)
+    except (ValueError, TypeError, json.JSONDecodeError, binascii.Error) as exc:
+        raise HTTPException(422, "Invalid point-range continuation cursor") from exc
 
 
 def _split_properties(props: dict) -> tuple[dict, dict]:
@@ -100,7 +133,9 @@ def _rows_to_protobuf(
     start: datetime,
     end: datetime,
     extra_meta: dict[str, str] | None = None,
+    minute_resolution: bool = False,
 ) -> bytes:
+    """Serialize database point rows into the protobuf response schema."""
     pb = PointResponse(
         source_id=source_id,
         start_time=_to_iso(start),
@@ -113,13 +148,28 @@ def _rows_to_protobuf(
 
     for row in rows:
         variables, meta = _split_properties(row["properties"])
+        if row.get("station_id") is not None:
+            meta["station_id"] = str(row["station_id"])
         vt = row["valid_time"]
-        vt_str = _to_iso(vt) if isinstance(vt, datetime) else str(vt)
-        obs = PointObs(
-            lat=row["lat"],
-            lon=row["lon"],
-            valid_time=vt_str,
-        )
+        if minute_resolution:
+            if not isinstance(vt, datetime):
+                vt = _parse_key_to_dt(str(vt))
+            if vt is None:
+                raise ValueError(f"Cannot encode point valid_time {row['valid_time']!r}")
+            if vt.tzinfo is None:
+                vt = vt.replace(tzinfo=timezone.utc)
+            obs = PointObs(
+                lat=row["lat"],
+                lon=row["lon"],
+                valid_time_minute=int(vt.timestamp() // 60),
+            )
+        else:
+            vt_str = _to_iso(vt) if isinstance(vt, datetime) else str(vt)
+            obs = PointObs(
+                lat=row["lat"],
+                lon=row["lon"],
+                valid_time=vt_str,
+            )
         obs.variables.update(variables)
         obs.metadata.update(meta)
         pb.points.append(obs)
@@ -134,11 +184,14 @@ def _rows_to_geojson(
     end: datetime,
     extra_meta: dict[str, str] | None = None,
 ) -> dict:
+    """Serialize database point rows as a GeoJSON feature collection."""
     features = []
     for row in rows:
         vt = row["valid_time"]
         vt_str = _to_iso(vt) if isinstance(vt, datetime) else str(vt)
         props = {"valid_time": vt_str, **row["properties"]}
+        if row.get("station_id") is not None:
+            props["station_id"] = str(row["station_id"])
         features.append({
             "type": "Feature",
             "geometry": {"type": "Point", "coordinates": [row["lon"], row["lat"]]},
@@ -186,6 +239,12 @@ async def get_db_points(
                                     "Example: fields=tmpc,dwpc,sknt,drct,wvht"),
     fmt            : Optional[str] = Query(None, alias="format",
                         description="Response format: 'proto' (default) or 'geojson'."),
+    raw            : bool = Query(False,
+                        description="Return raw observations for an explicit start/end range. "
+                                    "Disables whole-range most-recent filtering and "
+                                    "server-computed age so clients can reconstruct frames."),
+    cursor         : Optional[str] = Query(None,
+                        description="Opaque continuation cursor for raw range pagination."),
 ):
     """Return time-windowed point observations from the TimescaleDB `points` table.
 
@@ -194,6 +253,13 @@ async def get_db_points(
     (``binflag``, ``before_minutes``, ``after_minutes``, ``most_recent``,
     ``return_age``).
     """
+
+    if raw and not (start and end):
+        raise HTTPException(422, "raw range mode requires both start and end")
+    raw_range = raw and bool(start and end)
+    if cursor and not raw_range:
+        raise HTTPException(422, "cursor is only supported in raw range mode")
+    parsed_cursor = _decode_cursor(cursor)
 
     # ── Resolve source config (provides defaults for windowing/flags) ─────────
     src = SOURCES.get(source_id.upper())
@@ -258,9 +324,10 @@ async def get_db_points(
             end=t_end,
             bbox=parsed_bbox,
             limit=limit,
-            most_recent=use_most_recent_filter,
+            most_recent=use_most_recent_filter and not raw_range,
             most_recent_by=most_recent_by,
             fields=parsed_fields,
+            cursor=parsed_cursor,
         )
     except Exception as e:
         raise HTTPException(500, f"DB query failed: {e}")
@@ -271,7 +338,7 @@ async def get_db_points(
     rows = [r for r in rows if -90.0 <= r["lat"] <= 90.0 and -180.0 <= r["lon"] <= 180.0]
 
     # ── Annotate with observation age ─────────────────────────────────────────
-    if return_age and center_dt is not None:
+    if return_age and center_dt is not None and not raw_range:
         for row in rows:
             vt = row["valid_time"]
             if isinstance(vt, datetime):
@@ -280,9 +347,19 @@ async def get_db_points(
                 age_minutes = (center_dt - vt).total_seconds() / 60.0
                 row["properties"] = {**row["properties"], "age_minutes": age_minutes}
 
+    next_cursor = _encode_cursor(rows[-1]) if raw_range and len(rows) >= limit else ""
     extra_meta = {
         "window_minutes": str(window_minutes or before_minutes),
         "bbox": bbox or "none",
+        "raw_range": str(raw_range).lower(),
+        "binflag": str(binflag).lower(),
+        "before_minutes": str(before_minutes if before_minutes is not None else 60),
+        "after_minutes": str(after_minutes if after_minutes is not None else 0),
+        "use_most_recent_filter": str(use_most_recent_filter).lower(),
+        "most_recent_by": str(most_recent_by),
+        "return_age": str(return_age).lower(),
+        "possibly_truncated": str(bool(next_cursor)).lower(),
+        "next_cursor": next_cursor,
     }
 
     # ── Format response ───────────────────────────────────────────────────────
@@ -294,7 +371,16 @@ async def get_db_points(
         use_proto = False
 
     if use_proto:
-        payload = _rows_to_protobuf(rows, source_id, t_start, t_end, extra_meta)
+        payload = _rows_to_protobuf(
+            rows,
+            source_id,
+            t_start,
+            t_end,
+            extra_meta,
+            # Lightning animation only needs minute age buckets. Keep precise
+            # database timestamps and all other point transports unchanged.
+            minute_resolution=raw_range and source_id.upper() == "LIGHTNING",
+        )
         return StreamingResponse(
             iter([payload]),
             media_type="application/x-protobuf",

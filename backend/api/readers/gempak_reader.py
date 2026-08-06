@@ -626,6 +626,7 @@ class GempakFilesystemSource(FilesystemSource):
         window_minutes     : int = 30,
         **kwargs,
     ):
+        """Initialize the instance."""
         super().__init__(*args, **kwargs)
         self.gempak_file_type  = gempak_file_type
         self.obs_time_step_min = obs_time_step_min

@@ -21,9 +21,11 @@ from .base import Reader, PointResult, GeometryResult
 
 
 class GeoJSONReader(Reader):
+    """Represent geo jsonreader."""
     format_name = "geojson"
 
     def can_read(self, path: Path) -> bool:
+        """Return whether this reader supports the supplied path."""
         return path.suffix in (".geojson", ".json") or \
                path.name.endswith(".geojson.gz") or \
                path.name.endswith(".json.gz")

@@ -1,3 +1,5 @@
+"""Encode meteorological geometries into compact protobuf features."""
+
 # met_features.py
 
 import numpy as np
@@ -16,14 +18,17 @@ MULTILINESTRING = 3
 # =========================
 
 def quantize_lat(lat):
+    """Quantize lat."""
     return np.round((lat + 90.0) * 100).astype(np.int32)
 
 
 def quantize_lon(lon):
+    """Quantize lon."""
     return np.round((lon + 180.0) * 100).astype(np.int32)
 
 
 def delta_encode(arr):
+    """Delta-encode encode."""
     return np.diff(arr, prepend=arr[0]).astype(np.int32)
 
 
@@ -32,6 +37,7 @@ def delta_encode(arr):
 # =========================
 
 def encode_linestring(lat, lon):
+    """Encode linestring."""
     lat_q = quantize_lat(lat)
     lon_q = quantize_lon(lon)
 
@@ -47,6 +53,7 @@ def encode_linestring(lat, lon):
 
 
 def encode_polygon(lat, lon):
+    """Encode polygon."""
     lat_q = quantize_lat(lat)
     lon_q = quantize_lon(lon)
 
@@ -103,6 +110,7 @@ def encode_properties(props: dict):
 # =========================
 
 def encode_feature(geometry_bytes, properties=None):
+    """Encode feature."""
     if properties is None:
         prop_blob = struct.pack("<H", 0)
     else:

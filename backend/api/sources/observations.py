@@ -1,3 +1,5 @@
+"""Declare and configure backend data sources for observations."""
+
 from pathlib import Path
 import os
 
@@ -91,7 +93,7 @@ SAO_DB = PointDBSource(
 # RECON observations ingested via recon_ingest.py
 RECON_DB = PointDBSource(
     source_id_       = "RECON",
-    label_           = "RECON",
+    label_           = "Aircraft Reconnaissance",
     source_type      = "OBS_UPPERAIR",
     data_category    = "point_obs",
     default_selected = 1,
@@ -126,7 +128,7 @@ ASCAT_DB = PointDBSource(
 # VAD profile observations (vertical wind profiles).
 VAD_PROFILE_DB = ProfileDBSource(
     source_id_       = "VAD_PROFILE",
-    label_           = "VAD Profile",
+    label_           = "NEXRAD VAD Winds",
     source_type      = "OBS_UPPERAIR",
     data_category    = "profile_obs",
     default_selected = 1,

@@ -27,10 +27,12 @@ UNITS = [
 ]
 
 class AcadLtngReader(Reader):
+    """Represent acad ltng reader."""
     format_name = "acad_ltng"
 
     def can_read(self, path: Path) -> bool:
         # Accept .txt, .tsv, .ltg, or .ltng files
+        """Return whether this reader supports the supplied path."""
         return path.suffix in (".txt", ".tsv", ".ltg", ".ltng")
 
     async def read_points(

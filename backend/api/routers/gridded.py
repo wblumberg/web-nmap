@@ -57,6 +57,7 @@ router = APIRouter(tags=["Gridded Data"])
 # ─── Precision helpers ────────────────────────────────────────────────────────
 
 _VALID_PRECISIONS = ("float32", "float16")
+_STREAM_READ_AHEAD_FRAMES = max(1, int(os.getenv("WEBNMAP_STREAM_READ_AHEAD_FRAMES", "3")))
 
 
 def _resolve_precision(precision: str | None) -> str:
@@ -134,6 +135,7 @@ def _results_to_protobuf(results, source_id: str, key: str,
                           cycle: str = "", fhr: int = -1) -> bytes:
     """Serialize a list of GriddedResult objects into a GridResponse protobuf."""
     def safe_float(val, default=-9999.0):
+        """Convert a value to float while preserving missing data."""
         try:
             return float(val)
         except (TypeError, ValueError):
@@ -482,7 +484,10 @@ async def stream_forecast_fields(
         import zarr
         import time
 
-        queue = asyncio.Queue(maxsize=50)
+        # Keep only a few serialized frames ahead of the client. A large queue
+        # lets disk/CPU production outrun a slow browser and retain hundreds of
+        # MiB in one request without improving first-frame latency.
+        queue = asyncio.Queue(maxsize=_STREAM_READ_AHEAD_FRAMES)
 
         store = zarr.open(str(path), mode='r')
         grid  = reader._read_grid_info(store)
@@ -515,6 +520,7 @@ async def stream_forecast_fields(
             }
 
         def _read_and_serialize_frame(fhr, key):
+            """Read and serialize frame."""
             t1 = time.perf_counter()
             resp = GridResponse(
                 source_id=source_id, key=key, cycle=cycle,
@@ -584,6 +590,7 @@ async def stream_forecast_fields(
             return compressed
 
         async def producer():
+            """Produce serialized frames for the streaming response."""
             for fhr in fhr_list:
                 key = f"{cycle}_f{fhr:03d}"
                 t0 = time.perf_counter()
@@ -686,9 +693,10 @@ async def stream_analysis_fields(
         /field endpoint can retrieve them without decompressing.  Gzip compression
         is applied per-frame right before yielding.
         """
-        queue = asyncio.Queue(maxsize=3)  # buffer up to 3 frames ahead
+        queue = asyncio.Queue(maxsize=_STREAM_READ_AHEAD_FRAMES)
 
         async def producer():
+            """Produce serialized frames for the streaming response."""
             for key in key_list:
                 cache_key = (source_id, key, variables, level, prec)
 

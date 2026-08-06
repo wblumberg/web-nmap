@@ -31,6 +31,7 @@ _refresh_lock = asyncio.Lock()
 
 
 def _max_age_minutes(source: Any) -> int:
+    """Return the freshness threshold configured for a source."""
     configured = getattr(source, "status_max_age_minutes", None)
     if configured is not None:
         return int(configured)
@@ -40,6 +41,7 @@ def _max_age_minutes(source: Any) -> int:
 
 
 def _metric_labels(source: Any) -> dict[str, str]:
+    """Build Prometheus labels for a source status metric."""
     return {
         "source_id": source.source_id,
         "label": source.label,
@@ -48,6 +50,7 @@ def _metric_labels(source: Any) -> dict[str, str]:
 
 
 async def _check_source(source: Any, now: datetime) -> dict[str, Any]:
+    """Check source."""
     started = time.perf_counter()
     max_age = _max_age_minutes(source)
     labels = _metric_labels(source)
@@ -161,6 +164,7 @@ def _as_utc_datetime(value: Any, field_name: str = "timestamp") -> datetime:
 
 
 def _iso_utc(value: datetime) -> str:
+    """Format a datetime as an ISO-8601 UTC timestamp."""
     value = _as_utc_datetime(value)
     return value.isoformat().replace("+00:00", "Z")
 

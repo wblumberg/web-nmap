@@ -155,6 +155,7 @@ _BBOX_CLAUSE  = (
 
 
 def _build_query(phen: Optional[str], bbox: Optional[tuple]) -> text:
+    """Build query."""
     sql = _SELECT_COLS
     if phen:
         sql += _PHEN_CLAUSE
@@ -261,6 +262,7 @@ _UNIONED_GROUP = "    GROUP BY etn, phen, significance\n    ORDER BY min(start_u
 
 
 def _build_unioned_query(phen: Optional[str], bbox: Optional[tuple]) -> text:
+    """Build unioned query."""
     sql = _UNIONED_SELECT
     if phen:
         sql += _PHEN_CLAUSE

@@ -14,6 +14,7 @@ from shapely.geometry import Polygon, MultiPolygon
 _COUNTIES_DF = None
 
 def _load_shapefile(shp_path: str):
+    """Load shapefile."""
     global _COUNTIES_DF
     if _COUNTIES_DF is None:
         _COUNTIES_DF = gpd.read_file(shp_path)

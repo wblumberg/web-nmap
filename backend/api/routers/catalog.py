@@ -69,6 +69,12 @@ async def list_sources():
                 "source_group"  : getattr(src, 'source_group', src.source_id),  # for UI grouping, defaults to source_id
                 "endpoint_type" : getattr(src, 'endpoint_type', 'gridded'),
                 "zarr_transport": getattr(src, 'zarr_transport', False),
+                "binflag": getattr(src, 'binflag', False),
+                "before_minutes": getattr(src, 'before_minutes', None),
+                "after_minutes": getattr(src, 'after_minutes', None),
+                "use_most_recent_filter": getattr(src, 'use_most_recent_filter', False),
+                "most_recent_by": getattr(src, 'most_recent_by', 'geom'),
+                "return_age": getattr(src, 'return_age', False),
                 # variable_map lets the zarr client resolve generic product key names
                 # (e.g. "mean_MSLMA") to the on-disk zarr array names without a
                 # server round-trip.  Empty dict means identity (name == zarr name).
@@ -594,6 +600,7 @@ async def list_variables(source_id: str):
 # ─── Helpers ────────────────────────────────────────────────────────────���─────
 
 def _parse_datetime(s: str) -> datetime:
+    """Parse datetime."""
     from dateutil import parser as dtparser
     dt = dtparser.parse(s)
     if dt.tzinfo is None:
@@ -602,6 +609,7 @@ def _parse_datetime(s: str) -> datetime:
 
 
 def _parse_key(key: str) -> datetime | None:
+    """Parse key."""
     k = key.replace("_", "")
     for fmt in ("%Y%m%d%H%M", "%Y%m%d%H"):
         try:

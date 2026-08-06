@@ -1,3 +1,5 @@
+"""Parse CAP alert XML and normalize VTEC metadata for ingestion."""
+
 import re
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
@@ -193,6 +195,7 @@ def parse_pvtec_string(vtec: str) -> Optional[Dict[str, Any]]:
     }
 
 def parse_vtec_list(vtecs: List[str]) -> List[Dict[str, Any]]:
+    """Parse vtec list."""
     results = []
     for v in vtecs:
         parsed = parse_pvtec_string(v)

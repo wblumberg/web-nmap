@@ -51,6 +51,7 @@ class GridCache:
     """
 
     def __init__(self, max_bytes: int = _DEFAULT_MAX_BYTES):
+        """Initialize the instance."""
         self._max_bytes = max_bytes
         self._lock = threading.Lock()
         self._store: OrderedDict[Any, bytes] = OrderedDict()
@@ -97,13 +98,16 @@ class GridCache:
 
     @property
     def current_bytes(self) -> int:
+        """Return the number of bytes currently held by the cache."""
         return self._total_bytes
 
     @property
     def entry_count(self) -> int:
+        """Return the number of entries currently held by the cache."""
         return len(self._store)
 
     def __repr__(self) -> str:
+        """Return a diagnostic string representation of the instance."""
         return (
             f"GridCache(entries={self.entry_count}, "
             f"bytes={self._total_bytes:,}/{self._max_bytes:,})"

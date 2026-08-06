@@ -88,6 +88,7 @@ class NewFileHandler(FileSystemEventHandler):
     """
 
     def __init__(self, source_id: str, source):
+        """Initialize the instance."""
         super().__init__()
         self.source_id     = source_id
         self.source        = source
@@ -95,6 +96,7 @@ class NewFileHandler(FileSystemEventHandler):
         self._stores_lock  = threading.Lock()
 
     def on_created(self, event):
+        """Process a filesystem-created event from the data watcher."""
         path = Path(event.src_path)
         print(f"[watcher] on_created: is_dir={event.is_directory} suffix={path.suffix!r} name={path.name!r} src={self.source_id}")
 
@@ -135,6 +137,7 @@ class NewFileHandler(FileSystemEventHandler):
         We just verify .zgroup exists (written as the first file in the store).
         """
         def check():
+            """Poll the database and emit events for newly available times."""
             print(f"[watcher] Polling zarr check attempt={attempt} store={store_path.name}")
             with self._stores_lock:
                 if store_path in self._emitted_stores:
@@ -189,6 +192,7 @@ class NewFileHandler(FileSystemEventHandler):
         threading.Timer(2.0, check).start()
 
     def _emit(self, path: Path, vt):
+        """Emit the requested value."""
         key = self.source._make_key(vt)
         event_data = {
             "source_id"  : self.source_id,
@@ -313,4 +317,3 @@ def start_db_polling(interval_seconds: int = 30) -> list[asyncio.Task]:
     if tasks:
         print(f"[db-watcher] Started {len(tasks)} DB polling task(s).")
     return tasks
-

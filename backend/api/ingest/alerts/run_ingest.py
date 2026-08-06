@@ -109,6 +109,7 @@ def fetch_active_alerts(
 
     if phen_filter:
         def _has_phen(feature):
+            """Return whether the value has phen."""
             vtecs = (feature.get("properties") or {}).get("parameters", {}).get("VTEC") or []
             parsed = parse_vtec_list(vtecs)
             return any(p.get("phen") in phen_filter for p in parsed)
@@ -207,6 +208,7 @@ async def run(
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build parser."""
     p = argparse.ArgumentParser(
         prog="run_ingest.py",
         description=__doc__,
@@ -267,6 +269,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def main() -> None:
+    """Run the command-line entry point."""
     parser = _build_parser()
     args   = parser.parse_args()
 
@@ -303,6 +306,7 @@ async def main() -> None:
         # Apply client-side filters
         if phen_filter:
             def _has_phen(feat):
+                """Return whether the value has phen."""
                 vtecs = (feat.get("properties") or {}).get("parameters", {}).get("VTEC") or []
                 return any(p.get("phen") in phen_filter for p in parse_vtec_list(vtecs))
             features = [f for f in features if _has_phen(f)]

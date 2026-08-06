@@ -101,6 +101,12 @@ TimescaleDB stores time-oriented, spatial records that are a poor fit for gridde
 
 The migrations also define indexes, compression, and retention policies for operationally high-volume data. Database access is asynchronous through SQLAlchemy and `asyncpg`; configure it with `TIMESCALE_CONN`.
 
+### Efficient point-observation loops
+
+Point overlays are delivered differently from gridded frames. For a loop with overlapping lightning or surface-observation windows, the frontend computes the union of all required windows and makes one raw-range request to `/api/v1/db-points/{source_id}`. The Protobuf response contains each observation once plus the source's selection policy. The browser then reconstructs every frame locally, preserving `binflag`, `before_minutes`, `after_minutes`, `use_most_recent_filter`, and `most_recent_by` behavior.
+
+When `return_age` is enabled, the browser calculates `age_minutes` relative to each frame. This is necessary because one observation reused by several frames has a different age in each frame. The existing center-based point request remains available and continues to perform server-side selection and age calculation for single-frame callers.
+
 ## Prerequisites
 
 - Python 3.10 or newer

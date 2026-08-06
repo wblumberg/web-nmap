@@ -75,6 +75,7 @@ class GridInfo:
     sat_lon     : float | None = None
 
     def as_dict(self) -> dict:
+        """Serialize the value as a dictionary."""
         return {
             "grid_type"  : self.grid_type,
             "ni"         : self.ni,
@@ -128,6 +129,7 @@ class GriddedResult:
     data_type    : str           = 'float32'
 
     def as_dict(self) -> dict:
+        """Serialize the value as a dictionary."""
         data = self.data.tolist() if isinstance(self.data, np.ndarray) else self.data
         return {
             "variable"    : self.variable,
@@ -209,6 +211,7 @@ class GeometryResult:
     metadata      : dict = field(default_factory=dict)
 
     def as_geojson(self) -> dict:
+        """Serialize the value as a GeoJSON feature collection."""
         return {
             "type"    : "FeatureCollection",
             "metadata": {"geometry_type": self.geometry_type,

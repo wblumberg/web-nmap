@@ -1,3 +1,5 @@
+"""Declare and configure backend data sources for nwp forecasts."""
+
 from pathlib import Path
 import os
 
@@ -230,8 +232,6 @@ HRW_ARW = FilesystemSource(
 
 # Additional data sources to add:
 # - GFS
-# - ECMWF Ensemble (ENS)
 # - RRFS 
 # - REFS
 # - GEFS
-# - ATCF (better for tropical cyclones, but could be added later if we want to focus on that)

@@ -1,3 +1,5 @@
+"""Expose FastAPI endpoints for time-windowed lightning strikes."""
+
 import os
 from pathlib import Path
 from datetime import timedelta, datetime, timezone
@@ -23,6 +25,7 @@ async def get_strikes(
     source: str = Query("db", description="Data source: 'db' (TimescaleDB, default) or 'file' (flat files)."),
 ):
     # ── Compute reference time ───────────────────────────────────────────
+    """Retrieve strikes."""
     if reference_time is not None:
         ref_dt = _parse_key_to_dt(reference_time)
         if ref_dt is None:
@@ -143,4 +146,3 @@ async def _strikes_from_files(ref_dt: Optional[datetime], key: Optional[str], ma
         },
         "features": features,
     })
-

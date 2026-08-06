@@ -11,6 +11,7 @@ pwd
 ls *
 
 python nc2zarr.py /data/base/goes_conus/ /data/store/raster/satellite/ --satellite=GOES-19 --skip-existing
+python nc2zarr.py /data/base/goes_conus/ /data/store/raster/satellite/ --satellite=GOES-18 --skip-existing
 
 # We're gonna CD to the webnmap directory
 export TIMESCALE_CONN='postgresql+asyncpg://webnmap:SH%40RPpyFunt1m3z@localhost:5432/wxdata'

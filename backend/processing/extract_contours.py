@@ -1,3 +1,5 @@
+"""Extract contour paths from ensemble grids and store encoded Zarr chunks."""
+
 import xarray as xr
 import numpy as np
 import zarr
@@ -11,6 +13,7 @@ import matplotlib.pyplot as plt
 # Pre-project to web mercator?
 
 def extract_contours_numpy(field, lons, lats, level_value):
+    """Extract contours numpy."""
     cs = plt.contour(lons, lats, field, levels=[level_value])
 
     contours = []
@@ -22,6 +25,7 @@ def extract_contours_numpy(field, lons, lats, level_value):
     return contours
 
 def contours_to_chunk(contours, member_idx, time_idx, seg_start):
+    """Encode contour paths into a storage-ready array chunk."""
     xs, ys = [], []
     mems, times, segs = [], [], []
 
@@ -58,6 +62,7 @@ def contours_to_chunk(contours, member_idx, time_idx, seg_start):
 
 @delayed
 def process_member_time(field, lons, lats, level_value, m_idx, t_idx, seg_start):
+    """Process member time."""
     contours = extract_contours_numpy(field, lons, lats, level_value)
 
     result, seg_end = contours_to_chunk(
@@ -73,6 +78,7 @@ def generate_contours_to_zarr(
     contour_value=5400.0,
 ):
     # Open dataset lazily
+    """Generate contours to zarr."""
     ds = xr.open_zarr(zarr_path, chunks={})
 
     da = ds[var_name].sel(level=pressure_level)

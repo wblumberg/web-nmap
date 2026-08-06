@@ -1,3 +1,5 @@
+"""Declare and configure backend data sources for imagery."""
+
 from pathlib import Path
 import os
 import re
@@ -23,6 +25,7 @@ _MRMS_PRODUCTS = {
 _MRMS_REGIONS = ["CONUS"]
 
 def _mrms_source(region: str, product_dir: str, zarr_var: str, label: str) -> RasterSource:
+    """Construct an MRMS raster source declaration."""
     return RasterSource(
         source_id_    = f"MRMS_{region}_{zarr_var}",
         label_        = f"MRMS {region} — {label}",
@@ -62,6 +65,7 @@ _GOES_CHANNELS = {
 _GOES_REGIONS = ["CONUS"]
 
 def _goes_source(sat_num: int, region: str, channel: str) -> RasterSource:
+    """Construct a GOES imagery source declaration."""
     satellite = f"GOES-{sat_num}"
     label_sat = "GOES-East" if sat_num == 19 else "GOES-West"
     return RasterSource(

@@ -245,6 +245,7 @@ def _validate_chunk_path(chunk_path: str) -> None:
 
 
 def _cache_control(filename: str) -> str:
+    """Return cache-control headers appropriate for a Zarr object."""
     return "public, max-age=300" if filename in _META_FILENAMES else "public, max-age=3600"
 
 

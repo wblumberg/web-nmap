@@ -30,10 +30,12 @@ from .base import Reader, GriddedResult, GridInfo
 
 
 class ZarrReader(Reader):
+    """Represent zarr reader."""
     format_name = "zarr"
 
     def can_read(self, path: Path) -> bool:
         # Zarr stores are directories with a .zattrs file, or .zarr extension
+        """Return whether this reader supports the supplied path."""
         if path.is_dir() and (path / ".zattrs").exists():
             return True
         # Zarr v3 stores use zarr.json at the root
@@ -55,6 +57,7 @@ class ZarrReader(Reader):
         import zarr
 
         def _is_no_group(exc: Exception) -> bool:
+            """Return whether an exception indicates a missing Zarr group."""
             return 'No group found' in str(exc) or 'no group' in str(exc).lower()
 
         # --- Attempt 1: let zarr auto-detect (handles v3 and well-formed v2) ---

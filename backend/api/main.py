@@ -1,3 +1,5 @@
+"""Configure and run the Web NMAP FastAPI application."""
+
 import time
 import asyncio
 from contextlib import asynccontextmanager
@@ -24,6 +26,7 @@ _TRACKED_QUERY_PARAMS = (
 
 
 def _sanitize_label_value(value: str, max_len: int = 48) -> str:
+    """Bound and normalize a value used as a metric label."""
     value = value.strip()
     if len(value) > max_len:
         value = value[:max_len] + "..."
@@ -254,6 +257,7 @@ async def metrics_middleware(request: Request, call_next):
         body_iterator = getattr(response, "body_iterator", None)
         if body_iterator is not None:
             async def count_response_bytes():
+                """Count response bytes."""
                 response_size = 0
                 completed = False
                 try:
@@ -297,6 +301,7 @@ print("Serving: ", PUBLIC_DIR)
 
 @app.get("/api/v1/health")
 def health():
+    """Return the API health status."""
     return {"status": "ok"}
 
 
@@ -310,6 +315,7 @@ def prometheus_metrics():
 # A Mount at "/" acts as a catch-all and will shadow any routes registered after it.
 @app.get("/")
 async def index():
+    """Return metadata for the API root endpoint."""
     return FileResponse(PUBLIC_DIR / "index.html")
 
 app.mount("/", StaticFiles(directory=str(PUBLIC_DIR), html=True), name="public")

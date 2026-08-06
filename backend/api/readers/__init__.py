@@ -19,6 +19,7 @@ READERS = [
 
 
 def get_reader(path: Path):
+    """Return the first registered reader that supports a path."""
     for reader in READERS:
         if reader.can_read(path):
             return reader
@@ -29,6 +30,7 @@ def get_reader(path: Path):
 
 
 def get_reader_by_format(fmt: str):
+    """Return the reader registered for a catalog format name."""
     for reader in READERS:
         if reader.format_name == fmt:
             return reader

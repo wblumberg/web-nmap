@@ -108,11 +108,13 @@ _DEFAULT_DSN = "postgresql://webnmap:SH%40RPpyFunt1m3z@localhost:5432/wxdata"
 
 # asyncpg uses the plain postgresql:// scheme (not +asyncpg)
 def _get_dsn() -> str:
+    """Retrieve dsn."""
     raw = os.environ.get("TIMESCALE_CONN", _DEFAULT_DSN)
     return raw.replace("postgresql+asyncpg://", "postgresql://")
 
 
 async def _connect() -> asyncpg.Connection:
+    """Connect to the requested value."""
     return await asyncpg.connect(_get_dsn())
 
 
@@ -232,6 +234,7 @@ async def cmd_points(args) -> None:
     params: list = []
 
     def _add(expr: str, val):
+        """Append one formatted value to the current report row."""
         params.append(val)
         conditions.append(expr.replace("?", f"${len(params)}"))
 
@@ -296,6 +299,7 @@ async def cmd_alerts(args) -> None:
     params: list = []
 
     def _p(val):
+        """Print one formatted database inspection row."""
         params.append(val)
         return f"${len(params)}"
 
@@ -354,6 +358,7 @@ async def cmd_timeseries(args) -> None:
     params: list = []
 
     def _p(val) -> str:
+        """Print one formatted database inspection row."""
         params.append(val)
         return f"${len(params)}"
 
@@ -414,6 +419,7 @@ async def cmd_geometries(args) -> None:
     params: list = []
 
     def _p(val):
+        """Print one formatted database inspection row."""
         params.append(val)
         return f"${len(params)}"
 
@@ -576,6 +582,7 @@ async def cmd_sql(args) -> None:
 # ── CLI wiring ────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build parser."""
     p = argparse.ArgumentParser(
         prog="inspect_db.py",
         description=__doc__,
@@ -676,6 +683,7 @@ _HANDLERS = {
 
 
 def main() -> None:
+    """Run the command-line entry point."""
     parser = _build_parser()
     args = parser.parse_args()
 

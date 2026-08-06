@@ -1,3 +1,5 @@
+"""Translate human-readable date/time patterns into regular expressions."""
+
 # Human-readable to regex mapping for date/time expressions
 # Example: 'YYYY' -> r'(?P<year>\\d{4})', 'mm' or 'MM' -> r'(?P<month>\\d{2})', etc.
 

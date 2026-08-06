@@ -1,3 +1,5 @@
+"""Declare and configure backend data sources for gridded analyses."""
+
 from pathlib import Path
 import os
 

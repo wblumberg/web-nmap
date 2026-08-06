@@ -391,6 +391,7 @@ async def get_geometries_by_type(
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _parse_bbox(bbox_str: str | None):
+    """Parse a comma-separated geographic bounding box."""
     if bbox_str is None:
         return None
     try:
@@ -416,6 +417,7 @@ def _simplify_feature(feature: dict, tolerance: float) -> dict:
 
 
 def _parse_cycle_param(value: str | None) -> datetime | None:
+    """Parse cycle param."""
     if value is None:
         return None
     s = value.strip()

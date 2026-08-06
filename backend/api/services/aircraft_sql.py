@@ -28,6 +28,7 @@ async def query_aircraft_tracks_geojson(
     max_implied_speed_kt: float = 750.0,
     max_gap_minutes: int = 10,
 ) -> dict:
+    """Query aircraft tracks geojson."""
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
     start = end - timedelta(minutes=window_minutes)
@@ -121,6 +122,8 @@ async def query_aircraft_tracks_geojson(
           MAX(observation_time) AS end_time,
           array_to_json(array_agg(altitude_ft ORDER BY observation_time))
             AS altitude_ft_array,
+          array_to_json(array_agg(altitude_suffix ORDER BY observation_time))
+            AS altitude_suffix_array,
           array_to_json(array_agg(ground_speed_kt ORDER BY observation_time))
             AS ground_speed_kt_array,
           array_to_json(array_agg(observation_time ORDER BY observation_time))
@@ -139,6 +142,7 @@ async def query_aircraft_tracks_geojson(
         result = await connection.execute(sql, params)
         for row in result.mappings():
             def as_array(value):
+                """Normalize a scalar or sequence as a list."""
                 return json.loads(value) if isinstance(value, str) else value
 
             features.append({
@@ -152,6 +156,7 @@ async def query_aircraft_tracks_geojson(
                     "start_time": row["start_time"].isoformat(),
                     "end_time": row["end_time"].isoformat(),
                     "altitude_ft_array": as_array(row["altitude_ft_array"]),
+                    "altitude_suffix_array": as_array(row["altitude_suffix_array"]),
                     "ground_speed_kt_array": as_array(row["ground_speed_kt_array"]),
                     "observation_time_array": as_array(row["observation_time_array"]),
                     "point_count": int(row["point_count"]),

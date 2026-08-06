@@ -1,3 +1,5 @@
+"""Parse observation files and manage the local observation SQL database."""
+
 from __future__ import annotations
 
 import argparse
@@ -52,15 +54,18 @@ LIGHTNING_COLUMNS = [
 
 
 def _default_db_path() -> Path:
+	"""Return the default observation database path."""
 	return Path("/data/store/point/observations.sqlite")
 	# return ROOT / "backend" / "data" / "observations.sqlite"
 
 
 def _resolve_db_path(raw: str | None) -> Path:
+	"""Resolve db path."""
 	return Path(raw).expanduser().resolve() if raw else _default_db_path()
 
 
 def _read_text_file(path: Path) -> str:
+	"""Read text file."""
 	if path.suffix == ".gz":
 		with gzip.open(path, "rt", encoding="utf-8") as f:
 			return f.read()
@@ -68,6 +73,7 @@ def _read_text_file(path: Path) -> str:
 
 
 def _extract_time_from_filename(path: Path) -> datetime | None:
+	"""Extract time from filename."""
 	stem = path.name
 	for token in stem.replace(".", "_").split("_"):
 		if len(token) >= 12 and token[:12].isdigit():
@@ -88,6 +94,7 @@ def _extract_time_from_filename(path: Path) -> datetime | None:
 
 
 def _to_float(value: Any) -> float | None:
+	"""Convert the input to float."""
 	if value is None:
 		return None
 	try:
@@ -97,6 +104,7 @@ def _to_float(value: Any) -> float | None:
 
 
 def _extract_platform_id(record: dict[str, Any]) -> str | None:
+	"""Extract platform id."""
 	for key in (
 		"id",
 		"station",
@@ -117,6 +125,7 @@ def _extract_platform_id(record: dict[str, Any]) -> str | None:
 
 
 def _extract_lat_lon(record: dict[str, Any]) -> tuple[float | None, float | None]:
+	"""Extract lat lon."""
 	if "coord" in record and isinstance(record["coord"], dict):
 		coord = record["coord"]
 		lat = _to_float(coord.get("lat") or coord.get("latitude"))
@@ -138,6 +147,7 @@ def _extract_lat_lon(record: dict[str, Any]) -> tuple[float | None, float | None
 
 
 def _extract_elevation(record: dict[str, Any]) -> float | None:
+	"""Extract elevation."""
 	for key in ("elevation_m", "elevation", "elev", "altitude_m", "altitude"):
 		value = _to_float(record.get(key))
 		if value is not None:
@@ -146,6 +156,7 @@ def _extract_elevation(record: dict[str, Any]) -> float | None:
 
 
 def _extract_obs_time(record: dict[str, Any], fallback_time: datetime | None) -> datetime:
+	"""Extract obs time."""
 	for key in (
 		"obs_time",
 		"observation_time",
@@ -196,6 +207,7 @@ def _flatten_record(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _records_from_json_payload(payload: Any) -> list[dict[str, Any]]:
+	"""Yield normalized observation records from a JSON payload."""
 	if isinstance(payload, dict) and payload.get("type") == "FeatureCollection":
 		features = payload.get("features") if isinstance(payload.get("features"), list) else []
 		return [f for f in features if isinstance(f, dict)]
@@ -210,6 +222,7 @@ def _records_from_json_payload(payload: Any) -> list[dict[str, Any]]:
 
 
 def _records_from_gempak_payload(payload: Any) -> list[dict[str, Any]]:
+	"""Yield normalized observation records from GEMPAK output."""
 	if isinstance(payload, list):
 		return [x for x in payload if isinstance(x, dict)]
 
@@ -224,6 +237,7 @@ def _records_from_gempak_payload(payload: Any) -> list[dict[str, Any]]:
 
 
 def _to_python_scalar(value: Any) -> Any:
+	"""Convert the input to python scalar."""
 	if hasattr(value, "item") and callable(getattr(value, "item")):
 		try:
 			return value.item()
@@ -233,6 +247,7 @@ def _to_python_scalar(value: Any) -> Any:
 
 
 def _clean_gempak_number(value: Any) -> Any:
+	"""Clean gempak number."""
 	v = _to_python_scalar(value)
 	n = _to_float(v)
 	if n is None:
@@ -246,6 +261,7 @@ def _clean_gempak_number(value: Any) -> Any:
 
 
 def _extract_gempak_lat_lon(record: dict[str, Any]) -> tuple[float | None, float | None]:
+	"""Extract gempak lat lon."""
 	geometry = record.get("geometry") if isinstance(record.get("geometry"), dict) else None
 	if geometry and geometry.get("type") == "Point" and isinstance(geometry.get("coordinates"), list):
 		coords = geometry.get("coordinates")
@@ -264,6 +280,7 @@ def _extract_gempak_obs_time(
 	record: dict[str, Any],
 	fallback_time: datetime | None,
 ) -> datetime | None:
+	"""Extract gempak obs time."""
 	props = record.get("properties") if isinstance(record.get("properties"), dict) else {}
 	candidates = (
 		props.get("date_time"),
@@ -291,6 +308,7 @@ def parse_gempak_sfjson_records(
 	source_name: str | None,
 	fallback_time: datetime | None,
 ) -> list[ObservationInsert]:
+	"""Parse gempak sfjson records."""
 	out: list[ObservationInsert] = []
 	skipped_missing_time = 0
 
@@ -371,6 +389,7 @@ def parse_gempak_sfjson_file(
 	source_name: str | None,
 	fallback_time: datetime | None,
 ) -> list[ObservationInsert]:
+	"""Parse gempak sfjson file."""
 	text = _read_text_file(path)
 	if not text.strip():
 		return []
@@ -394,6 +413,7 @@ def parse_gempak_surface_file(
 	gempak_country: str | None,
 	gempak_date_time: str | None,
 ) -> list[ObservationInsert]:
+	"""Parse gempak surface file."""
 	try:
 		from gempakio import GempakSurface  # type: ignore[import-not-found]
 	except ImportError:
@@ -429,6 +449,7 @@ def parse_json_like_file(
 	source_name: str | None,
 	fallback_time: datetime | None,
 ) -> list[ObservationInsert]:
+	"""Parse json like file."""
 	text = _read_text_file(path)
 	if not text.strip():
 		return []
@@ -466,6 +487,7 @@ def parse_lightning_txt_file(
 	source_name: str | None,
 	fallback_time: datetime | None,
 ) -> list[ObservationInsert]:
+	"""Parse lightning txt file."""
 	text = _read_text_file(path)
 	if not text.strip():
 		return []
@@ -571,6 +593,7 @@ def parse_input_file(
 	gempak_country: str | None = None,
 	gempak_date_time: str | None = None,
 ) -> list[ObservationInsert]:
+	"""Parse input file."""
 	gempak_time = parse_time_like(gempak_date_time) if gempak_date_time else None
 	if gempak_date_time and gempak_time is None:
 		raise ValueError(f"Cannot parse --gempak-date-time '{gempak_date_time}'")
@@ -624,6 +647,7 @@ def parse_input_file(
 
 
 def _split_csv(value: str | None) -> list[str] | None:
+	"""Split csv."""
 	if value is None:
 		return None
 	parts = [x.strip() for x in value.split(",") if x.strip()]
@@ -631,10 +655,12 @@ def _split_csv(value: str | None) -> list[str] | None:
 
 
 def _print_json(data: Any) -> None:
+	"""Print json."""
 	print(json.dumps(data, indent=2, sort_keys=True, default=str))
 
 
 def cmd_init(args: argparse.Namespace) -> int:
+	"""Execute the init command."""
 	db_path = _resolve_db_path(args.db)
 	store = ObservationSQLStore(db_path)
 	store.initialize()
@@ -643,6 +669,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
+	"""Execute the ingest command."""
 	db_path = _resolve_db_path(args.db)
 	store = ObservationSQLStore(db_path)
 	store.initialize()
@@ -689,6 +716,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def cmd_list_times(args: argparse.Namespace) -> int:
+	"""Execute the list times command."""
 	db_path = _resolve_db_path(args.db)
 	store = ObservationSQLStore(db_path)
 	store.initialize()
@@ -707,6 +735,7 @@ def cmd_list_times(args: argparse.Namespace) -> int:
 
 
 def cmd_query(args: argparse.Namespace) -> int:
+	"""Execute the query command."""
 	db_path = _resolve_db_path(args.db)
 	store = ObservationSQLStore(db_path)
 	store.initialize()
@@ -734,6 +763,7 @@ def cmd_query(args: argparse.Namespace) -> int:
 
 
 def cmd_delete(args: argparse.Namespace) -> int:
+	"""Execute the delete command."""
 	db_path = _resolve_db_path(args.db)
 	store = ObservationSQLStore(db_path)
 	store.initialize()
@@ -786,6 +816,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
 
 def cmd_prune(args: argparse.Namespace) -> int:
+	"""Execute the prune command."""
 	db_path = _resolve_db_path(args.db)
 	store = ObservationSQLStore(db_path)
 	store.initialize()
@@ -804,6 +835,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 
 def cmd_vacuum(args: argparse.Namespace) -> int:
+	"""Execute the vacuum command."""
 	db_path = _resolve_db_path(args.db)
 	store = ObservationSQLStore(db_path)
 	store.initialize()
@@ -813,6 +845,7 @@ def cmd_vacuum(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+	"""Build parser."""
 	parser = argparse.ArgumentParser(
 		description="Ingest and maintain SQL-backed point observations for WebNMAP.",
 	)
@@ -905,6 +938,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+	"""Run the command-line entry point."""
 	parser = build_parser()
 	args = parser.parse_args(argv)
 	return args.func(args)
@@ -912,4 +946,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
 	raise SystemExit(main())
-

@@ -31,16 +31,19 @@ class DBSource(DataSource):
     """
 
     def __init__(self, source_id_: str, table: str = "points"):
+        """Initialize the instance."""
         self._source_id = source_id_
         self.table = table
         self._engine: AsyncEngine = get_engine()
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return f"DB-backed {self._source_id}"
 
     async def list_times(
@@ -163,6 +166,7 @@ class PointDBSource(DataSource):
         most_recent_by  : str  = 'geom', # column to deduplicate on: 'station_id' or 'geom'
         return_age      : bool = False, # whether to calculate and return age_minutes for each point based on valid_time and reference time
     ):
+        """Initialize the instance."""
         self._source_id       = source_id_
         self._label           = label_
         self.source_type      = source_type
@@ -180,10 +184,12 @@ class PointDBSource(DataSource):
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return self._label
 
     async def list_times(
@@ -281,6 +287,7 @@ class AlertSource(DataSource):
         sig        : str,
         timeline_hours: int = 6,
     ):
+        """Initialize the instance."""
         self._source_id     = source_id_
         self._label         = label_
         self.sig            = sig
@@ -292,10 +299,12 @@ class AlertSource(DataSource):
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return self._label
 
     async def list_times(
@@ -387,6 +396,7 @@ class ProfileDBSource(DataSource):
         before_minutes: Optional[int] = None,
         after_minutes: Optional[int] = None,
     ):
+        """Initialize the instance."""
         self._source_id = source_id_
         self._label = label_
         self.source_type = source_type
@@ -402,10 +412,12 @@ class ProfileDBSource(DataSource):
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return self._label
 
     async def list_times(
@@ -454,9 +466,11 @@ class ProfileDBSource(DataSource):
         return out
 
     async def get_path(self, key: str):
+        """Return the database-backed path token for an available time."""
         return None
 
     async def most_recent(self, params: dict[str, Any] | None = None) -> Optional[AvailableTime]:
+        """Return the most recent available database time."""
         sql = text(f"""
             SELECT MAX(valid_time) FROM {self.table} WHERE source_id = :source_id
         """)
@@ -495,6 +509,7 @@ class CycloneTrackDBSource(DataSource):
         timeline_hours: int = 240,
         table: str = "atcf_tracks",
     ):
+        """Initialize the instance."""
         self._source_id = source_id_
         self._label = label_
         self.source_type = source_type
@@ -506,10 +521,12 @@ class CycloneTrackDBSource(DataSource):
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return self._label
 
     async def list_times(
@@ -519,6 +536,7 @@ class CycloneTrackDBSource(DataSource):
         limit: int = 200,
         params: dict[str, Any] | None = None,
     ) -> list[AvailableTime]:
+        """Return the available dataset times for this source."""
         after = after or datetime(1970, 1, 1, tzinfo=timezone.utc)
         before = before or datetime.now(tz=timezone.utc)
 
@@ -562,9 +580,11 @@ class CycloneTrackDBSource(DataSource):
         return out
 
     async def get_path(self, key: str):
+        """Return the database-backed path token for an available time."""
         return None
 
     async def most_recent(self, params: dict[str, Any] | None = None) -> Optional[AvailableTime]:
+        """Return the most recent available database time."""
         sql = text(f"""
             SELECT MAX(cycle_time) FROM {self.table} WHERE source_id = :source_id
         """)
@@ -592,6 +612,7 @@ class AircraftTrackDBSource(DataSource):
         timeline_hours: int = 6,
         table: str = "aircraft_positions",
     ):
+        """Initialize the instance."""
         self._source_id = source_id_
         self._label = label_
         self.source_type = "AVIATION"
@@ -603,10 +624,12 @@ class AircraftTrackDBSource(DataSource):
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return self._label
 
     async def list_times(
@@ -616,6 +639,7 @@ class AircraftTrackDBSource(DataSource):
         limit: int = 200,
         params: dict[str, Any] | None = None,
     ) -> list[AvailableTime]:
+        """Return the available dataset times for this source."""
         after = after or datetime(1970, 1, 1, tzinfo=timezone.utc)
         before = before or datetime.now(tz=timezone.utc)
         sql = text(f"""
@@ -641,11 +665,13 @@ class AircraftTrackDBSource(DataSource):
         ]
 
     async def get_path(self, key: str):
+        """Return the database-backed path token for an available time."""
         return None
 
     async def most_recent(
         self, params: dict[str, Any] | None = None
     ) -> Optional[AvailableTime]:
+        """Return the most recent available database time."""
         sql = text(f"SELECT MAX(observation_time) FROM {self.table}")
         async with self._engine.connect() as connection:
             valid_time = await connection.scalar(sql)

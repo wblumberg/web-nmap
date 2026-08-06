@@ -55,6 +55,7 @@ class FilesystemSource(DataSource):
         timeline_hours: int = 48,
         zarr_transport: bool = False,
     ):
+        """Initialize the instance."""
         self._source_id    = source_id_
         self._label        = label_
         self._data_dir     = Path(data_dir)
@@ -101,10 +102,12 @@ class FilesystemSource(DataSource):
 
     @property
     def source_id(self) -> str:
+        """Return the configured source identifier."""
         return self._source_id
 
     @property
     def label(self) -> str:
+        """Return the human-readable source label."""
         return self._label
 
     # ── Filename parsing ──────────────────────────────────────────────────────

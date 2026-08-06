@@ -53,6 +53,7 @@ DEFAULT_X_CANDIDATES: tuple[str, ...] = ("x", "lon", "longitude", "ni")
 
 
 def _find_dim(da: xr.DataArray, candidates: Sequence[str]) -> str:
+	"""Find dim."""
 	for name in candidates:
 		if name in da.dims:
 			return name
@@ -63,6 +64,7 @@ def _find_dim(da: xr.DataArray, candidates: Sequence[str]) -> str:
 
 
 def _find_coord_name(ds: xr.Dataset, candidates: Sequence[str]) -> str | None:
+	"""Find coord name."""
 	for name in candidates:
 		if name in ds.coords:
 			return name
@@ -73,11 +75,13 @@ def _find_coord_name(ds: xr.Dataset, candidates: Sequence[str]) -> str | None:
 
 def _normalize_longitudes(values: np.ndarray) -> np.ndarray:
 	# Preserve floats and convert to [-180, 180] range.
+	"""Normalize longitudes."""
 	norm = ((values + 180.0) % 360.0) - 180.0
 	return norm.astype(np.float64, copy=False)
 
 
 def _iter_xy_dims(da: xr.DataArray, y_dim: str | None = None, x_dim: str | None = None) -> tuple[str, str]:
+	"""Iterate over xy dims."""
 	if y_dim is not None and x_dim is not None:
 		return y_dim, x_dim
 
@@ -114,6 +118,7 @@ def _iter_xy_dims(da: xr.DataArray, y_dim: str | None = None, x_dim: str | None 
 
 def _ordered_quantile(da: xr.DataArray, q: float, dim: str) -> xr.DataArray:
 	# xarray handles dask-backed quantiles with lazy execution.
+	"""Compute a quantile from values sorted along the requested axis."""
 	out = da.quantile(q, dim=dim, skipna=True)
 	if "quantile" in out.coords:
 		out = out.squeeze("quantile", drop=True)
@@ -127,6 +132,7 @@ def _ordered_quantile(da: xr.DataArray, q: float, dim: str) -> xr.DataArray:
 
 @dataclass(frozen=True)
 class EnsembleDims:
+	"""Represent ensemble dims."""
 	member_dim: str = "member"
 	time_dim: str | None = "time"
 	y_dim: str = "y"
@@ -420,6 +426,7 @@ def probability_matched_mean(
 
 	def _pmm_core(member_field: np.ndarray) -> np.ndarray:
 		# member_field shape: (n_member, ny, nx)
+		"""Compute the probability-matched mean for one field."""
 		n_member = member_field.shape[0]
 		spatial_shape = member_field.shape[1:]
 		n_points = int(np.prod(spatial_shape))
@@ -640,6 +647,7 @@ def extract_spaghetti_contours(
 
 
 def _coerce_scalar(value):
+	"""Coerce scalar."""
 	if isinstance(value, np.generic):
 		return value.item()
 	return value
