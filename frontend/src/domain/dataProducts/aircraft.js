@@ -9,8 +9,6 @@ const SPEED_LEVELS = [0, 100, 200, 300, 400, 500, 600];
 const SPEED_COLORS = [
     '#dbeafe', '#7dd3fc', '#34d399', '#facc15', '#fb923c', '#ef4444',
 ];
-const MAX_CALLSIGN_LABELS = 150;
-
 const ALTITUDE_CMAP = new apgl.ColorMap(
     ALTITUDE_LEVELS,
     ALTITUDE_COLORS,
@@ -64,17 +62,69 @@ function _measuredLineRuns(coordinates, values) {
     return runs;
 }
 
-function _makeSampler(component) {
-    return (lon, lat) => {
-        const hits = component?.queryPoint?.(lon, lat) || [];
+function _mercatorPoint(lon, lat) {
+    const clampedLat = Math.max(-85.051129, Math.min(85.051129, lat));
+    const radians = clampedLat * Math.PI / 180;
+    return [
+        (lon + 180) / 360,
+        (1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2,
+    ];
+}
+
+function _distanceToSegmentSquared(point, start, end) {
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    if (dx === 0 && dy === 0) {
+        return (point[0] - start[0]) ** 2 + (point[1] - start[1]) ** 2;
+    }
+    const t = Math.max(0, Math.min(1,
+        ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) /
+        (dx * dx + dy * dy)
+    ));
+    const nearestX = start[0] + t * dx;
+    const nearestY = start[1] + t * dy;
+    return (point[0] - nearestX) ** 2 + (point[1] - nearestY) ** 2;
+}
+
+function _makeSampler(features) {
+    const tracks = features
+        .filter(feature => feature.geometry?.type === 'LineString')
+        .map(feature => ({
+            properties: feature.properties || {},
+            coordinates: feature.geometry.coordinates.map(
+                ([lon, lat]) => _mercatorPoint(lon, lat)
+            ),
+        }));
+
+    return (lon, lat, context = {}) => {
+        const point = _mercatorPoint(lon, lat);
+        const zoom = Number.isFinite(context.zoom) ? context.zoom : 4;
+        // MapLibre uses 512-pixel tiles. An eight-pixel hit radius makes thin
+        // tracks practical to hover without selecting distant flights.
+        const tolerance = 8 / (512 * (2 ** zoom));
+        const toleranceSquared = tolerance ** 2;
+        const hits = tracks.filter(track => {
+            for (let i = 1; i < track.coordinates.length; i++) {
+                if (_distanceToSegmentSquared(
+                    point, track.coordinates[i - 1], track.coordinates[i]
+                ) <= toleranceSquared) return true;
+            }
+            return false;
+        });
         if (!hits.length) return null;
+        const flights = new Map();
+        for (const hit of hits) {
+            const p = hit.properties || {};
+            const callsign = p.acid || p.flight_ref || 'Unknown flight';
+            const departure = p.departure_airport || '?';
+            const arrival = p.arrival_airport || '?';
+            flights.set(
+                p.flight_ref || `${callsign}:${departure}:${arrival}`,
+                `${callsign} (${departure} → ${arrival})`,
+            );
+        }
         return {
-            Flights: hits.map(hit => {
-                const p = hit.properties || {};
-                const route = [p.departure_airport, p.arrival_airport]
-                    .filter(Boolean).join('→');
-                return [p.acid || p.flight_ref, route].filter(Boolean).join(' ');
-            }).join(' | '),
+            Flights: [...flights.values()].join(' | '),
         };
     };
 }
@@ -88,11 +138,10 @@ function _buildTracks(layerId, data, {
 }) {
     const fc = _featureCollection(data);
     const lineFeatures = [];
-    const markerCoordinates = [];
-    const markerLabels = [];
-    const markerValues = [];
-    const unmeasuredMarkerCoordinates = [];
-    const unmeasuredMarkerLabels = [];
+    let totalPositions = 0;
+    let measuredPositions = 0;
+    let measuredRuns = 0;
+    let flightsWithMeasurements = 0;
 
     for (const feature of fc.features || []) {
         const geometry = feature?.geometry;
@@ -104,19 +153,27 @@ function _buildTracks(layerId, data, {
             properties[valueKey],
             geometry.coordinates.length,
         );
+        totalPositions += values.length;
+        const featureMeasuredPositions = values.reduce(
+            (count, value) => count + (value === null ? 0 : 1),
+            0,
+        );
+        measuredPositions += featureMeasuredPositions;
+        if (featureMeasuredPositions) flightsWithMeasurements++;
         if (showUnmeasuredBase) {
             lineFeatures.push({
                 geometry,
                 properties,
                 style: {
                     line_color: '#94a3b8',
-                    line_width: 1.5,
+                    line_width: 0.9,
                     line_opacity: 0.55,
                     line_style: '-',
                 },
             });
         }
         const runs = _measuredLineRuns(geometry.coordinates, values);
+        measuredRuns += runs.length;
         for (const run of runs) {
             lineFeatures.push({
                 geometry: { type: 'LineString', coordinates: run.coordinates },
@@ -124,104 +181,25 @@ function _buildTracks(layerId, data, {
                 data: run.values,
                 style: {
                     line_cmap: cmap,
-                    line_width: 2.5,
+                    line_width: 1.5,
                     line_opacity: 0.85,
                     line_style: '-',
                 },
             });
         }
 
-        if (properties.is_latest_segment !== false) {
-            const lastIndex = geometry.coordinates.length - 1;
-            if (values[lastIndex] !== null) {
-                markerCoordinates.push(geometry.coordinates[lastIndex]);
-                markerLabels.push(properties.acid || properties.flight_ref || '?');
-                markerValues.push(values[lastIndex]);
-            } else if (showUnmeasuredBase) {
-                unmeasuredMarkerCoordinates.push(geometry.coordinates[lastIndex]);
-                unmeasuredMarkerLabels.push(
-                    properties.acid || properties.flight_ref || '?'
-                );
-            }
-        }
     }
 
-    if (markerCoordinates.length) {
-        lineFeatures.push({
-            geometry: { type: 'MultiPoint', coordinates: markerCoordinates },
-            text: markerCoordinates.map(() => '●'),
-            data: markerValues,
-            style: {
-                text_cmap: cmap,
-                text_halo: true,
-                text_halo_color: '#020617',
-                text_font_size: 14,
-            },
-        });
-
-        // Preserve every current-position dot, but label only an evenly spaced
-        // subset. Hundreds of overlapping callsigns obscure both tracks and
-        // underlying weather layers at national zoom levels.
-        const labelCount = Math.min(MAX_CALLSIGN_LABELS, markerCoordinates.length);
-        const labelIndexes = Array.from({ length: labelCount }, (_, i) => (
-            Math.floor(i * markerCoordinates.length / labelCount)
-        ));
-        lineFeatures.push({
-            geometry: {
-                type: 'MultiPoint',
-                coordinates: labelIndexes.map(i => markerCoordinates[i]),
-            },
-            text: labelIndexes.map(i => markerLabels[i]),
-            data: labelIndexes.map(i => markerValues[i]),
-            style: {
-                text_color: '#f8fafc',
-                text_halo: true,
-                text_halo_color: '#020617',
-                text_font_size: 10,
-            },
-        });
-    }
-    if (unmeasuredMarkerCoordinates.length) {
-        lineFeatures.push({
-            geometry: {
-                type: 'MultiPoint',
-                coordinates: unmeasuredMarkerCoordinates,
-            },
-            text: unmeasuredMarkerCoordinates.map(() => '●'),
-            data: unmeasuredMarkerCoordinates.map(() => 1),
-            style: {
-                text_color: '#94a3b8',
-                text_halo: true,
-                text_halo_color: '#020617',
-                text_font_size: 14,
-            },
-        });
-
-        const remainingLabelBudget = Math.max(
-            0,
-            MAX_CALLSIGN_LABELS - Math.min(MAX_CALLSIGN_LABELS, markerCoordinates.length)
-        );
-        const labelCount = Math.min(
-            remainingLabelBudget, unmeasuredMarkerCoordinates.length
-        );
-        const labelIndexes = Array.from({ length: labelCount }, (_, i) => (
-            Math.floor(i * unmeasuredMarkerCoordinates.length / labelCount)
-        ));
-        if (labelIndexes.length) lineFeatures.push({
-            geometry: {
-                type: 'MultiPoint',
-                coordinates: labelIndexes.map(
-                    i => unmeasuredMarkerCoordinates[i]
-                ),
-            },
-            text: labelIndexes.map(i => unmeasuredMarkerLabels[i]),
-            data: labelIndexes.map(() => 1),
-            style: {
-                text_color: '#cbd5e1',
-                text_halo: true,
-                text_halo_color: '#020617',
-                text_font_size: 10,
-            },
+    if (valueKey === 'altitude_ft_array') {
+        console.info('[NMAP aviation] Reported-altitude coverage', {
+            trackSegments: (fc.features || []).length,
+            totalPositions,
+            measuredPositions,
+            measuredPercent: totalPositions
+                ? +(100 * measuredPositions / totalPositions).toFixed(1)
+                : 0,
+            trackSegmentsWithMeasurements: flightsWithMeasurements,
+            drawableMeasuredRuns: measuredRuns,
         });
     }
 
@@ -239,7 +217,7 @@ function _buildTracks(layerId, data, {
             orientation: 'horizontal',
             tick_direction: 'bottom',
         })],
-        sampler: _makeSampler(component),
+        sampler: _makeSampler(lineFeatures),
     };
 }
 

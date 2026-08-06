@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS aircraft_positions (
   departure_airport TEXT,
   arrival_airport   TEXT,
   altitude_ft       INTEGER,
+  altitude_suffix   TEXT CHECK (altitude_suffix IN ('B', 'C', 'T')),
   ground_speed_kt   REAL,
   geom              GEOMETRY(POINT, 4326) NOT NULL,
   message_type      TEXT,

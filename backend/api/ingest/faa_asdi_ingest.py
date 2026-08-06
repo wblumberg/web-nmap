@@ -35,12 +35,14 @@ DEFAULT_LINE_LIMIT_MB = 16
 CORE30 = ["ATL", "BOS", "BWI", "CLT", "DCA", "DEN", "DFW", "DTW", "EWR", "FLL", "HNL", "IAD", "IAH", "JFK", "LAS", "LAX", "LGA", "MCO", "MDW", "MEM", "MIA", "MSP", "ORD", "PHL", "PHX", "SAN", "SEA", "SFO", "SLC", "TPA"]
 
 def _as_list(value: Any) -> list:
+    """Normalize a scalar or sequence as a list."""
     if value is None:
         return []
     return value if isinstance(value, list) else [value]
 
 
 def extract_messages(obj: dict) -> list[dict]:
+    """Extract messages."""
     root = obj.get("ds:tfmDataService", {})
     output = root.get("fltdOutput", {}) if isinstance(root, dict) else {}
     return [
@@ -50,6 +52,7 @@ def extract_messages(obj: dict) -> list[dict]:
 
 
 def _parse_time(value: Any) -> datetime | None:
+    """Parse time."""
     if not value:
         return None
     try:
@@ -62,6 +65,7 @@ def _parse_time(value: Any) -> datetime | None:
 
 
 def _number(value: Any) -> float | None:
+    """Coerce a value to a finite number when possible."""
     try:
         result = float(value)
         return result if result == result else None
@@ -70,11 +74,13 @@ def _number(value: Any) -> float | None:
 
 
 def _carrier_code(acid: str | None) -> str | None:
+    """Extract the normalized carrier prefix from a callsign."""
     match = re.match(r"^([A-Za-z]{3})", acid or "")
     return match.group(1).upper() if match else None
 
 
 def _parse_carriers(value: str | None) -> frozenset[str] | None:
+    """Parse carriers."""
     if not value:
         return None
     if value.strip().lower() == "major":
@@ -135,32 +141,48 @@ def _reported_position(track: dict) -> tuple[float, float] | None:
     return None
 
 
-def _reported_altitude_ft(track: dict) -> int | None:
-    """Extract measured/reported altitude, never assigned altitude.
+def _parse_reported_altitude(value: Any) -> tuple[int | None, str | None]:
+    """Parse an FAA altitude in hundreds of feet plus optional B/C/T suffix."""
+    match = re.fullmatch(r"([+-]?\d+(?:\.\d+)?)([BCT]?)", str(value).strip().upper())
+    if match is None:
+        return None, None
+    suffix = match.group(2) or None
+    altitude_ft = round(float(match.group(1)) * 100)
+    # T means an interim altitude is displayed in the assigned-altitude field,
+    # not an ordinary beacon altitude. Preserve the suffix but do not plot it
+    # as a measured altitude.
+    return (None if suffix == "T" else altitude_ft), suffix
 
-    SWIM variants are not fully uniform. Accept a direct simpleAltitude under
-    reportedAltitude or a nested object explicitly named actual/measured/
-    reported. Deliberately do not descend into assignedAltitude.
+
+def _reported_altitude(track: dict) -> tuple[int | None, str | None]:
+    """Extract the NAS reported altitude and its optional B/C/T suffix.
+
+    The FAA JSON representation nests ``assignedAltitude`` inside the
+    semantically authoritative ``reportedAltitude`` container. In this
+    context it carries the reported level; it is distinct from a standalone
+    flight-plan assigned altitude.
     """
     reported = track.get("nxcm:reportedAltitude")
     if not isinstance(reported, dict):
-        return None
+        return None, None
 
-    direct = _number(reported.get("nxce:simpleAltitude"))
-    if direct is not None:
-        return round(direct * 100)
+    if "nxce:simpleAltitude" in reported:
+        return _parse_reported_altitude(reported["nxce:simpleAltitude"])
 
     for key, value in reported.items():
         normalized = str(key).lower()
-        if "assigned" in normalized or not any(
-            token in normalized for token in ("actual", "measured", "reported")
+        if not any(
+            token in normalized for token in ("assigned", "actual", "measured", "reported")
         ):
             continue
-        if isinstance(value, dict):
-            simple = _number(value.get("nxce:simpleAltitude"))
-            if simple is not None:
-                return round(simple * 100)
-    return None
+        if isinstance(value, dict) and "nxce:simpleAltitude" in value:
+            return _parse_reported_altitude(value["nxce:simpleAltitude"])
+    return None, None
+
+
+def _reported_altitude_ft(track: dict) -> int | None:
+    """Backward-compatible altitude-only helper."""
+    return _reported_altitude(track)[0]
 
 
 def extract_position(msg: dict, received_at: datetime | None = None) -> dict | None:
@@ -191,7 +213,7 @@ def extract_position(msg: dict, received_at: datetime | None = None) -> dict | N
     if flight_ref is None:
         return None
 
-    altitude_ft = _reported_altitude_ft(track)
+    altitude_ft, altitude_suffix = _reported_altitude(track)
 
     observation_time = (
         _parse_time(track.get("nxcm:timeAtPosition"))
@@ -215,6 +237,7 @@ def extract_position(msg: dict, received_at: datetime | None = None) -> dict | N
             if msg.get("arrArpt") or arrival_airport else None
         ),
         "altitude_ft": altitude_ft,
+        "altitude_suffix": altitude_suffix,
         "ground_speed_kt": speed,
         "lon": lon,
         "lat": lat,
@@ -228,11 +251,11 @@ def extract_position(msg: dict, received_at: datetime | None = None) -> dict | N
 _UPSERT = text("""
     INSERT INTO aircraft_positions (
       observation_time, flight_ref, acid, departure_airport, arrival_airport,
-      altitude_ft, ground_speed_kt, geom, message_type, source_timestamp,
+      altitude_ft, altitude_suffix, ground_speed_kt, geom, message_type, source_timestamp,
       received_at, raw_message
     ) VALUES (
       :observation_time, :flight_ref, :acid, :departure_airport, :arrival_airport,
-      :altitude_ft, :ground_speed_kt,
+      :altitude_ft, :altitude_suffix, :ground_speed_kt,
       ST_SetSRID(ST_MakePoint(:lon, :lat), 4326),
       :message_type, :source_timestamp, :received_at, CAST(:raw_message AS JSONB)
     )
@@ -241,6 +264,7 @@ _UPSERT = text("""
       departure_airport = COALESCE(EXCLUDED.departure_airport, aircraft_positions.departure_airport),
       arrival_airport = COALESCE(EXCLUDED.arrival_airport, aircraft_positions.arrival_airport),
       altitude_ft = EXCLUDED.altitude_ft,
+      altitude_suffix = EXCLUDED.altitude_suffix,
       ground_speed_kt = EXCLUDED.ground_speed_kt,
       geom = EXCLUDED.geom,
       message_type = EXCLUDED.message_type,
@@ -251,6 +275,7 @@ _UPSERT = text("""
 
 
 async def insert_positions(rows: list[dict]) -> int:
+    """Insert positions."""
     if not rows:
         return 0
     engine = get_engine()
@@ -260,6 +285,7 @@ async def insert_positions(rows: list[dict]) -> int:
 
 
 def _command(args) -> list[str]:
+    """Build the FAA ASDI consumer command from CLI arguments."""
     command = shlex.split(os.environ.get("FAA_SWIM_RUN_CMD", DEFAULT_RUN_CMD))
     config = os.environ.get("FAA_SWIM_CONFIG", args.config)
     if config:
@@ -268,6 +294,7 @@ def _command(args) -> list[str]:
 
 
 async def consume(args) -> None:
+    """Consume the requested value."""
     command = _command(args)
     logging.info("Starting FAA SWIM client: %s", shlex.join(command))
     process = await asyncio.create_subprocess_exec(
@@ -349,6 +376,7 @@ async def consume(args) -> None:
 
 
 def main() -> None:
+    """Run the command-line entry point."""
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config", default="application.conf",

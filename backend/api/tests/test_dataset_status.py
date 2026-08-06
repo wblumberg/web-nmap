@@ -1,3 +1,5 @@
+"""Test dataset-status timestamp parsing and validation."""
+
 from datetime import datetime, timezone
 import unittest
 
@@ -5,7 +7,9 @@ from api.services.dataset_status import _as_utc_datetime
 
 
 class DatasetStatusTimeTests(unittest.TestCase):
+    """Test dataset status time behavior."""
     def test_accepts_source_timestamp_formats(self):
+        """Verify supported source timestamp formats are accepted."""
         cases = [
             ("2026072912", datetime(2026, 7, 29, 12, tzinfo=timezone.utc)),
             ("20260729_1230", datetime(2026, 7, 29, 12, 30, tzinfo=timezone.utc)),
@@ -20,5 +24,6 @@ class DatasetStatusTimeTests(unittest.TestCase):
                 self.assertEqual(_as_utc_datetime(value), expected)
 
     def test_rejects_unknown_strings(self):
+        """Verify unrecognized timestamp strings are rejected."""
         with self.assertRaisesRegex(ValueError, "unsupported datetime"):
             _as_utc_datetime("not-a-cycle", "cycle")
