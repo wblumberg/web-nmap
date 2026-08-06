@@ -47,14 +47,16 @@ export const ProductGen = (() => {
     const SRC_EDIT       = 'pg-edit';
     const LYR_EDIT_LINE  = 'pg-edit-line';
     const LYR_EDIT_VERTS = 'pg-edit-verts';
+    const LYR_EDIT_HIT   = 'pg-edit-vertex-hit-area';
     const SRC_EDIT_MID   = 'pg-edit-mid';    // midpoint insert handles
     const LYR_EDIT_MID   = 'pg-edit-mid-verts';
 
     // ── Front pip sizing (km units) ────────────────────────────────────
     const PIP_SPACING_KM   = 150;   // km between pip centres along front
-    const PIP_COLD_BASE_KM = 40;    // half-base of cold front triangle
-    const PIP_COLD_HT_KM   = 70;    // height of cold front triangle
-    const PIP_WARM_R_KM    = 55;    // radius of warm front semicircle
+    const PIP_COLD_BASE_KM = 28;    // half-base of cold front triangle
+    const PIP_COLD_HT_KM   = 48;    // height of cold front triangle
+    const PIP_WARM_R_KM    = 38;    // radius of warm front semicircle
+    const FRONT_SMOOTHING_PASSES = 3;
 
     // ── Per-front-type defaults ────────────────────────────────────────
     const FRONT_CFG = {
@@ -89,10 +91,17 @@ export const ProductGen = (() => {
     let _editProduct = null;
     let _editCoords  = [];
     let _dragVertIdx = -1;
+    let _overEditVertex = false;
 
     // Named map-layer event handlers (needed for .off() cleanup)
-    const _onEditVertEnter = () => { _map.getCanvas().style.cursor = 'grab'; };
-    const _onEditVertLeave = () => { if (_dragVertIdx < 0) _map.getCanvas().style.cursor = ''; };
+    const _onEditVertEnter = () => {
+        _overEditVertex = true;
+        if (_dragVertIdx < 0) _map.getCanvas().style.cursor = 'move';
+    };
+    const _onEditVertLeave = () => {
+        _overEditVertex = false;
+        if (_dragVertIdx < 0) _map.getCanvas().style.cursor = '';
+    };
     const _onEditMidEnter  = () => { _map.getCanvas().style.cursor = 'copy'; };
     const _onEditMidLeave  = () => { if (_dragVertIdx < 0) _map.getCanvas().style.cursor = ''; };
 
@@ -573,7 +582,6 @@ export const ProductGen = (() => {
 
     // Finishing a front: save the open polyline to the products list, and reset the draft state.
     // Maybe later we can add a check to make sure that the front is not self-intersecting, but for now we will just let the user create any shape they want.
-    // FIXME: Smooth the front line so there are not so many sharp angles. Maybe use a Bezier curve or a spline to smooth the line.
     function _finishFront() {
         if (_draftCoords.length < 2) { _cancelDraft(); return; }
         _saveUndo();
@@ -660,14 +668,20 @@ export const ProductGen = (() => {
         _map.doubleClickZoom.disable();
         _updateEditLayer();
         _renderProductList();
-        _setHint('Drag vertex to move\nClick \u2295 midpoint to add vertex\nRight-click vertex to delete\nEsc to finish');
-        _map.on('mousedown',   LYR_EDIT_VERTS, _onEditVertMouseDown);
-        _map.on('mouseenter',  LYR_EDIT_VERTS, _onEditVertEnter);
-        _map.on('mouseleave',  LYR_EDIT_VERTS, _onEditVertLeave);
-        _map.on('contextmenu', LYR_EDIT_VERTS, _onEditVertContextMenu);
+        _setHint('Drag vertex to move\nClick \u2295 midpoint to add vertex\nRight-click or Alt-click vertex to delete\nEsc to finish');
+        _map.on('mousedown',   LYR_EDIT_HIT, _onEditVertMouseDown);
+        _map.on('click',       LYR_EDIT_HIT, _onEditVertClick);
+        _map.on('mouseenter',  LYR_EDIT_HIT, _onEditVertEnter);
+        _map.on('mouseleave',  LYR_EDIT_HIT, _onEditVertLeave);
+        _map.on('contextmenu', LYR_EDIT_HIT, _onEditVertContextMenu);
         _map.on('click',       LYR_EDIT_MID,   _onEditMidClick);
         _map.on('mouseenter',  LYR_EDIT_MID,   _onEditMidEnter);
         _map.on('mouseleave',  LYR_EDIT_MID,   _onEditMidLeave);
+        // Keep these listeners for the whole edit session. Re-registering
+        // them after each drag was unreliable while the edit GeoJSON source
+        // was also being replaced on every pointer move.
+        _map.on('mousemove', _onEditVertDrag);
+        _map.on('mouseup',   _onEditVertMouseUp);
     }
 
     // ------------------------------------------------------------------
@@ -682,10 +696,11 @@ export const ProductGen = (() => {
         } else if (_editProduct.kind === 'contour') {
             _editProduct.coords = [..._editCoords, _editCoords[0]];
         }
-        _map.off('mousedown',  LYR_EDIT_VERTS, _onEditVertMouseDown);
-        _map.off('mouseenter', LYR_EDIT_VERTS, _onEditVertEnter);
-        _map.off('mouseleave', LYR_EDIT_VERTS, _onEditVertLeave);
-        _map.off('contextmenu',LYR_EDIT_VERTS, _onEditVertContextMenu);
+        _map.off('mousedown',  LYR_EDIT_HIT, _onEditVertMouseDown);
+        _map.off('click',      LYR_EDIT_HIT, _onEditVertClick);
+        _map.off('mouseenter', LYR_EDIT_HIT, _onEditVertEnter);
+        _map.off('mouseleave', LYR_EDIT_HIT, _onEditVertLeave);
+        _map.off('contextmenu',LYR_EDIT_HIT, _onEditVertContextMenu);
         _map.off('click',      LYR_EDIT_MID,   _onEditMidClick);
         _map.off('mouseenter', LYR_EDIT_MID,   _onEditMidEnter);
         _map.off('mouseleave', LYR_EDIT_MID,   _onEditMidLeave);
@@ -697,6 +712,7 @@ export const ProductGen = (() => {
         _editProduct = null;
         _editCoords  = [];
         _dragVertIdx = -1;
+        _overEditVertex = false;
         if (_map.getSource(SRC_EDIT))     _map.getSource(SRC_EDIT).setData(_emptyFC());
         if (_map.getSource(SRC_EDIT_MID)) _map.getSource(SRC_EDIT_MID).setData(_emptyFC());
         _updateStylePanel();
@@ -754,13 +770,15 @@ export const ProductGen = (() => {
     // ------------------------------------------------------------------
 
     function _onEditVertMouseDown(e) {
-        if (!_editProduct) return;
+        if (!_editProduct || !e.features?.length || e.originalEvent?.button !== 0) return;
         e.preventDefault();
-        _dragVertIdx = e.features[0].properties.vertIdx;
+        _dragVertIdx = Number(e.features[0].properties.vertIdx);
+        if (!Number.isInteger(_dragVertIdx)) {
+            _dragVertIdx = -1;
+            return;
+        }
         _map.getCanvas().style.cursor = 'grabbing';
         _map.dragPan.disable();
-        _map.on('mousemove', _onEditVertDrag);
-        _map.on('mouseup',   _onEditVertMouseUp);
     }
 
     function _onEditVertDrag(e) {
@@ -778,24 +796,38 @@ export const ProductGen = (() => {
     function _onEditVertMouseUp() {
         if (_dragVertIdx < 0) return;
         _dragVertIdx = -1;
-        _map.off('mousemove', _onEditVertDrag);
-        _map.off('mouseup',   _onEditVertMouseUp);
         _map.dragPan.enable();
-        _map.getCanvas().style.cursor = 'grab';
+        _map.getCanvas().style.cursor = _overEditVertex ? 'move' : '';
     }
 
-    function _onEditVertContextMenu(e) {
-        if (!_editProduct) return;
-        e.originalEvent.preventDefault();  // suppress browser native context menu
+    function _removeEditVertex(index) {
+        if (!_editProduct || !Number.isInteger(index)) return false;
         const minVerts = _editProduct.kind === 'front' ? 2 : 3;
-        if (_editCoords.length <= minVerts) return;
-        const idx = e.features[0].properties.vertIdx;
-        _editCoords.splice(idx, 1);
+        if (_editCoords.length <= minVerts || index < 0 || index >= _editCoords.length) {
+            _setHint(`${_editProduct.kind === 'front' ? 'Fronts' : 'Contours'} require at least ${minVerts} vertices`);
+            return false;
+        }
+        _editCoords.splice(index, 1);
         const isOpen = _editProduct.kind === 'front';
         _editProduct.coords = isOpen ? [..._editCoords] : [..._editCoords, _editCoords[0]];
         _updateEditLayer();
         if (_editProduct.kind === 'contour')    _updateContourLayer();
         else if (_editProduct.kind === 'front') _updateFrontLayer();
+        _setHint('Drag vertex to move\nClick \u2295 midpoint to add vertex\nRight-click or Alt-click vertex to delete\nEsc to finish');
+        return true;
+    }
+
+    function _onEditVertClick(e) {
+        if (!e.originalEvent?.altKey || !e.features?.length) return;
+        e.preventDefault();
+        _removeEditVertex(Number(e.features[0].properties.vertIdx));
+    }
+
+    function _onEditVertContextMenu(e) {
+        if (!_editProduct || !e.features?.length) return;
+        e.preventDefault();
+        e.originalEvent?.preventDefault();  // suppress browser native context menu
+        _removeEditVertex(Number(e.features[0].properties.vertIdx));
     }
 
     function _onEditMidClick(e) {
@@ -819,14 +851,34 @@ export const ProductGen = (() => {
         _dragVertIdx = afterIdx + 1;
         _map.getCanvas().style.cursor = 'grabbing';
         _map.dragPan.disable();
-        _map.on('mousemove', _onEditVertDrag);
-        _map.on('mouseup',   _onEditVertMouseUp);
     }
 
     // ------------------------------------------------------------------
     // ------------------------------------------------------------------
     // Front pip geometry generation
     // ------------------------------------------------------------------
+
+    // Chaikin corner cutting gives hand-drawn fronts a stable, rounded path
+    // without spline overshoot. Keep the original vertices on the product so
+    // edit handles and exported user input remain unchanged.
+    function _smoothFront(coords, passes = FRONT_SMOOTHING_PASSES) {
+        if (!coords || coords.length < 3) return coords || [];
+        let result = coords.map(coord => [...coord]);
+        for (let pass = 0; pass < passes; pass++) {
+            const smoothed = [result[0]];
+            for (let i = 0; i < result.length - 1; i++) {
+                const a = result[i];
+                const b = result[i + 1];
+                smoothed.push(
+                    [0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]],
+                    [0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]],
+                );
+            }
+            smoothed.push(result[result.length - 1]);
+            result = smoothed;
+        }
+        return result;
+    }
 
     // Walk a polyline and collect pip positions with local coordinate frames
     function _pipPositions(coords, side) {
@@ -896,25 +948,48 @@ export const ProductGen = (() => {
         const cfg = FRONT_CFG[p.frontType] || {};
         const color = cfg.color || p.color;
         const feats = [];
+        const frontCoords = _smoothFront(p.coords);
 
         feats.push({
             type: 'Feature',
-            geometry: { type: 'LineString', coordinates: p.coords },
+            geometry: { type: 'LineString', coordinates: frontCoords },
             properties: { id: p.id, prodKind: 'front-line', color, width: p.width || 2 },
         });
 
         if (cfg.pipMode === 'none' || !p.coords || p.coords.length < 2) return feats;
 
         const side  = p.pipSide || 'right';
-        const side2 = side === 'right' ? 'left' : 'right';  // for stationary warm side
 
-        const wantCold = cfg.pipMode === 'cold' || cfg.pipMode === 'occ'  || cfg.pipMode === 'stat';
-        const wantWarm = cfg.pipMode === 'warm' || cfg.pipMode === 'stat';
+        // A stationary front uses one shared placement sequence. Alternating
+        // entries are triangles on the cold side and semicircles on the warm
+        // side; generating two complete sequences caused the previous paired
+        // (and visually non-alternating) symbols.
+        if (cfg.pipMode === 'stat') {
+            _pipPositions(frontCoords, side).forEach((position, index) => {
+                const { lng, lat, txKm, tyKm, nxKm, nyKm, cosLat } = position;
+                const isCold = index % 2 === 0;
+                const ring = isCold
+                    ? _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat)
+                    : _makeSemicircle(lng, lat, txKm, tyKm, -nxKm, -nyKm, cosLat);
+                feats.push({
+                    type: 'Feature',
+                    geometry: { type: 'Polygon', coordinates: [ring] },
+                    properties: {
+                        id: p.id,
+                        prodKind: 'front-pip',
+                        color: isCold ? '#3388ff' : '#ff3333',
+                    },
+                });
+            });
+            return feats;
+        }
+
+        const wantCold = cfg.pipMode === 'cold' || cfg.pipMode === 'occ';
+        const wantWarm = cfg.pipMode === 'warm';
 
         if (wantCold) {
-            const pipColor = cfg.pipMode === 'occ' ? '#9922cc' : (cfg.pipMode === 'stat' ? '#3388ff' : color);
-            const statSide = cfg.pipMode === 'stat' ? side : side;
-            _pipPositions(p.coords, statSide).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
+            const pipColor = cfg.pipMode === 'occ' ? '#9922cc' : color;
+            _pipPositions(frontCoords, side).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
                 const ring = _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat);
                 feats.push({ type:'Feature', geometry:{ type:'Polygon', coordinates:[ring] },
                     properties:{ id:p.id, prodKind:'front-pip', color:pipColor } });
@@ -922,9 +997,8 @@ export const ProductGen = (() => {
         }
 
         if (wantWarm) {
-            const pipColor = cfg.pipMode === 'stat' ? '#ff3333' : color;
-            const warmSide = cfg.pipMode === 'stat' ? side2 : side;
-            _pipPositions(p.coords, warmSide).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
+            const pipColor = color;
+            _pipPositions(frontCoords, side).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
                 const ring = _makeSemicircle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat);
                 feats.push({ type:'Feature', geometry:{ type:'Polygon', coordinates:[ring] },
                     properties:{ id:p.id, prodKind:'front-pip', color:pipColor } });
@@ -1011,6 +1085,20 @@ export const ProductGen = (() => {
             id: LYR_EDIT_VERTS, type: 'circle', source: SRC_EDIT,
             filter: ['==', '$type', 'Point'],
             paint: { 'circle-radius': 6, 'circle-color': '#00ffff', 'circle-stroke-color': '#005555', 'circle-stroke-width': 1.5, 'circle-opacity': 0.9 },
+        });
+        // A larger, nearly invisible interaction target makes vertices easy
+        // to acquire without making the teal handles visually oversized.
+        // Keep this above the visible vertex layer so it captures mousedown
+        // before MapLibre starts a map-pan gesture.
+        _map.addLayer({
+            id: LYR_EDIT_HIT, type: 'circle', source: SRC_EDIT,
+            filter: ['==', '$type', 'Point'],
+            paint: {
+                'circle-radius': 14,
+                'circle-color': '#00ffff',
+                'circle-opacity': 0.01,
+                'circle-stroke-width': 0,
+            },
         });
 
         // ── Edit midpoint insert handles ──────────────────────────────

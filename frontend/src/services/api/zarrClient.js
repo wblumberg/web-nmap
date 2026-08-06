@@ -42,6 +42,7 @@
 import { FetchStore, open, get, root } from 'zarrita';
 import * as apgl from 'autumnplot-gl';
 import { makeApglGrid } from '../../domain/gridFactory.js';
+import { runRollingFramePipeline, yieldToBrowser } from '../rollingFramePipeline.js';
 
 const ZARR_API_BASE = '/api/v1/zarr';
 
@@ -50,6 +51,51 @@ const ZARR_API_BASE = '/api/v1/zarr';
 /** @type {Map<string, object>} */
 const _cache = new Map();
 const _CACHE_MAX = 256;   // evict oldest when limit reached
+
+// Grid instances can be large (MRMS is 7000×3500) and are immutable for a
+// given geometry. Cache by the complete geometry descriptor so fixed grids are
+// shared while future moving grids naturally receive distinct instances.
+const _gridCache = new Map();
+
+function _gridCacheKey(gridInfo) {
+    const projParams = Object.fromEntries(
+        Object.entries(gridInfo.proj_params || {}).sort(([a], [b]) => a.localeCompare(b))
+    );
+    return JSON.stringify({
+        grid_type: gridInfo.grid_type,
+        ni: gridInfo.ni, nj: gridInfo.nj,
+        lat_min: gridInfo.lat_min, lat_max: gridInfo.lat_max,
+        lon_min: gridInfo.lon_min, lon_max: gridInfo.lon_max,
+        dx: gridInfo.dx, dy: gridInfo.dy,
+        ll_x: gridInfo.ll_x, ll_y: gridInfo.ll_y,
+        ur_x: gridInfo.ur_x, ur_y: gridInfo.ur_y,
+        sat_lon: gridInfo.sat_lon,
+        proj_params: projParams,
+    });
+}
+
+function _getOrMakeGrid(gridInfo) {
+    const key = _gridCacheKey(gridInfo);
+    const cached = _gridCache.get(key);
+    if (cached) return { grid: cached, cacheHit: true, buildMs: 0 };
+
+    const started = performance.now();
+    const grid = makeApglGrid(gridInfo);
+    const buildMs = performance.now() - started;
+    _gridCache.set(key, grid);
+    return { grid, cacheHit: false, buildMs };
+}
+
+function _resolveGrid(gridInfo, suppliedGrid) {
+    const key = _gridCacheKey(gridInfo);
+    if (suppliedGrid) {
+        const cached = _gridCache.get(key);
+        if (cached) return { grid: cached, cacheHit: true, supplied: cached === suppliedGrid, buildMs: 0 };
+        _gridCache.set(key, suppliedGrid);
+        return { grid: suppliedGrid, cacheHit: false, supplied: true, buildMs: 0 };
+    }
+    return { ..._getOrMakeGrid(gridInfo), supplied: false };
+}
 
 function _ck(sourceId, variables, key) {
     const vs = Array.isArray(variables) ? variables.join(',') : variables;
@@ -64,6 +110,23 @@ function _cachePut(ck, result) {
         _cache.delete(_cache.keys().next().value);
     }
     _cache.set(ck, result);
+}
+
+function _logVariableTimings(sourceId, key, entries) {
+    for (const [name, field, timing] of entries) {
+        if (field === null || timing === null) continue;
+        console.info(`[NMAP Zarr variable timing] ${sourceId}/${key}/${name}`, {
+            openMetadataMs: +timing.openMetadataMs.toFixed(1),
+            fetchDecodeMs: +timing.fetchDecodeMs.toFixed(1),
+            convertMs: +timing.convertMs.toFixed(1),
+            maxEventLoopLagMs: +timing.maxEventLoopLagMs.toFixed(1),
+            postDecodeYieldMs: +timing.postDecodeYieldMs.toFixed(1),
+            totalMs: +timing.totalMs.toFixed(1),
+            elements: timing.elements,
+            decodedBytes: timing.decodedBytes,
+            sourceType: timing.sourceType ?? 'Float16Array',
+        });
+    }
 }
 
 export function invalidateZarrSourceCache(sourceId) {
@@ -96,7 +159,10 @@ function _openStore(sourceId, key) {
  * @returns {Promise<Float16Array>}
  */
 async function _readArray(store, varName, tIdx = 0) {
+    const started = performance.now();
+    const openStarted = performance.now();
     const arr = await open(root(store).resolve(varName), { kind: 'array' });
+    const openFinished = performance.now();
     const shape = arr.shape;
 
     // Build selection: scalar index collapses the time axis; null = all elements.
@@ -107,18 +173,68 @@ async function _readArray(store, varName, tIdx = 0) {
         selection = [null, null];
     }
 
-    const result = await get(arr, selection);
+    const getStarted = performance.now();
+    let maxEventLoopLagMs = 0;
+    const lagSampleMs = 25;
+    let expectedTick = performance.now() + lagSampleMs;
+    const lagTimer = setInterval(() => {
+        const now = performance.now();
+        maxEventLoopLagMs = Math.max(maxEventLoopLagMs, now - expectedTick);
+        expectedTick = now + lagSampleMs;
+    }, lagSampleMs);
+
+    let result;
+    try {
+        result = await get(arr, selection);
+        // Promise continuations run as microtasks. Yield once so a timer delayed
+        // by synchronous codec work can record that delay before it is cleared.
+        await new Promise(resolve => setTimeout(resolve, 0));
+    } finally {
+        clearInterval(lagTimer);
+    }
+    const getFinished = performance.now();
 
     // zarrita returns an ndarray-like object; .data is the flat TypedArray.
     const flat = result.data;
 
-    if (flat instanceof Float16Array) return flat;
+    if (flat instanceof Float16Array) {
+        const postDecodeYieldMs = await yieldToBrowser();
+        return {
+            data: flat,
+            timing: {
+                openMetadataMs: openFinished - openStarted,
+                fetchDecodeMs: getFinished - getStarted,
+                convertMs: 0,
+                maxEventLoopLagMs,
+                postDecodeYieldMs,
+                totalMs: performance.now() - started,
+                elements: flat.length,
+                decodedBytes: flat.byteLength,
+            },
+        };
+    }
 
     // Cast everything else (float32, uint8, uint16, …) to Float16Array so
     // apgl.RawScalarField gets a consistent input type.
     const out = new Float16Array(flat.length);
+    const convertStarted = performance.now();
     out.set(flat);
-    return out;
+    const convertFinished = performance.now();
+    const postDecodeYieldMs = await yieldToBrowser();
+    return {
+        data: out,
+        timing: {
+            openMetadataMs: openFinished - openStarted,
+            fetchDecodeMs: getFinished - getStarted,
+            convertMs: convertFinished - convertStarted,
+            maxEventLoopLagMs,
+            postDecodeYieldMs,
+            totalMs: performance.now() - started,
+            elements: out.length,
+            decodedBytes: out.byteLength,
+            sourceType: flat.constructor?.name,
+        },
+    };
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────
@@ -140,37 +256,65 @@ async function _readArray(store, varName, tIdx = 0) {
  * @returns {Promise<{fields: Object<string, RawScalarField>, grid: object, gridInfo: object, key: string}>}
  */
 export async function fetchZarrFields(sourceId, key, variables, gridInfo, opts = {}) {
+    const frameStarted = performance.now();
     const ck = _ck(sourceId, variables, key);
     const cached = _cacheGet(ck);
-    if (cached) return cached;
+    if (cached) {
+        console.info(`[NMAP Zarr timing] ${sourceId}/${key}: cache hit`, {
+            totalMs: +(performance.now() - frameStarted).toFixed(1),
+        });
+        return cached;
+    }
 
-    const { zarrVarMap = {}, tIdx = 0 } = opts;
+    const { zarrVarMap = {}, tIdx = 0, apglGrid: suppliedGrid = null } = opts;
     const store = _openStore(sourceId, key);
-    const apglGrid = makeApglGrid(gridInfo);
+    const gridResult = _resolveGrid(gridInfo, suppliedGrid);
+    const apglGrid = gridResult.grid;
 
     // Fetch all variables in parallel
     const entries = await Promise.all(
         variables.map(async (varName) => {
             const zarrName = zarrVarMap[varName] ?? varName;
             try {
-                const data = await _readArray(store, zarrName, tIdx);
-                return [varName, new apgl.RawScalarField(apglGrid, data)];
+                const { data, timing } = await _readArray(store, zarrName, tIdx);
+                return [varName, new apgl.RawScalarField(apglGrid, data), timing];
             } catch (err) {
                 console.warn(
                     `[zarrClient] Failed to read "${zarrName}" from ` +
                     `${sourceId}/${key}:`, err.message
                 );
-                return [varName, null];
+                return [varName, null, null];
             }
         })
     );
 
     // Drop variables that failed to load (null) so make_layers() sees the same
     // shape as it would from the protobuf path (missing keys simply absent).
-    const fields = Object.fromEntries(entries.filter(([, v]) => v !== null));
+    const fields = Object.fromEntries(entries.filter(([, v]) => v !== null).map(([k, v]) => [k, v]));
 
     const result = { fields, grid: apglGrid, gridInfo, key };
     _cachePut(ck, result);
+    _logVariableTimings(sourceId, key, entries);
+    console.info(`[NMAP Zarr timing] ${sourceId}/${key}: frame ready`, {
+        gridCacheHit: gridResult.cacheHit,
+        suppliedGridReused: gridResult.supplied,
+        gridBuildMs: +gridResult.buildMs.toFixed(1),
+        variables: Object.fromEntries(entries.filter(([, v]) => v !== null).map(([name, , timing]) => [
+            name,
+            {
+                openMetadataMs: +timing.openMetadataMs.toFixed(1),
+                fetchDecodeMs: +timing.fetchDecodeMs.toFixed(1),
+                convertMs: +timing.convertMs.toFixed(1),
+                maxEventLoopLagMs: +timing.maxEventLoopLagMs.toFixed(1),
+                postDecodeYieldMs: +timing.postDecodeYieldMs.toFixed(1),
+                totalMs: +timing.totalMs.toFixed(1),
+                elements: timing.elements,
+                decodedBytes: timing.decodedBytes,
+                ...(timing.sourceType ? { sourceType: timing.sourceType } : {}),
+            },
+        ])),
+        frameTotalMs: +(performance.now() - frameStarted).toFixed(1),
+    });
     return result;
 }
 
@@ -211,43 +355,71 @@ function _openForecastStore(sourceId, cycle, fhr) {
  * @returns {Promise<{fields: Object<string, RawScalarField>, grid, gridInfo, key, fhr}>}
  */
 export async function fetchZarrForecastFields(sourceId, cycle, fhr, variables, gridInfo, opts = {}) {
+    const frameStarted = performance.now();
     const fcKey = `${cycle}_f${String(fhr).padStart(3, '0')}`;
     const ck = _ck(sourceId, variables, fcKey);
     const cached = _cacheGet(ck);
-    if (cached) return cached;
+    if (cached) {
+        console.info(`[NMAP Zarr timing] ${sourceId}/${fcKey}: cache hit`, {
+            totalMs: +(performance.now() - frameStarted).toFixed(1),
+        });
+        return cached;
+    }
 
-    const { zarrVarMap = {} } = opts;
+    const { zarrVarMap = {}, apglGrid: suppliedGrid = null } = opts;
     const store = _openForecastStore(sourceId, cycle, fhr);
-    const apglGrid = makeApglGrid(gridInfo);
+    const gridResult = _resolveGrid(gridInfo, suppliedGrid);
+    const apglGrid = gridResult.grid;
 
     const entries = await Promise.all(
         variables.map(async (varName) => {
             const zarrName = zarrVarMap[varName] ?? varName;
             try {
                 // The virtual store is already 2-D — no tIdx needed.
-                const data = await _readArray(store, zarrName, 0);
-                return [varName, new apgl.RawScalarField(apglGrid, data)];
+                const { data, timing } = await _readArray(store, zarrName, 0);
+                return [varName, new apgl.RawScalarField(apglGrid, data), timing];
             } catch (err) {
                 console.warn(
                     `[zarrClient] fetchZarrForecastFields: failed to read ` +
                     `"${zarrName}" from ${sourceId}/${cycle}/fhr/${fhr}:`, err.message
                 );
-                return [varName, null];
+                return [varName, null, null];
             }
         })
     );
 
-    const fields = Object.fromEntries(entries.filter(([, v]) => v !== null));
+    const fields = Object.fromEntries(entries.filter(([, v]) => v !== null).map(([k, v]) => [k, v]));
     const result = { fields, grid: apglGrid, gridInfo, key: fcKey, fhr };
     _cachePut(ck, result);
+    _logVariableTimings(sourceId, fcKey, entries);
+    console.info(`[NMAP Zarr timing] ${sourceId}/${fcKey}: frame ready`, {
+        gridCacheHit: gridResult.cacheHit,
+        suppliedGridReused: gridResult.supplied,
+        gridBuildMs: +gridResult.buildMs.toFixed(1),
+        variables: Object.fromEntries(entries.filter(([, v]) => v !== null).map(([name, , timing]) => [
+            name,
+            {
+                openMetadataMs: +timing.openMetadataMs.toFixed(1),
+                fetchDecodeMs: +timing.fetchDecodeMs.toFixed(1),
+                convertMs: +timing.convertMs.toFixed(1),
+                maxEventLoopLagMs: +timing.maxEventLoopLagMs.toFixed(1),
+                postDecodeYieldMs: +timing.postDecodeYieldMs.toFixed(1),
+                totalMs: +timing.totalMs.toFixed(1),
+                elements: timing.elements,
+                decodedBytes: timing.decodedBytes,
+                ...(timing.sourceType ? { sourceType: timing.sourceType } : {}),
+            },
+        ])),
+        frameTotalMs: +(performance.now() - frameStarted).toFixed(1),
+    });
     return result;
 }
 
 /**
  * Stream multiple forecast frames via the fhr-slice zarr passthrough.
  *
- * Analogous to dataClient.streamForecastFrames.  Fetches frames in parallel
- * batches and calls onFrame as each resolves.  Already-cached frames are
+ * Analogous to dataClient.streamForecastFrames. Fetches frames through a
+ * rolling, backpressured pool and prepares them in order. Already-cached frames are
  * delivered synchronously before any network requests.
  *
  * @param {string}   sourceId    - e.g. "HREF"
@@ -256,12 +428,20 @@ export async function fetchZarrForecastFields(sourceId, cycle, fhr, variables, g
  * @param {string[]} variables   - generic variable names
  * @param {object}   gridInfo    - grid descriptor from catalog
  * @param {function} onFrame     - called with ({ fields, grid, gridInfo, key, fhr }) for each frame
- * @param {object}   [opts]      - { zarrVarMap?, concurrency? }
+ * @param {object}   [opts]      - { zarrVarMap?, concurrency?, maxBufferedItems?, maxBufferedBytes? }
  */
 export async function streamZarrForecastFrames(
     sourceId, cycle, fhrs, variables, gridInfo, onFrame, opts = {}
 ) {
-    const { concurrency = 4, ...fetchOpts } = opts;
+    const streamStarted = performance.now();
+    let cachedFrames = 0;
+    let fetchedFrames = 0;
+    const {
+        concurrency = 4,
+        maxBufferedItems = 3,
+        maxBufferedBytes = 128 * 1024 * 1024,
+        ...fetchOpts
+    } = opts;
 
     // Serve cached frames first (synchronously, in order).
     const uncachedFhrs = [];
@@ -270,36 +450,42 @@ export async function streamZarrForecastFrames(
         const ck = _ck(sourceId, variables, fcKey);
         const cached = _cacheGet(ck);
         if (cached) {
+            cachedFrames++;
             onFrame({ ...cached, key: fcKey, fhr });
             await new Promise(r => setTimeout(r, 0));
         } else {
             uncachedFhrs.push(fhr);
         }
     }
-    if (!uncachedFhrs.length) return;
-
-    // Fetch uncached frames in batches.
-    for (let i = 0; i < uncachedFhrs.length; i += concurrency) {
-        const batch = uncachedFhrs.slice(i, i + concurrency);
-        const results = await Promise.allSettled(
-            batch.map(fhr =>
-                fetchZarrForecastFields(sourceId, cycle, fhr, variables, gridInfo, fetchOpts)
-            )
-        );
-        for (let j = 0; j < results.length; j++) {
-            const r = results[j];
-            const fhr = batch[j];
-            if (r.status === 'fulfilled') {
-                onFrame({ ...r.value, fhr });
-            } else {
-                console.warn(
-                    `[zarrClient] streamZarrForecastFrames: fhr=${fhr} for ` +
-                    `"${sourceId}/${cycle}" failed:`, r.reason?.message
-                );
-            }
-            await new Promise(r2 => setTimeout(r2, 0));
-        }
+    if (!uncachedFhrs.length) {
+        console.info(`[NMAP Zarr timing] ${sourceId}: forecast stream complete`, {
+            frames: fhrs.length, cachedFrames, fetchedFrames,
+            streamTotalMs: +(performance.now() - streamStarted).toFixed(1),
+        });
+        return;
     }
+
+    await runRollingFramePipeline(
+        uncachedFhrs,
+        fhr => fetchZarrForecastFields(sourceId, cycle, fhr, variables, gridInfo, fetchOpts),
+        async (result, fhr) => {
+            fetchedFrames++;
+            await onFrame({ ...result, fhr });
+        },
+        {
+            networkConcurrency: concurrency,
+            maxBufferedItems,
+            maxBufferedBytes,
+            onError: (err, fhr) => console.warn(
+                `[zarrClient] streamZarrForecastFrames: fhr=${fhr} for ` +
+                `"${sourceId}/${cycle}" failed:`, err?.message
+            ),
+        },
+    );
+    console.info(`[NMAP Zarr timing] ${sourceId}: forecast stream complete`, {
+        frames: fhrs.length, cachedFrames, fetchedFrames,
+        streamTotalMs: +(performance.now() - streamStarted).toFixed(1),
+    });
 }
 
 /**
@@ -316,12 +502,20 @@ export async function streamZarrForecastFrames(
  * @param {string[]} keys        - frame keys to load, oldest → newest
  * @param {object}   gridInfo    - grid descriptor
  * @param {function} onFrame     - called with ({ fields, grid, gridInfo, key }) for each frame
- * @param {object}   [opts]      - { zarrVarMap?, tIdx?, concurrency? }
+ * @param {object}   [opts]      - { zarrVarMap?, tIdx?, concurrency?, maxBufferedItems?, maxBufferedBytes? }
  */
 export async function streamZarrAnalysisFrames(
     sourceId, variables, keys, gridInfo, onFrame, opts = {}
 ) {
-    const { concurrency = 4, ...fetchOpts } = opts;
+    const streamStarted = performance.now();
+    let cachedFrames = 0;
+    let fetchedFrames = 0;
+    const {
+        concurrency = 4,
+        maxBufferedItems = 3,
+        maxBufferedBytes = 128 * 1024 * 1024,
+        ...fetchOpts
+    } = opts;
 
     // Serve cached frames first
     const uncachedKeys = [];
@@ -329,31 +523,39 @@ export async function streamZarrAnalysisFrames(
         const ck = _ck(sourceId, variables, key);
         const cached = _cacheGet(ck);
         if (cached) {
+            cachedFrames++;
             onFrame({ ...cached, key });
             await new Promise(r => setTimeout(r, 0));
         } else {
             uncachedKeys.push(key);
         }
     }
-    if (!uncachedKeys.length) return;
-
-    // Fetch uncached frames in batches
-    for (let i = 0; i < uncachedKeys.length; i += concurrency) {
-        const batch = uncachedKeys.slice(i, i + concurrency);
-        const results = await Promise.allSettled(
-            batch.map(key => fetchZarrFields(sourceId, key, variables, gridInfo, fetchOpts))
-        );
-        for (let j = 0; j < results.length; j++) {
-            const r = results[j];
-            if (r.status === 'fulfilled') {
-                onFrame({ ...r.value, key: batch[j] });
-            } else {
-                console.warn(
-                    `[zarrClient] Frame "${batch[j]}" for "${sourceId}" failed:`,
-                    r.reason?.message
-                );
-            }
-            await new Promise(r2 => setTimeout(r2, 0));
-        }
+    if (!uncachedKeys.length) {
+        console.info(`[NMAP Zarr timing] ${sourceId}: analysis stream complete`, {
+            frames: keys.length, cachedFrames, fetchedFrames,
+            streamTotalMs: +(performance.now() - streamStarted).toFixed(1),
+        });
+        return;
     }
+
+    await runRollingFramePipeline(
+        uncachedKeys,
+        key => fetchZarrFields(sourceId, key, variables, gridInfo, fetchOpts),
+        async (result, key) => {
+            fetchedFrames++;
+            await onFrame({ ...result, key });
+        },
+        {
+            networkConcurrency: concurrency,
+            maxBufferedItems,
+            maxBufferedBytes,
+            onError: (err, key) => console.warn(
+                `[zarrClient] Frame "${key}" for "${sourceId}" failed:`, err?.message
+            ),
+        },
+    );
+    console.info(`[NMAP Zarr timing] ${sourceId}: analysis stream complete`, {
+        frames: keys.length, cachedFrames, fetchedFrames,
+        streamTotalMs: +(performance.now() - streamStarted).toFixed(1),
+    });
 }

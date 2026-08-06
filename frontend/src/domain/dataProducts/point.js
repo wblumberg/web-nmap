@@ -200,65 +200,6 @@ function buildObsLayer(layerId, obsJson, spConfig, opts = {}) {
     return new apgl.PlotLayer(layerId, plot);
 }
 
-function buildScatterometerLayer(layerId, obsJson, opts = {}) {
-    const {
-        thin_fac = 16,
-        cmap = COLORMAPS['pw_speed850mb'],
-    } = opts;
-
-    // UnstructuredGrid cannot represent 4096 or more observations correctly:
-    // its internal texture dimensions no longer match the vector-array length.
-    // Keep one bounded GPU field instead of creating dozens of Barbs instances,
-    // each of which would allocate its own textures and render pass.
-    const MAX_RENDER_POINTS = 4000;
-    const validObs = obsJson.filter(o => {
-        const speed = Number(o?.data?.wind_speed_kt);
-        const direction = Number(o?.data?.wind_direction_deg);
-        return Number.isFinite(o?.coord?.lon)
-            && Number.isFinite(o?.coord?.lat)
-            && Number.isFinite(speed)
-            && Number.isFinite(direction);
-    });
-
-    if (!validObs.length) return null;
-
-    // Evenly sample the complete response so all swaths and observation times
-    // remain represented. Array.slice(0, limit) would bias the map toward one
-    // end of the time-ordered database response.
-    const renderObs = validObs.length <= MAX_RENDER_POINTS
-        ? validObs
-        : Array.from({ length: MAX_RENDER_POINTS }, (_, i) => (
-            validObs[Math.floor(i * validObs.length / MAX_RENDER_POINTS)]
-        ));
-
-    const grid = new apgl.UnstructuredGrid(renderObs.map(o => o.coord));
-    const u = new Float32Array(renderObs.length);
-    const v = new Float32Array(renderObs.length);
-
-    renderObs.forEach((o, i) => {
-        const speed = Number(o.data.wind_speed_kt);
-        const radians = Number(o.data.wind_direction_deg) * Math.PI / 180;
-
-        // Direction is meteorological "from": u is positive eastward and
-        // v is positive northward.
-        u[i] = -speed * Math.sin(radians);
-        v[i] = -speed * Math.cos(radians);
-    });
-
-    const wind = new apgl.RawVectorField(
-        grid,
-        u,
-        v,
-        { relative_to: 'earth' },
-    );
-    const barbs = new apgl.Barbs(wind, {
-        cmap,
-        thin_fac,
-        line_width: 2,
-    });
-    return new apgl.PlotLayer(layerId, barbs);
-}
-
 // ─── Product definitions ──────────────────────────────────────────────────────
 
 export default {
@@ -369,6 +310,12 @@ export default {
                 for (const k of KEYS) {
                     if (!(k in d)) d[k] = null;
                 }
+                // The API stores/transfers Celsius for this product, while the
+                // station model below is explicitly configured with Fahrenheit
+                // field names. Always materialize those keys; leaving them
+                // undefined makes RawObsField reject the scalar field.
+                d.tmpf = (d.tmpc != null) ? cToF(d.tmpc) : null;
+                d.dwpf = (d.dwpc != null) ? cToF(d.dwpc) : null;
                 d.wind = (d.sknt != null && d.drct != null)
                     ? [d.sknt, d.drct]
                     : [null, null];
@@ -798,12 +745,17 @@ export default {
         label: 'Recon. Aircraft Winds',
         group: 'point',
         available_for: ['RECON'],
-        data_keys: ['wind_dir_deg', 'wind_speed_kt', 'max_10s_flt_wind_kt'],
+        data_keys: [
+            'wind_dir_deg',
+            'wind_speed_kt',
+            'max_10s_flt_wind_kt',
+            'flight_level_temp_c',
+        ],
 
         make_layers(data, _grid) {
             console.log(`Building recon_winds layer with ${data.obs_json.length} points`);
             console.log(data.obs_json);
-            const KEYS = ['wind_speed_kt', 'wind_dir_deg'];
+            const KEYS = ['wind_speed_kt', 'wind_dir_deg', 'flight_level_temp_c'];
             const obsJson = (data.obs_json || []).map(o => {
                 const d = { ...o.data };
                 for (const k of KEYS) {
@@ -813,6 +765,7 @@ export default {
                 d.wind = (d.wind_speed_kt != null && drct != null)
                     ? [d.wind_speed_kt, drct]
                     : [null, null];
+                d.flight_level_temp_f = cToF(d.flight_level_temp_c);
                 return { coord: o.coord, valid_time: o.valid_time, data: d };
             });
             console.log(`Building recon_winds layer with ${obsJson.length} points`);
@@ -829,14 +782,27 @@ export default {
                     //    type: 'number', pos: 'll', cmap: apgl.colormaps.pw_td2m,
                     //    formatter: fmtDwpt, halo: false,
                     //},
-                    wind: { type: 'barb', pos: 'c', color: '#a2d5daec' },
+                    wind: {
+                        type: 'barb',
+                        pos: 'c',
+                        cmap: COLORMAPS['pw_t2m'],
+                        color_by: 'flight_level_temp_f',
+                        missing_color: '#808080',
+                    },
                 },
-                { thin_fac: 12, font_size: 14 }
+                { thin_fac: 25, font_size: 14 }
             );
             //const temp_cbar = apgl.makeColorBar(apgl.colormaps.pw_td2m, {label: "Dewpoint (F)", fontface: 'Trebuchet MS',
             //                                               ticks: [-40, -30, -20, -10, 0, 10, 20, 30, 40, 50, 60, 70, 80],
             //                                                orientation: 'horizontal', tick_direction: 'bottom'});
-            return { layers: [layer], colorbar: [], sampler: null };
+            const tempCbar = apgl.makeColorBar(COLORMAPS['pw_t2m'], {
+                label: 'RECON Flight-Level Temperature (°F)',
+                fontface: 'Trebuchet MS',
+                ticks: [-40, -20, 0, 20, 40, 60, 80, 100, 120],
+                orientation: 'horizontal',
+                tick_direction: 'bottom',
+            });
+            return { layers: [layer], colorbar: [tempCbar], sampler: null };
         },
     },
 
@@ -845,28 +811,26 @@ export default {
         group: 'point',
         available_for: ['ASCAT'],
         data_keys: ['wind_speed_kt', 'wind_direction_deg', 'valid_time'],
-
-        make_layers(data, _grid) {
-            const cmap = COLORMAPS['pw_speed850mb'];
-            const layer = buildScatterometerLayer(
-                'ascat_winds',
-                data.obs_json || [],
-                // Scatterometer WVCs are dense.  Keep the initial continental
-                // view responsive; the renderer exposes more cells on zoom.
-                { thin_fac: 16, cmap }
-            );
-            const colorbar = apgl.makeColorBar(cmap, {
+        // Dense scatterometer ranges are delivered as bounded pages and merged
+        // transparently by DataClient before frame reconstruction.
+        point_range_page_size: 100000,
+        point_range_paginate: true,
+        renderer: 'temporal-scatterometer',
+        layer_id: 'scatterometer_winds',
+        scatterometer_options: {
+            thinFac: 25,
+            cmap: COLORMAPS['scatterometer_wind_speed'],
+            lineWidth: 1.5,
+            barbSizeMultiplier: 0.5,
+        },
+        make_colorbars() {
+            return [apgl.makeColorBar(COLORMAPS['scatterometer_wind_speed'], {
                 label: 'ASCAT Wind Speed (kt)',
                 fontface: 'Trebuchet MS',
                 ticks: [0, 10, 20, 30, 40, 50, 60, 70],
                 orientation: 'horizontal',
                 tick_direction: 'bottom',
-            });
-            return {
-                layers: layer ? [layer] : [],
-                colorbar: [colorbar],
-                sampler: null,
-            };
+            })];
         },
     },
 
@@ -977,14 +941,9 @@ export default {
             const strike_age_colors = ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'];
             const strike_age_cmap = new apgl.ColorMap(strike_age_levels, strike_age_colors, {overflow_color: '#4d0014'});
 
-            // Normalize incoming obs JSON and ensure keys exist
-            const obsJson = (data.obs_json || []).map(o => {
-                const d = { ...o.data };
-                for (const k of ['age_minutes', 'peak_current', 'polarity']) {
-                    if (!(k in d)) d[k] = null;
-                }
-                return { coord: o.coord, valid_time: o.valid_time, data: d };
-            });
+            const obsJson = data.obs_json || [];
+            const ageReferenceMs = Number(data.age_reference_ms);
+            const observationTimes = data.obs_time_ms;
 
             // Helper to extract lon/lat from either {lon,lat} or [lon,lat]
             const getLonLat = coord => {
@@ -997,14 +956,20 @@ export default {
             // Sort oldest-first so that newer (lower age) strikes are drawn last
             // and appear on top when many points overlap.
             const strikes = obsJson
-                .map(o => {
+                .map((o, index) => {
                     const [lon, lat] = getLonLat(o.coord);
-                    const age = o.data.age_minutes;
+                    const observedMs = observationTimes?.[index] ?? o.valid_time_ms ?? Date.parse(o.valid_time);
+                    const computedAge = Number.isFinite(ageReferenceMs) && Number.isFinite(observedMs)
+                        ? (ageReferenceMs - observedMs) / 60_000
+                        : null;
+                    // Retain compatibility with individually fetched point data
+                    // that may already carry an API-computed age.
+                    const age = computedAge ?? o.data?.age_minutes ?? null;
                     if (lon == null || lat == null || age == null) return null;
                     // polarity may be provided or derived from peak_current sign
                     let pol = null;
-                    if (o.data.polarity != null) pol = String(o.data.polarity);
-                    else if (o.data.peak_current != null) pol = (o.data.peak_current > 0) ? '+' : (o.data.peak_current < 0 ? '-' : '');
+                    if (o.data?.polarity != null) pol = String(o.data.polarity);
+                    else if (o.data?.peak_current != null) pol = (o.data.peak_current > 0) ? '+' : (o.data.peak_current < 0 ? '-' : '');
                     else pol = '';
                     return { lon, lat, polarity: pol, age };
                 })

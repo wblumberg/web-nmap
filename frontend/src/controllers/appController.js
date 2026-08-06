@@ -72,12 +72,23 @@ import {
 } from '../services/api/dataClient.js';
 import { PRODUCT_SUITES, PRODUCT_GROUPS } from '../domain/dataProducts/productIndex.js';
 import { makeApglGrid }   from '../domain/gridFactory.js';
-import { buildMultiLayers, buildProgressiveMultiLayers } from '../domain/layerBuilder.js';
+import {
+    buildMultiLayers,
+    buildProgressiveMultiLayers,
+    buildTemporalScatterometerLayers,
+} from '../domain/layerBuilder.js';
 import { getState, setState } from '../app/store.js';
 import { LayerManager }    from '../views/panels/productManager.js';
 import { ProductGen }      from '../views/panels/productGenView.js';
 import { DatasetStatus }   from '../views/panels/datasetStatus.js';
+import { BasemapStyleView } from '../views/panels/basemapStyleView.js';
 import { resolveTitle }    from '../domain/titleResolver.js';
+import {
+    buildPointFrames,
+    normalizePointPolicy,
+    pointRangeForFrames,
+} from '../domain/pointFrames.js';
+import { runRollingFramePipeline } from '../services/rollingFramePipeline.js';
 
 // Load TimeMatcher (IIFE side-effect import — sets window.TimeMatcher)
 import './timeMatcherController.js';
@@ -139,6 +150,10 @@ let _sourceUpdateState  = [];
 let _autoUpdateSse      = null;
 let _autoUpdateActive   = false;
 let _autoUpdatePending  = new Set();
+
+// Accumulates switch-to-render latency while the user plays through a loop.
+// A summary is emitted after every frame has reached a MapLibre render event.
+let _loopRenderTiming = null;
 
 // ── Map title element (position:absolute inside #map — stays locked to bottom of viewport) ──
 /** @type {HTMLDivElement|null} */
@@ -222,11 +237,23 @@ export async function init() {
         center: [-97.5, 38.5],   // centered on CONUS
         zoom: 4,
         maxZoom: 7,
-    });
-    _map.on('style.load', () => {
-        _map.setProjection({ type: 'globe' });
+        // Keep recently visited globe tiles resident across a few more zoom
+        // levels, discard obsolete in-flight zoom requests, and rely on the
+        // immutable HTTP cache rather than revalidating static basemap tiles.
+        maxTileCacheZoomLevels: 7,
+        cancelPendingTileRequestsWhileZooming: true,
+        refreshExpiredTiles: false,
+        // MapLibre does not resolve root-relative URLs found inside TileJSON
+        // before passing them to Request(). Make every map resource absolute
+        // at request time while retaining the hostname used to open the app.
+        transformRequest: url => ({
+            url: new URL(url, window.location.origin).href,
+        }),
     });
     setState({ map: _map });
+    // Register before the initial style finishes loading so the persisted
+    // basemap projection and layer settings are applied on the first paint.
+    BasemapStyleView.init(_map);
 
     // ── Step 5: Wire everything after the map's GL context is ready ──
     //
@@ -354,6 +381,12 @@ function _wireToolbar() {
         btn.classList.toggle('active', nowOpen);
     });
 
+    // ── Basemap style configuration ──
+    wire('#btn-basemap', () => {
+        const btn = document.querySelector('#btn-basemap');
+        btn.classList.toggle('active', BasemapStyleView.toggle());
+    });
+
     // ── Data Sampler popup toggle ──
     wire('#btn-sampler', () => {
         _samplerEnabled = !_samplerEnabled;
@@ -430,6 +463,7 @@ function _wireKeyboard() {
 //   4. Set up colorbars, readout, start at newest frame
 
 async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip, frames }) {
+    const loadStarted = performance.now();
     console.group(
         '%c[NMAP]%c Loading data — %d source(s), %d frame(s), dominant=%s',
         'color:#55d46a;font-weight:bold', 'color:inherit',
@@ -512,6 +546,11 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
 
         console.info('[NMAP] Data load complete — %d MultiPlotLayer(s) active',
             _activeMultiLayers.length);
+        console.info('[NMAP timing] Full data load pipeline complete', {
+            sources: sources.length,
+            frames: sortedFrames.length,
+            totalMs: +(performance.now() - loadStarted).toFixed(1),
+        });
 
     } catch (err) {
         console.error('[NMAP] Error during data load:', err);
@@ -687,7 +726,7 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
         await streamForecastFramesAuto(
             src.id, dataKeys, cycleStr, fhrs, gridInfo,
             // onFrame callback — invoked for each frame as it arrives from the stream
-            ({ fields, gridInfo, key: serverKey }) => {
+            async ({ fields, gridInfo, key: serverKey }) => {
                 const frameKey = serverKeyToFrameKey.get(serverKey) || serverKey;
                 loaded++;
 
@@ -708,12 +747,15 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
                     onFirstFrame?.();
                 } else {
                     // Subsequent frame: append to existing layers
-                    progressive.addFrame(frameKey, fields);
+                    await progressive.addFrame(frameKey, fields);
                 }
                 onProgress?.(loaded, totalFrames);
             },
             src.entry,
-            { queryParams },
+            {
+                queryParams,
+                apglGrid: grid,
+            },
         );
 
         if (!progressive) {
@@ -759,7 +801,7 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
 
         await streamAnalysisFramesAuto(
             src.id, dataKeys, apiKeys, gridInfo,
-            ({ fields, gridInfo: _gi, key: serverKey }) => {
+            async ({ fields, gridInfo: _gi, key: serverKey }) => {
                 // All dominant frameKeys that map to this API key
                 const frameKeys = apiKeyToFrameKeys.get(serverKey) || [serverKey];
                 const primaryFrameKey = frameKeys[0];
@@ -787,18 +829,21 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
                     onFirstFrame?.();
                     // Register any additional dominant keys that share this API key
                     for (let i = 1; i < frameKeys.length; i++) {
-                        progressive.addFrame(frameKeys[i], fields);
+                        await progressive.addFrame(frameKeys[i], fields);
                     }
                 } else {
                     // Register all dominant keys that map to this API key
                     for (const frameKey of frameKeys) {
-                        progressive.addFrame(frameKey, fields);
+                        await progressive.addFrame(frameKey, fields);
                     }
                 }
                 onProgress?.(loaded, apiKeys.length);
             },
             src.entry,   // contains zarr_transport + variable_map flags
-            { queryParams },
+            {
+                queryParams,
+                apglGrid: grid,
+            },
         );
 
         if (!progressive) {
@@ -826,7 +871,7 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
             try {
                 const result = await fetchAnalysisFieldsAuto(
                     src.id, dataKeys, apiKey, gridInfo, src.entry,
-                    { queryParams }
+                    { queryParams, apglGrid: grid }
                 );
                 return { frameKey, fields: result.fields };
             } catch (err) {
@@ -871,23 +916,22 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
         let loaded = 1;
         onProgress?.(loaded, totalFrames);
 
-        // Fetch remaining frames in batches
+        // Keep network requests rolling while preparing one frame at a time.
         const remaining = [
             ...frameEntries.slice(0, firstIndex),
             ...frameEntries.slice(firstIndex + 1),
         ];
-        const BATCH_SIZE = 4;
-        for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
-            const batch = remaining.slice(i, i + BATCH_SIZE);
-            const results = await Promise.all(batch.map(fetchOneFrame));
-            for (const { frameKey, fields } of results) {
+        await runRollingFramePipeline(
+            remaining,
+            fetchOneFrame,
+            async ({ frameKey, fields }) => {
                 if (fields) {
-                    progressive.addFrame(frameKey, fields);
+                    await progressive.addFrame(frameKey, fields);
                     loaded++;
                 }
-            }
-            onProgress?.(loaded, totalFrames);
-        }
+                onProgress?.(loaded, totalFrames);
+            },
+        );
 
         console.info(`[NMAP] Loaded ${loaded}/${totalFrames} frames for "${src.id}/${productId}" (per-file)`);
         _sourceUpdateState.push({
@@ -1012,24 +1056,23 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
         : null;
     onProgress?.(loaded, totalFrames);
 
-    // Fetch remaining frames in small parallel batches.
+    // Keep requests rolling while bounding decoded geometry waiting for preparation.
     const remaining = [
         ...frameTimes.slice(0, firstIndex),
         ...frameTimes.slice(firstIndex + 1),
     ];
-    const BATCH_SIZE = 4;
-    for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
-        const batch   = remaining.slice(i, i + BATCH_SIZE);
-        const results = await Promise.all(batch.map(fetchOneFrame));
-        for (const { frameKey, data } of results) {
+    await runRollingFramePipeline(
+        remaining,
+        fetchOneFrame,
+        async ({ frameKey, data }) => {
             if (data) {
-                progressive.addFrame(frameKey, data);
+                await progressive.addFrame(frameKey, data);
                 if (_geometryDataHasFeatures(data)) lastNonEmptyData = data;
                 loaded++;
             }
-        }
-        onProgress?.(loaded, totalFrames);
-    }
+            onProgress?.(loaded, totalFrames);
+        },
+    );
 
     console.info(
         `[NMAP] Loaded ${loaded}/${totalFrames} geometry frames for "${src.id}/${productId}"`
@@ -1063,8 +1106,8 @@ function _geometryDataHasFeatures(data) {
  *   - No grid_info call: UnstructuredGrid is built per-frame from the lat/lon
  *     values embedded in the PointResponse, so moving sources (ships, lightning)
  *     update their point positions on every frame step.
- *   - No streaming endpoint: each frame is a single fetchDbPoints() call so
- *     they are fetched in parallel batches rather than a single stream.
+ *   - One raw-range Protobuf request covers every overlapping frame window;
+ *     frame selection and age calculation happen locally over the unique pool.
  *   - data_keys are forwarded to the backend `fields=` query param so only
  *     the properties the product's SPConfig references are transferred.
  *
@@ -1072,6 +1115,7 @@ function _geometryDataHasFeatures(data) {
  * @param {Date[]} frameTimes - sorted oldest → newest
  */
 async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress } = {}) {
+    const sourceStarted = performance.now();
     // ── Step A: Pick product + determine which fields to request ──
     const productId = src.productKey || _pickDefaultProduct(src.id);
     if (!productId) {
@@ -1090,10 +1134,16 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
     );
 
     // ── Step B: Match frame times to available API keys ──
-    const isDominantPt = src.id === (_currentLoadConfig?.dominantId);
-    const frameToKey = isDominantPt
-        ? await _matchAnalysisFrames(src, frameTimes, queryParams)
-        : await _matchFramesViaApi(src, frameTimes, queryParams);
+    const matchingStarted = performance.now();
+    // Point range loading uses the displayed frame dates as window centers and
+    // never dereferences matched API keys. This applies equally to dominant and
+    // secondary point sources; empty local windows naturally represent missing
+    // secondary data without a separate catalog/build_map round trip.
+    const frameToKey = new Map(frameTimes.map(frameTime => [
+        frameTime.getTime(),
+        _dateToKey(frameTime),
+    ]));
+    const matchingFinished = performance.now();
     if (!frameToKey.size) {
         console.warn(`[NMAP] No matching times found for source "${src.id}" — skipping`);
         return;
@@ -1103,34 +1153,109 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
     const frameEntries = [...frameToKey.entries()];   // [[ms, apiKey], ...]
     const totalFrames  = frameEntries.length;
 
-    // ── Step C: Fetch frames in small parallel batches ──
-    //
-    // Point frames are fetched via protobuf PointResponse.  Each response
-    // already contains lat/lon for all points in that frame, so no separate
-    // grid_info call is needed.  The null grid is passed to make_layers()
-    // and is ignored by buildObsLayer() which constructs its own
-    // UnstructuredGrid from the obs coords.
+    // ── Step C: Fetch one raw range and reconstruct frames locally ──
+    // Point windows are centered on the displayed (dominant) frame time. The
+    // matched source key only establishes that this source has data near the
+    // frame; using it as the center can make window boundaries jitter between
+    // frames and cause otherwise-current stations to flicker.
+    const catalogPolicy = normalizePointPolicy(src.entry || {});
+    const frameSpecs = frameEntries.map(([frameMs]) => ({
+        frameKey: _dateToKey(new Date(frameMs)),
+        centerMs: frameMs,
+    }));
+    const requiredRange = pointRangeForFrames(frameSpecs, catalogPolicy);
 
-    const fetchOneFrame = async ([frameMs, apiKey]) => {
-        const frameKey = _dateToKey(new Date(frameMs));
-        try {
-            const { obs_json } = await DataClient.fetchDbPoints(src.id, dataKeys, apiKey, {
+    let rangeResult;
+    const rangeRequestStarted = performance.now();
+    try {
+        rangeResult = await DataClient.fetchDbPointRange(
+            src.id,
+            dataKeys,
+            new Date(requiredRange.startMs),
+            new Date(requiredRange.endMs),
+            {
                 queryParams,
-            });
-            return { frameKey, data: { obs_json } };
-        } catch (err) {
-            console.warn(`[NMAP] Failed to fetch point frame ${frameKey} for "${src.id}":`, err.message);
-            return { frameKey, data: null };
-        }
-    };
-
-    // Find first successful frame to bootstrap the progressive build
-    let firstResult = null;
-    let firstIndex  = 0;
-    for (let i = 0; i < frameEntries.length; i++) {
-        const r = await fetchOneFrame(frameEntries[i]);
-        if (r.data) { firstResult = r; firstIndex = i; break; }
+                limit: productSuite.point_range_page_size ?? productSuite.point_range_limit,
+                paginate: productSuite.point_range_paginate === true,
+            },
+        );
+    } catch (err) {
+        console.warn(`[NMAP] Failed to fetch point range for "${src.id}":`, err.message);
+        return;
     }
+    const rangeRequestFinished = performance.now();
+
+    // Response metadata is authoritative. Catalog policy is used to calculate
+    // the initial range before that response is available.
+    const responsePolicy = normalizePointPolicy({
+        ...src.entry,
+        ...(rangeResult.meta || {}),
+    });
+    if (rangeResult.meta?.possibly_truncated === 'true') {
+        console.warn(
+            `[NMAP] Point range for "${src.id}" reached the API row limit; ` +
+            'some loop frames may be incomplete.'
+        );
+    }
+
+    if (productSuite.renderer === 'temporal-scatterometer') {
+        const layerBuildStarted = performance.now();
+        const progressive = buildTemporalScatterometerLayers(
+            productSuite,
+            rangeResult.obs_json,
+            frameSpecs,
+            responsePolicy,
+            namespace,
+        );
+        for (const layer of progressive.layers) {
+            try { _map.addLayer(layer, 'coastline'); }
+            catch (err) { console.error(`[NMAP] FAILED to add layer "${layer.id}":`, err); }
+        }
+        _activeMultiLayers.push(...progressive.layers);
+        _layerControllers.push(progressive.controller);
+        if (progressive.colorbars?.length) _activeColorbars.push(...progressive.colorbars);
+        onFirstFrame?.();
+        onProgress?.(totalFrames, totalFrames);
+        console.info(`[NMAP timing] Temporal point loop ${src.id}/${productId} prepared`, {
+            matchingMs: +(matchingFinished - matchingStarted).toFixed(1),
+            requestAndDecodeMs: +(rangeRequestFinished - rangeRequestStarted).toFixed(1),
+            layerBuildMs: +(performance.now() - layerBuildStarted).toFixed(1),
+            observations: rangeResult.obs_json.length,
+            framesPrepared: totalFrames,
+            gpuUploadsPerFrameStep: 0,
+            sourceTotalMs: +(performance.now() - sourceStarted).toFixed(1),
+        });
+        _sourceUpdateState.push({
+            srcId: src.id,
+            addFrame: progressive.addFrame,
+            removeFrame: progressive.removeFrame,
+            controller: progressive.controller,
+            isPointObs: true,
+            isForecast: false,
+            dataKeys,
+            productSuite,
+            cycleTime: null,
+            queryParams,
+        });
+        return;
+    }
+
+    const reconstructionStarted = performance.now();
+    const dataByFrame = buildPointFrames(
+        rangeResult.obs_json,
+        frameSpecs,
+        responsePolicy,
+    );
+    const frameResults = frameSpecs.map(({ frameKey }) => ({
+        frameKey,
+        data: dataByFrame.get(frameKey),
+    }));
+    const reconstructionFinished = performance.now();
+
+    // Find a non-empty frame to bootstrap the progressive layer build.
+    let firstIndex = frameResults.findIndex(result => result.data?.obs_json?.length);
+    if (firstIndex < 0) firstIndex = frameResults.findIndex(result => result.data);
+    const firstResult = firstIndex >= 0 ? frameResults[firstIndex] : null;
 
     if (!firstResult) {
         console.warn(`[NMAP] No data loaded for "${src.id}" — skipping layer build`);
@@ -1142,9 +1267,12 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
     console.info(
         `[NMAP] First point frame "${firstResult.frameKey}" — building layers (namespace="${namespace}")`
     );
+    const frameBuildDurations = [];
+    let frameBuildStarted = performance.now();
     const progressive = buildProgressiveMultiLayers(
         productSuite, firstResult.frameKey, firstResult.data, null, namespace
     );
+    frameBuildDurations.push({ key: firstResult.frameKey, ms: performance.now() - frameBuildStarted });
 
     for (const ml of progressive.layers) {
         try { _map.addLayer(ml, 'coastline'); }
@@ -1158,25 +1286,45 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
     let loaded = 1;
     onProgress?.(loaded, totalFrames);
 
-    // Fetch the remaining frames in parallel batches
+    // All remaining frames are local views over the same decoded pool.
     const remaining = [
-        ...frameEntries.slice(0, firstIndex),
-        ...frameEntries.slice(firstIndex + 1),
+        ...frameResults.slice(0, firstIndex),
+        ...frameResults.slice(firstIndex + 1),
     ];
-    const BATCH_SIZE = 6;
-    for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
-        const batch   = remaining.slice(i, i + BATCH_SIZE);
-        const results = await Promise.all(batch.map(fetchOneFrame));
-        for (const { frameKey, data } of results) {
+    await runRollingFramePipeline(
+        remaining,
+        result => Promise.resolve(result),
+        async ({ frameKey, data }) => {
             if (data) {
-                progressive.addFrame(frameKey, data);
+                frameBuildStarted = performance.now();
+                await progressive.addFrame(frameKey, data);
+                frameBuildDurations.push({ key: frameKey, ms: performance.now() - frameBuildStarted });
                 loaded++;
             }
-        }
-        onProgress?.(loaded, totalFrames);
-    }
+            onProgress?.(loaded, totalFrames);
+        },
+        // Point frames are already local, so there is no benefit to multiple
+        // fetch slots; the pipeline is used here for its between-frame yield.
+        { networkConcurrency: 1, maxBufferedItems: 1 },
+    );
 
     console.info(`[NMAP] Loaded ${loaded}/${totalFrames} point frames for "${src.id}/${productId}"`);
+    const frameBuildTotal = frameBuildDurations.reduce((sum, item) => sum + item.ms, 0);
+    const slowestFrame = frameBuildDurations.reduce(
+        (slowest, item) => (!slowest || item.ms > slowest.ms) ? item : slowest,
+        null,
+    );
+    console.info(`[NMAP timing] Point loop ${src.id}/${productId} prepared`, {
+        matchingMs: +(matchingFinished - matchingStarted).toFixed(1),
+        requestAndDecodeMs: +(rangeRequestFinished - rangeRequestStarted).toFixed(1),
+        frameReconstructionMs: +(reconstructionFinished - reconstructionStarted).toFixed(1),
+        frameLayerBuildTotalMs: +frameBuildTotal.toFixed(1),
+        averageFrameLayerBuildMs: +(frameBuildTotal / frameBuildDurations.length).toFixed(1),
+        slowestFrame: slowestFrame && { key: slowestFrame.key, ms: +slowestFrame.ms.toFixed(1) },
+        observations: rangeResult.obs_json.length,
+        framesPrepared: frameBuildDurations.length,
+        sourceTotalMs: +(performance.now() - sourceStarted).toFixed(1),
+    });
     _sourceUpdateState.push({
         srcId: src.id, addFrame: progressive.addFrame, removeFrame: progressive.removeFrame,
         controller: progressive.controller, isPointObs: true, isForecast: false, dataKeys,
@@ -1277,18 +1425,17 @@ async function _loadProfileObsSource(src, frameTimes, { onFirstFrame, onProgress
         ...frameEntries.slice(0, firstIndex),
         ...frameEntries.slice(firstIndex + 1),
     ];
-    const BATCH_SIZE = 6;
-    for (let i = 0; i < remaining.length; i += BATCH_SIZE) {
-        const batch = remaining.slice(i, i + BATCH_SIZE);
-        const results = await Promise.all(batch.map(fetchOneFrame));
-        for (const { frameKey, data } of results) {
+    await runRollingFramePipeline(
+        remaining,
+        fetchOneFrame,
+        async ({ frameKey, data }) => {
             if (data) {
-                progressive.addFrame(frameKey, data);
+                await progressive.addFrame(frameKey, data);
                 loaded++;
             }
-        }
-        onProgress?.(loaded, totalFrames);
-    }
+            onProgress?.(loaded, totalFrames);
+        },
+    );
 
     console.info(`[NMAP] Loaded ${loaded}/${totalFrames} profile frames for "${src.id}/${productId}"`);
     _sourceUpdateState.push({
@@ -1497,6 +1644,8 @@ function _setFrame(idx) {
 
     // Tell each source's MultiPlotLayer controller to switch to this frame
     const key = _frameKeys[_currentFrameIdx];
+    const frameNumber = _currentFrameIdx + 1;
+    const renderStarted = performance.now();
     console.warn(`[NMAP] _setFrame(${idx}) → idx=${_currentFrameIdx} key="${key}"`);
     console.warn(`[NMAP]   _layerControllers.length=${_layerControllers.length}`);
     console.warn(`[NMAP]   _activeMultiLayers.length=${_activeMultiLayers.length}`);
@@ -1522,6 +1671,29 @@ function _setFrame(idx) {
 
     _updateFrameDisplay();
     _updateMapTitle(_frameTimes[_currentFrameIdx]);
+
+    // MapLibre's render event marks completion of the next map render pass.
+    // This measures UI-visible frame-switch latency (not a GPU timer query).
+    _map.once('render', () => {
+        const elapsed = performance.now() - renderStarted;
+        console.info(`[NMAP timing] Frame ${frameNumber}/${_frameTimes.length} ${key} render event: ${elapsed.toFixed(1)} ms`);
+        if (!_loopRenderTiming || _loopRenderTiming.seen.has(key)) return;
+        _loopRenderTiming.seen.add(key);
+        _loopRenderTiming.samples.push(elapsed);
+        if (_loopRenderTiming.seen.size === _frameKeys.length) {
+            const samples = _loopRenderTiming.samples;
+            const total = samples.reduce((sum, value) => sum + value, 0);
+            console.info('[NMAP timing] Full playback loop render summary', {
+                frames: samples.length,
+                elapsedWallMs: +(performance.now() - _loopRenderTiming.started).toFixed(1),
+                renderLatencyTotalMs: +total.toFixed(1),
+                averageRenderLatencyMs: +(total / samples.length).toFixed(1),
+                minRenderLatencyMs: +Math.min(...samples).toFixed(1),
+                maxRenderLatencyMs: +Math.max(...samples).toFixed(1),
+            });
+            _loopRenderTiming = null;
+        }
+    });
 }
 
 /**
@@ -1577,6 +1749,7 @@ function _stopPlayback() {
         _loopEndTimeout = null;
     }
     _playbackMode = 'pause';
+    _loopRenderTiming = null;
 }
 
 /**
@@ -1602,6 +1775,11 @@ function _togglePlayback(mode) {
     _stopPlayback();
     _playbackMode = mode;
     if (mode === 'rock') _rockDirection = 1;
+    _loopRenderTiming = {
+        started: performance.now(),
+        seen: new Set(),
+        samples: [],
+    };
 
     // Named tick function so the end-of-loop pause can restart the same interval.
     const tick = () => {
@@ -1683,6 +1861,7 @@ function _clearActiveLayers() {
     _frameTimes        = [];
     _frameKeys         = [];
     _currentFrameIdx   = -1;
+    _loopRenderTiming  = null;
 
     // Hide the title panel (keep it in the DOM for reuse on next load)
     if (_titleEl) {
@@ -1812,7 +1991,7 @@ function _setupReadout() {
             const sampler = ctrl.getSampler?.();
             if (!sampler) continue;
             try {
-                const result = sampler(coord.lng, coord.lat);
+                const result = sampler(coord.lng, coord.lat, { zoom: _map.getZoom() });
                 if (result) {
                     for (const [k, v] of Object.entries(result)) hits.push({ key: k, val: v });
                 }
@@ -1822,7 +2001,7 @@ function _setupReadout() {
         // Legacy fallback — samplers from non-progressive paths
         if (hits.length === 0 && _activeSampler) {
             try {
-                const result = _activeSampler(coord.lng, coord.lat);
+                const result = _activeSampler(coord.lng, coord.lat, { zoom: _map.getZoom() });
                 if (result) {
                     for (const [k, v] of Object.entries(result)) hits.push({ key: k, val: v });
                 }
@@ -2074,10 +2253,25 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
             }
 
             const matchedApiKey = timemap?.[key]?.[secState.srcId];
-            if (!matchedApiKey) continue;
+            if (!matchedApiKey) {
+                console.warn(
+                    `[NMAP] Auto-update: no time match for secondary ${secState.srcId} ` +
+                    `at dominant key=${key}`
+                );
+                continue;
+            }
 
             try {
-                if (secState.isPointObs) {
+                // Profile sources are also observation sources, but they use a
+                // different endpoint and request signature than ordinary
+                // point observations. Test the more specific type first.
+                if (secState.isProfileObs) {
+                    const { obs_json } = await DataClient.fetchDbProfiles(
+                        secState.srcId, matchedApiKey,
+                        { queryParams: secState.queryParams }
+                    );
+                    secState.addFrame(key, { obs_json });
+                } else if (secState.isPointObs) {
                     const { obs_json } = await DataClient.fetchDbPoints(
                         secState.srcId, secState.dataKeys, matchedApiKey,
                         { queryParams: secState.queryParams }

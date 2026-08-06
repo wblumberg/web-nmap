@@ -20,6 +20,7 @@ import bgy_probability_data from "./bgy_probability.json";
 import yrp_probability_data from "./yrp_probability.json";
 import satellite_ir_rainbow from "./satellite_IR_enhanced-rainbow_warmer_yellow.json";
 import satellite_ir_winter from "./satellite_IR_Color_Clouds_Winter.json";
+import scatterometer_wind_speed from "./scatterometer_wind_speed.json";
 
 import epa_aqi_pm25 from "./epa_aqi_pm25.json";
 import epa_aqi_pm10 from "./epa_aqi_pm10.json";
@@ -45,6 +46,17 @@ const COLORMAPS = {
     // --- Built-in autumnplot-gl colormaps ---
     'pw_speed500mb': apgl.colormaps.pw_speed500mb,
     'pw_speed850mb': apgl.colormaps.pw_speed850mb,
+    // Fully opaque ocean-surface wind scale. The first two bins preserve the
+    // distinction between calm circles (<2.5 kt) and 5-kt half barbs, while
+    // explicit under/overflow colors prevent valid winds from disappearing.
+    'scatterometer_wind_speed': new apgl.ColorMap(
+        scatterometer_wind_speed.levels,
+        scatterometer_wind_speed.colors,
+        {
+            underflow_color: scatterometer_wind_speed.underflow_color,
+            overflow_color: scatterometer_wind_speed.overflow_color,
+        },
+    ),
     'pw_cape':       apgl.colormaps.pw_cape,
     'pw_t2m':        apgl.colormaps.pw_t2m,
     'pw_td2m':       apgl.colormaps.pw_td2m,

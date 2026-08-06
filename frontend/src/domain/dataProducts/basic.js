@@ -189,21 +189,23 @@ export default {
             //const fill  = new apgl.ContourFill(wspd,  { cmap: COLORMAPS['pw_speed500mb'], opacity: 0.8 });
             const hght_cntr  = new apgl.Contour(hghtSmth, {
                 interval: 60, color: '#fdd34a',
-                line_width: lev => (lev % 60 === 0) ? 3 : 1.5,
+                line_width: 3,
             });
             const tmpc_cntr  = new apgl.Contour(tmpc, {
-                interval: 4, color: '#da4343',
+                interval: 2, color: '#da4343',
                 line_width: 2, line_style: '--',
             });
 
-            const barbs = new apgl.Barbs(wind,  { color: '#303030', thin_fac: 12 });
+            //const barbs = new apgl.Barbs(wind,  { color: '#303030', thin_fac: 12 });
+            const barbs = new apgl.Barbs(wind,  { color: '#7f99b1', thin_fac: 16 });
+
             const hght_lbls  = new apgl.ContourLabels(hght_cntr, {
                 text_color: '#ecec5e', halo: true, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+                font_url_template: '/static/font/{fontstack}/{range}.pbf',
             });
             const tmpc_lbls  = new apgl.ContourLabels(tmpc_cntr, {
-                text_color: '#f94040', halo: true, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+               text_color: '#f94040', halo: true, halo_color: '#000000',
+               font_url_template: '/static/font/{fontstack}/{range}.pbf',
             });          
 
             return {
@@ -299,11 +301,13 @@ export default {
             const barbs = new apgl.Barbs(wind,  { color: '#7f99b1', thin_fac: 16 });
             const hght_lbls  = new apgl.ContourLabels(hght_cntr, {
                 text_color: '#ecec5e', halo: true, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+                //font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+                font_url_template: '/static/font/{fontstack}/{range}.pbf',
             });
             const tmpc_lbls  = new apgl.ContourLabels(tmpc_cntr, {
                 text_color: '#f94040', halo: true, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+                font_url_template: '/static/font/{fontstack}/{range}.pbf',
+                //font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
             });          
 
             return {
@@ -535,4 +539,3 @@ export default {
         },
     },
 };
-

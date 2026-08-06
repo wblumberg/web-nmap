@@ -13,6 +13,11 @@
 
 // ── Explicit import replaces the implicit `window.apgl` global ───────────────
 import { PlotLayer, MultiPlotLayer } from 'autumnplot-gl';
+import {
+    ScatterometerTimeSeriesLayer,
+    TemporalScatterometerLayer,
+} from 'autumnplot-gl-extensions';
+import { pointWindow } from './pointFrames.js';
 
 // ─── ID namespacing ───────────────────────────────────────────────────────────
 function nsId(id, namespace) {
@@ -213,6 +218,46 @@ function _namespaceLayer(layer, namespace) {
 //    prog.addFrame('20260328_0600', newData); // appears without rebuilding
 //
 function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, namespace = '') {
+    if (productSuite.renderer === 'scatterometer') {
+        const layer = new ScatterometerTimeSeriesLayer(
+            nsId(productSuite.layer_id ?? 'scatterometer-winds', namespace),
+            productSuite.scatterometer_options ?? {},
+        );
+        const loadedKeys = [];
+        let currentKey = firstKey;
+        const addFrame = (key, data) => {
+            layer.addFrame(key, data?.obs_json ?? []);
+            if (!loadedKeys.includes(key)) loadedKeys.push(key);
+        };
+        const removeFrame = key => {
+            layer.removeFrame(key);
+            const index = loadedKeys.indexOf(key);
+            if (index >= 0) loadedKeys.splice(index, 1);
+        };
+        addFrame(firstKey, firstData);
+        layer.setActiveKey(firstKey);
+
+        const controller = {
+            get keys() { return loadedKeys; },
+            getKey() { return currentKey; },
+            setKey(key) {
+                if (!loadedKeys.includes(key)) return;
+                currentKey = key;
+                layer.setActiveKey(key);
+            },
+            getSampler() { return null; },
+            hide() { layer.setActiveKey(null); },
+        };
+        return {
+            layers: [layer],
+            colorbars: productSuite.make_colorbars?.() ?? [],
+            sampler: null,
+            controller,
+            addFrame,
+            removeFrame,
+        };
+    }
+
     // Build the template from the first frame's data
     const templateResult = productSuite.make_layers(firstData, grid);
     if (!templateResult.layers?.length) {
@@ -243,7 +288,9 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
      * Add a new frame to all MultiPlotLayers.
      * Can be called after the layers are already on the map.
      */
-    function addFrame(key, data) {
+    async function addFrame(key, data) {
+        const started = performance.now();
+        const makeLayersStarted = performance.now();
         let result;
         try {
             result = productSuite.make_layers(data, grid);
@@ -251,15 +298,37 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
             console.error(`[LayerBuilder] progressive addFrame make_layers THREW for key "${key}":`, err);
             return;
         }
-        result.layers.forEach((plotLayer, i) => {
+        const makeLayersMs = performance.now() - makeLayersStarted;
+        const layerSetupStarted = performance.now();
+        const setupResults = await Promise.all(result.layers.map(async (plotLayer, i) => {
+            const setupStarted = performance.now();
             try {
-                multiLayers[i].addField(_namespaceLayer(plotLayer, namespace), key);
+                await multiLayers[i].addField(_namespaceLayer(plotLayer, namespace), key);
+                return { id: plotLayer.id, ms: performance.now() - setupStarted };
             } catch (err) {
                 console.error(`[LayerBuilder] progressive addField THREW for layer[${i}] key "${key}":`, err);
+                return { id: plotLayer.id, ms: performance.now() - setupStarted, failed: true };
             }
+        }));
+        setupResults.forEach((item, i) => {
+            console.info(`[NMAP layer timing] ${key}/${item.id}`, {
+                layerIndex: i,
+                setupMs: +item.ms.toFixed(1),
+                failed: item.failed === true,
+            });
         });
         if (result.sampler) samplerByKey.set(key, result.sampler);
         loadedKeys.push(key);
+        console.info('[NMAP layer timing] Progressive frame prepared', {
+            key,
+            makeLayersMs: +makeLayersMs.toFixed(1),
+            layerSetupMs: +(performance.now() - layerSetupStarted).toFixed(1),
+            totalMs: +(performance.now() - started).toFixed(1),
+            layers: setupResults.map(item => ({
+                ...item,
+                ms: +item.ms.toFixed(1),
+            })),
+        });
     }
 
     /**
@@ -333,4 +402,52 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
     };
 }
 
-export { buildStaticLayers, buildMultiLayers, buildProgressiveMultiLayers };
+function buildTemporalScatterometerLayers(
+    productSuite,
+    observations,
+    frameSpecs,
+    pointPolicy,
+    namespace = '',
+) {
+    const frameWindows = frameSpecs.map(({frameKey, centerMs}) => {
+        const window = pointWindow(centerMs, pointPolicy);
+        return [frameKey, {
+            startMinute: Math.floor(window.startMs / 60000),
+            endMinute: Math.floor(window.endMs / 60000),
+        }];
+    });
+    const layer = new TemporalScatterometerLayer(
+        nsId(productSuite.layer_id ?? 'scatterometer-winds', namespace),
+        observations,
+        frameWindows,
+        productSuite.scatterometer_options ?? {},
+    );
+    let currentKey = frameSpecs[0]?.frameKey ?? null;
+    layer.setActiveKey(currentKey);
+    const keys = frameSpecs.map(frame => frame.frameKey);
+    return {
+        layers: [layer],
+        colorbars: productSuite.make_colorbars?.() ?? [],
+        sampler: null,
+        controller: {
+            keys,
+            getKey() { return currentKey; },
+            setKey(key) {
+                if (!keys.includes(key)) return;
+                currentKey = key;
+                layer.setActiveKey(key);
+            },
+            getSampler() { return null; },
+            hide() { layer.setActiveKey(null); },
+        },
+        addFrame() {},
+        removeFrame() {},
+    };
+}
+
+export {
+    buildStaticLayers,
+    buildMultiLayers,
+    buildProgressiveMultiLayers,
+    buildTemporalScatterometerLayers,
+};

@@ -727,6 +727,106 @@ export async function fetchDbPoints(sourceId, fields, centerKey, opts = {}) {
     return result;
 }
 
+/** Fetch one raw Protobuf observation pool covering an entire loop range. */
+export async function fetchDbPointRange(sourceId, fields, start, end, opts = {}) {
+    const requestStarted = performance.now();
+    const fieldsKey = fields.length ? fields.join(',') : '__all__';
+    const startIso = start instanceof Date ? start.toISOString() : String(start);
+    const endIso = end instanceof Date ? end.toISOString() : String(end);
+    const ck = `${sourceId}|range|${startIso}|${endIso}|${fieldsKey}|${opts.bbox || ''}|${opts.limit || ''}|${opts.paginate ? 'paged' : 'single'}` +
+        _queryParamsCacheSuffix(opts.queryParams);
+    const cached = _pointCacheGet(ck);
+    if (cached) {
+        console.info(
+            `[NMAP timing] Point range ${sourceId}: cache hit in ${(performance.now() - requestStarted).toFixed(1)} ms ` +
+            `(${cached.obs_json?.length ?? 0} observations)`
+        );
+        return cached;
+    }
+
+    console.info(`[NMAP timing] Point range ${sourceId}: request started`, {
+        start: startIso, end: endIso, fields, limit: opts.limit || 100000,
+        paginate: opts.paginate === true,
+    });
+    const points = [];
+    let combinedMeta = null;
+    let cursor = '';
+    let pageCount = 0;
+    let payloadBytes = 0;
+    let requestToHeadersMs = 0;
+    let bodyDownloadMs = 0;
+    let protobufDecodeMs = 0;
+    const seenCursors = new Set();
+
+    do {
+        const pageStarted = performance.now();
+        const url = new URL(`${API_BASE}/db-points/${sourceId}`, window.location.origin);
+        _appendQueryParams(url, opts.queryParams);
+        url.searchParams.set('start', startIso);
+        url.searchParams.set('end', endIso);
+        url.searchParams.set('raw', 'true');
+        if (fields.length) url.searchParams.set('fields', fields.join(','));
+        if (opts.bbox) url.searchParams.set('bbox', opts.bbox);
+        if (opts.limit) url.searchParams.set('limit', String(opts.limit));
+        if (cursor) url.searchParams.set('cursor', cursor);
+
+        const resp = await fetch(url.toString(), {
+            headers: { 'Accept': 'application/x-protobuf' },
+        });
+        const headersReceived = performance.now();
+        requestToHeadersMs += headersReceived - pageStarted;
+        if (!resp.ok) {
+            throw new Error(
+                `fetchDbPointRange(${sourceId}, ${startIso}..${endIso}) ` +
+                `page ${pageCount + 1} failed: HTTP ${resp.status}`
+            );
+        }
+
+        const buffer = await resp.arrayBuffer();
+        const bodyReceived = performance.now();
+        const decoded = decodePointResponse(buffer);
+        const decodeFinished = performance.now();
+        bodyDownloadMs += bodyReceived - headersReceived;
+        protobufDecodeMs += decodeFinished - bodyReceived;
+        payloadBytes += buffer.byteLength;
+        pageCount++;
+        for (const point of decoded.points) points.push(point);
+        combinedMeta = { ...(combinedMeta || {}), ...decoded.meta };
+
+        const nextCursor = opts.paginate ? (decoded.meta?.next_cursor || '') : '';
+        if (nextCursor && seenCursors.has(nextCursor)) {
+            throw new Error(`Point pagination for ${sourceId} returned a repeated cursor`);
+        }
+        if (nextCursor) seenCursors.add(nextCursor);
+        cursor = nextCursor;
+        console.info(`[NMAP timing] Point range ${sourceId}: page ${pageCount} delivered`, {
+            observations: decoded.points.length,
+            totalObservations: points.length,
+            payloadBytes: buffer.byteLength,
+            hasNextPage: Boolean(cursor),
+        });
+    } while (cursor);
+
+    if (opts.paginate && combinedMeta) {
+        combinedMeta.possibly_truncated = 'false';
+        combinedMeta.next_cursor = '';
+        combinedMeta.pages = String(pageCount);
+    }
+    const result = { obs_json: points, meta: combinedMeta || {} };
+    _pointCachePut(ck, result);
+    console.info(`[NMAP timing] Point range ${sourceId}: response delivered`, {
+        requestToHeadersMs: +requestToHeadersMs.toFixed(1),
+        bodyDownloadMs: +bodyDownloadMs.toFixed(1),
+        requestToDeliveryMs: +(performance.now() - requestStarted - protobufDecodeMs).toFixed(1),
+        protobufDecodeMs: +protobufDecodeMs.toFixed(1),
+        totalClientMs: +(performance.now() - requestStarted).toFixed(1),
+        payloadBytes,
+        observations: points.length,
+        pages: pageCount,
+    });
+    return result;
+}
+
 /**
  * Fetch DB-backed vertical profile observations and normalize to obs_json.
  *

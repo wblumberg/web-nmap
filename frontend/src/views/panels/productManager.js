@@ -117,6 +117,15 @@ export const LayerManager = (() => {
             has_fhrs:          !!(apiSrc.has_fhrs),
             zarr_transport:    !!(apiSrc.zarr_transport),
             variable_map:      apiSrc.variable_map ?? {},
+            // Point-observation window/filter policy. These values must travel
+            // with the selected source so the loader requests the same range
+            // the backend uses (not the generic symmetric-window fallback).
+            binflag:            !!apiSrc.binflag,
+            before_minutes:     apiSrc.before_minutes ?? null,
+            after_minutes:      apiSrc.after_minutes ?? null,
+            use_most_recent_filter: !!apiSrc.use_most_recent_filter,
+            most_recent_by:     apiSrc.most_recent_by ?? 'geom',
+            return_age:         !!apiSrc.return_age,
             // Defaults for fields no longer in the API
             temporal_frequency_min: null,
             forecast_hr_step:       null,

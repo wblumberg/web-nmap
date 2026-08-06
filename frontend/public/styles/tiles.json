@@ -83,6 +83,6 @@
         1
     ],
     "tiles": [
-        "http://localhost:5173/static/tiles/{z}/{x}/{y}.pbf"
+        "/static/tiles/{z}/{x}/{y}.pbf"
     ]
 }

@@ -1,5 +1,10 @@
 const path = require('path');
+const compression = require('compression');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
+
+// Font PBFs are small and latency-sensitive. Serve them directly; running
+// them through compression delayed concurrent glyph requests in development.
+const COMPRESSIBLE_BASEMAP_ASSET = /^\/static\/tiles\//;
 
 module.exports = (env, argv) => {
   const isProd = argv.mode === 'production';
@@ -11,6 +16,12 @@ module.exports = (env, argv) => {
 
     module: {
       rules: [
+        // Local autumnplot-gl development builds retain shader imports instead
+        // of inlining them into lib/*.js.
+        {
+          test: /\.glsl$/,
+          use: 'webpack-glsl-loader',
+        },
         // WASM — emit as asset so autumnplot-gl can load it at runtime
         {
           test: /\.wasm$/,
@@ -53,11 +64,35 @@ module.exports = (env, argv) => {
       allowedHosts: 'all',
       static: [
         // Serve /public as the webroot (CSS, WASM, tiles, fonts, etc.)
-        { directory: path.join(__dirname, 'public'), publicPath: '/' },
+        {
+          directory: path.join(__dirname, 'public'),
+          publicPath: '/',
+          staticOptions: {
+            setHeaders(res, assetPath) {
+              const relativePath = path.relative(path.join(__dirname, 'public'), assetPath);
+              if (/^static[\\/](?:tiles|font)[\\/]/.test(relativePath)) {
+                res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+              }
+            },
+          },
+        },
       ],
       // Disable gzip compression in dev — it buffers SSE streams and prevents
       // the EventSource from receiving events in real time.
       compress: false,
+      setupMiddlewares(middlewares) {
+        // Compress immutable basemap assets without touching the long-lived
+        // EventSource response. PBF files are application/octet-stream on some
+        // systems, so opt them in by URL instead of relying on MIME detection.
+        middlewares.unshift({
+          name: 'basemap-static-compression',
+          middleware: compression({
+            threshold: 1024,
+            filter: req => COMPRESSIBLE_BASEMAP_ASSET.test(req.url.split('?')[0]),
+          }),
+        });
+        return middlewares;
+      },
       hot: true,
       proxy: [
         // SSE endpoint — must be listed before the general /api rule.

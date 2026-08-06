@@ -1,0 +1,9 @@
+{
+  "name": "autumnplot-gl-extensions",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "src/index.js",
+  "peerDependencies": {
+    "autumnplot-gl": ">=4.0.0"
+  }
+}

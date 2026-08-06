@@ -52,7 +52,7 @@ const PointResponse = root.lookupType('wxdata.PointResponse');
  *   startTime: string,
  *   endTime:   string,
  *   count:     number,
- *   points:    Array<{ coord: {lat:number, lon:number}, valid_time: string, data: object }>,
+ *   points:    Array<{ coord: {lat:number, lon:number}, valid_time: string, valid_time_ms?: number, data: object }>,
  *   meta:      object,
  * }}
  */
@@ -70,9 +70,13 @@ export function decodePointResponse(buffer) {
         for (const [k, v] of Object.entries(obs.variables || {})) {
             data[k] = v;
         }
+        const minute = Number(obs.validTimeMinute || 0);
+        const isoTimeMs = Date.parse(obs.validTime);
+        const validTimeMs = minute > 0 ? minute * 60_000 : isoTimeMs;
         return {
             coord:      { lat: obs.lat, lon: obs.lon },
             valid_time: obs.validTime,
+            ...(Number.isFinite(validTimeMs) ? { valid_time_ms: validTimeMs } : {}),
             data,
         };
     });

@@ -172,6 +172,10 @@
               "keyType": "string",
               "type": "string",
               "id": 5
+            },
+            "validTimeMinute": {
+              "type": "uint32",
+              "id": 6
             }
           }
         },

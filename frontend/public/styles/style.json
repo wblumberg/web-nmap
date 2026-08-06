@@ -5,7 +5,7 @@
     "pitch": 0,
     "center": [-97.5, 38.5],
     "bearing": 0,
-    "glyphs": "http://localhost:5173/static/font/{fontstack}/{range}.pbf",
+    "glyphs": "/static/font/{fontstack}/{range}.pbf",
     "layers": [
         {
             "id": "background",
