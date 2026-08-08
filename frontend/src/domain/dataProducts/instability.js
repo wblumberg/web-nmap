@@ -48,6 +48,45 @@ export default {
         },
     },
 
+    'mlcin_lt50_hatched': {
+        label: '[TEST] MLCIN < -50 (Hatched)',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Mixed-Layer CIN < -50 J kg⁻¹',
+        group: 'instability',
+        available_for: ['MESOANALYSIS_GRID'],
+        data_keys: ['mlcin'],
+        make_layers(data, grid) {
+            const field = data.mlcin?.grid
+                ? data.mlcin
+                : new apgl.RawScalarField(grid, data.mlcin.data);
+
+            // Keep the underlying field transparent; only the requested CIN
+            // interval is visible through the procedural hatch overlay.
+            const transparent = new apgl.ColorMap(
+                [-10000, 10000],
+                ['#00000000'],
+                {underflow_color: '#00000000', overflow_color: '#00000000'},
+            );
+            const fill = new apgl.ContourFill(field, {
+                cmap: transparent,
+                patterns: [{
+                    range: [-Infinity, -50],
+                    type: 'hatch',
+                    color: '#6f42c1',
+                    opacity: 0.9,
+                    spacing: 9,
+                    width: 1.5,
+                    angle: 45,
+                }],
+            });
+
+            return {
+                layers: [new apgl.PlotLayer('mlcin_lt50_hatched', fill)],
+                colorbar: [],
+                sampler: (lon, lat) => ({ mlcin: field.sampleField(lon, lat) }),
+            };
+        },
+    },
+
     'mlcape_contour': {
         label: 'MLCAPE',
         title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Mixed-Layer CAPE [J kg⁻¹]',

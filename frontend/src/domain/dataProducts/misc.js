@@ -194,6 +194,8 @@ class MapLibreOverlayComponent {
         this._map = null;
         // Whether this component has been added to the map
         this._added = false;
+        this._opacity = 1;
+        this._basePaintOpacity = new Map();
     }
 
     // ── PlotComponent interface ───────────────────────────────────────────
@@ -202,12 +204,39 @@ class MapLibreOverlayComponent {
         this._map = map;
         this._added = true;
         this._addMapLayers(map, this._geojson);
+        this.setOpacity(this._opacity);
     }
 
     // render() is intentionally empty: MapLibre manages its own render loop
     // for GeoJSON source layers. autumnplot-gl calls this after its own WebGL
     // render pass, so we do nothing here.
     render(_gl, _arg) {}
+
+    setOpacity(opacity) {
+        this._opacity = Math.max(0, Math.min(1, Number(opacity)));
+        if (!this._added || !this._map) return;
+        const opacityProperties = {
+            fill: ['fill-opacity'],
+            line: ['line-opacity'],
+            circle: ['circle-opacity', 'circle-stroke-opacity'],
+            symbol: ['text-opacity', 'icon-opacity'],
+            raster: ['raster-opacity'],
+            heatmap: ['heatmap-opacity'],
+            'fill-extrusion': ['fill-extrusion-opacity'],
+        };
+        this._getLayerIds().forEach(layerId => {
+            const layer = this._map.getLayer(layerId);
+            (opacityProperties[layer?.type] || []).forEach(property => {
+                const key = `${layerId}:${property}`;
+                if (!this._basePaintOpacity.has(key)) {
+                    this._basePaintOpacity.set(key, this._map.getPaintProperty(layerId, property) ?? 1);
+                }
+                const base = this._basePaintOpacity.get(key);
+                this._map.setPaintProperty(layerId, property,
+                    this._opacity === 1 ? base : ['*', base, this._opacity]);
+            });
+        });
+    }
 
     // ── Data update ─���─────────────────────────────────────────────────────
 

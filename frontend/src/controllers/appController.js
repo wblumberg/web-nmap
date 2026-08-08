@@ -262,7 +262,7 @@ export async function init() {
     _map.on('load', () => {
         console.info('%c[NMAP]%c Map loaded — ready for layers',
             'color:#55d46a;font-weight:bold', 'color:inherit');
-        ProductGen.init(_map);
+        ProductGen.init(_map, {getDataLayers: () => _activeMultiLayers});
         DatasetStatus.init();
         _wireToolbar();
         _wireKeyboard();

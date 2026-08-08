@@ -1,3 +1,10 @@
+import {
+    FORECAST_SUITE_DEFINITIONS,
+    getForecastSuite,
+    getForecastProduct,
+    getForecastLevel,
+} from '../../config/forecastSuites.js';
+
 /* productgen.js — Product Generation module for web-nmap
  *
  * Floating panel for drawing meteorological map products.
@@ -26,8 +33,14 @@ export const ProductGen = (() => {
     // ── Contour (polygon) source / layer IDs ──────────────────────────
     const SRC_CONTOUR    = 'pg-contour';
     const LYR_CTR_FILL   = 'pg-contour-fill';
+    const LYR_CTR_PATTERN = 'pg-contour-pattern';
     const LYR_CTR_LINE   = 'pg-contour-line';
     const LYR_CTR_LABEL  = 'pg-contour-label';
+
+    // ── County-alert selection layers (existing basemap vector source) ──
+    const SRC_COUNTY_ALERTS    = 'pg-county-alerts';
+    const LYR_COUNTY_SELECTED = 'pg-county-selected';
+    const LYR_COUNTY_OUTLINE  = 'pg-county-selected-outline';
 
     // ── Front source / layer IDs ───────────────────────────────────────
     const SRC_FRONTS     = 'pg-fronts';
@@ -71,6 +84,9 @@ export const ProductGen = (() => {
     let _map     = null;
     let _panel   = null;
     let _isOpen  = false;
+    let _getDataLayers = () => [];
+    let _dataLayerOpacity = 1;
+    let _appliedDataLayerOpacity = new WeakMap();
 
     // Drawing tool state
     let _activeTool  = null;   // 'contour'|'front-cold'|…|'H'|'L'|'text'|null
@@ -92,6 +108,7 @@ export const ProductGen = (() => {
     let _editCoords  = [];
     let _dragVertIdx = -1;
     let _overEditVertex = false;
+    let _draggedProductId = null;
 
     // Named map-layer event handlers (needed for .off() cleanup)
     const _onEditVertEnter = () => {
@@ -109,8 +126,21 @@ export const ProductGen = (() => {
     let _curColor    = '#ffff00';
     let _curWidth    = 2;
     let _curType     = 'General';
+    let _curPattern  = 'solid';
+    let _curPatternDensity = 3;
+    let _curPatternWidth = 1.5;
     let _curText     = 'Label';
     let _curFontSize = 20;
+    let _curAlertSignificance = 'Warning';
+    let _curAlertHazard = 'Severe Thunderstorm';
+    let _curAlertNumber = '';
+    let _activeForecastSuiteId = 'free';
+    let _activeForecastProductId = null;
+    let _activeForecastLevelId = null;
+    let _activeCountyProduct = null;
+    let _countyFeaturesByFips = new Map();
+    let _countySpatialGrid = new Map();
+    const COUNTY_GRID_DEGREES = 2;
 
     // ------------------------------------------------------------------
     // Tiny scoped logger
@@ -125,10 +155,14 @@ export const ProductGen = (() => {
     // ------------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------------
-    function init(map) {
+    function init(map, options = {}) {
         _map = map;
+        _getDataLayers = typeof options.getDataLayers === 'function'
+            ? options.getDataLayers : () => [];
         _buildDOM();
         _addMapLayers();
+        _loadCountyReference();
+        _map.on('idle', _applyDataLayerOpacity);
         PG.info('ProductGen initialised');
 
         // Keyboard shortcuts for undo/redo, cancel, delete last vertex
@@ -139,6 +173,7 @@ export const ProductGen = (() => {
             if (e.key === 'Escape') {
                 if (_drawing) _cancelDraft();
                 else if (_editProduct) _exitEditMode();
+                else if (_activeTool === 'county-alert') _enterTool(null);
                 return;
             }
             if (!_drawing) return;
@@ -191,6 +226,31 @@ export const ProductGen = (() => {
   </div>
 </div>
 
+<div class="pg-section-lbl">DISPLAY</div>
+<div class="pg-style-row" id="pg-data-opacity-row">
+  <label class="pg-lbl" for="pg-data-opacity">Data opacity</label>
+  <input type="range" id="pg-data-opacity" min="0" max="100" step="5" value="100" />
+  <output id="pg-data-opacity-value" for="pg-data-opacity">100%</output>
+</div>
+
+<div class="pg-section-lbl">FORECAST SUITE <span class="pg-sect-note">prototype</span></div>
+<div id="pg-forecast-suite-controls">
+  <div class="pg-style-row">
+    <label class="pg-lbl" for="pg-forecast-suite">Suite</label>
+    <select id="pg-forecast-suite">
+      <option value="free">Free Drawing</option>
+    </select>
+  </div>
+  <div class="pg-style-row pg-forecast-config-row" id="pg-row-forecast-product">
+    <label class="pg-lbl" for="pg-forecast-product">Product</label>
+    <select id="pg-forecast-product"></select>
+  </div>
+  <div class="pg-style-row pg-forecast-config-row" id="pg-row-forecast-level">
+    <label class="pg-lbl" for="pg-forecast-level">Level</label>
+    <select id="pg-forecast-level"></select>
+  </div>
+</div>
+
 <div class="pg-section-lbl">CONTOURS</div>
 <div class="pg-tool-group">
   <button class="pg-tool-btn" id="pg-tool-contour" data-tool="contour" title="Closed Contour — click vertices, dbl-click to close">
@@ -199,6 +259,14 @@ export const ProductGen = (() => {
       <ellipse cx="20" cy="9" rx="8" ry="3"/>
     </svg>
     <span>Closed</span>
+  </button>
+</div>
+
+<div class="pg-section-lbl">COUNTY ALERTS</div>
+<div class="pg-tool-group">
+  <button class="pg-tool-btn" id="pg-tool-county-alert" data-tool="county-alert" title="County Alert — click counties to add or remove them">
+    <span style="font-size:16px;line-height:1.1">▦</span>
+    <span>County Alert</span>
   </button>
 </div>
 
@@ -276,16 +344,63 @@ export const ProductGen = (() => {
     <label class="pg-lbl">Type</label>
     <select id="pg-type">
       <option value="General">General</option>
+      <option value="Category">Category</option>
       <option value="Probability">Probability</option>
+      <option value="Amount">Amount</option>
       <option value="Region of Interest">Region of Interest</option>
       <option value="Threat Area">Threat Area</option>
       <option value="Advisory">Advisory</option>
       <option value="Custom">Custom</option>
     </select>
   </div>
+  <div class="pg-style-row" id="pg-row-pattern">
+    <label class="pg-lbl">Fill</label>
+    <select id="pg-pattern">
+      <option value="solid">Solid</option>
+      <option value="hatch">Hatch</option>
+      <option value="crosshatch">Crosshatch</option>
+      <option value="dots">Dots</option>
+      <option value="stars">Stars</option>
+      <option value="checker">Checker</option>
+      <option value="dashes">Dashes</option>
+    </select>
+  </div>
+  <div class="pg-style-row" id="pg-row-pattern-density">
+    <label class="pg-lbl">Density</label>
+    <input type="number" id="pg-pattern-density" min="0.25" max="5" step="0.25" value="3" title="Lower values are sparser; higher values are denser" />
+  </div>
+  <div class="pg-style-row" id="pg-row-pattern-width">
+    <label class="pg-lbl">Pattern Width</label>
+    <input type="number" id="pg-pattern-width" min="0.5" max="6" step="0.25" value="1.5" title="Width of hatch and dash marks in pixels" />
+  </div>
   <div class="pg-style-row" id="pg-row-text">
     <label class="pg-lbl">Text</label>
     <input type="text" id="pg-text-content" value="Label" placeholder="Annotation\u2026" />
+  </div>
+  <div class="pg-style-row" id="pg-row-alert-significance">
+    <label class="pg-lbl">Alert</label>
+    <select id="pg-alert-significance">
+      <option value="Warning">Warning</option>
+      <option value="Watch">Watch</option>
+      <option value="Advisory">Advisory</option>
+    </select>
+  </div>
+  <div class="pg-style-row" id="pg-row-alert-hazard">
+    <label class="pg-lbl">Hazard</label>
+    <select id="pg-alert-hazard">
+      <option value="Tornado">Tornado</option>
+      <option value="Severe Thunderstorm">Severe Thunderstorm</option>
+      <option value="Flash Flood">Flash Flood</option>
+      <option value="Flood">Flood</option>
+      <option value="Winter Storm">Winter Storm</option>
+      <option value="High Wind">High Wind</option>
+      <option value="Fire Weather">Fire Weather</option>
+      <option value="Custom">Custom</option>
+    </select>
+  </div>
+  <div class="pg-style-row" id="pg-row-alert-number">
+    <label class="pg-lbl">Number</label>
+    <input type="number" id="pg-alert-number" min="1" max="9999" step="1" placeholder="Optional" title="Watch or warning identification number" />
   </div>
   <div class="pg-style-row" id="pg-row-color">
     <label class="pg-lbl">Color</label>
@@ -296,7 +411,7 @@ export const ProductGen = (() => {
 </div>
 
 <div id="pg-products-hdr">
-  <span>PRODUCTS</span>
+  <span>PRODUCTS <span class="pg-stack-note">drag to reorder</span></span>
   <button class="pg-sm-btn" id="pg-clear-all" title="Remove all products">Clear All</button>
 </div>
 <ul id="pg-product-list">
@@ -305,6 +420,8 @@ export const ProductGen = (() => {
 <div id="pg-hint"></div>
 `;
         document.body.appendChild(_panel);
+
+        _initializeForecastSuiteControls();
 
         // Close
         _panel.querySelector('#pg-close').addEventListener('click', close);
@@ -315,6 +432,12 @@ export const ProductGen = (() => {
                 const tool = btn.dataset.tool;
                 _enterTool(_activeTool === tool ? null : tool);
             });
+        });
+
+        _panel.querySelector('#pg-data-opacity').addEventListener('input', (event) => {
+            _dataLayerOpacity = Number(event.target.value) / 100;
+            _panel.querySelector('#pg-data-opacity-value').value = `${event.target.value}%`;
+            _applyDataLayerOpacity();
         });
 
         // Color picker for contour, front, and text
@@ -332,6 +455,62 @@ export const ProductGen = (() => {
             _curType = e.target.value;
             if (_editProduct && _editProduct.kind === 'contour') {
                 _editProduct.type = _curType;
+                _renderProductList();
+            }
+        });
+
+        // Contour fill pattern. Pattern images are generated locally and keyed
+        // by both pattern and color so every contour can have its own styling.
+        _panel.querySelector('#pg-pattern').addEventListener('change', (e) => {
+            _curPattern = e.target.value;
+            if (_editProduct && _editProduct.kind === 'contour') {
+                _editProduct.fillPattern = _curPattern;
+                _updateContourLayer();
+                _renderProductList();
+            }
+            _updateStylePanel();
+        });
+        _panel.querySelector('#pg-pattern-density').addEventListener('input', (e) => {
+            _curPatternDensity = Math.max(0.25, Math.min(5, +e.target.value || 3));
+            e.target.value = _curPatternDensity;
+            if (_editProduct && _editProduct.kind === 'contour') {
+                _editProduct.patternDensity = _curPatternDensity;
+                _updateContourLayer();
+                _renderProductList();
+            }
+        });
+        _panel.querySelector('#pg-pattern-width').addEventListener('input', (e) => {
+            _curPatternWidth = Math.max(0.5, Math.min(6, +e.target.value || 1.5));
+            e.target.value = _curPatternWidth;
+            if (_editProduct && _editProduct.kind === 'contour') {
+                _editProduct.patternWidth = _curPatternWidth;
+                _updateContourLayer();
+                _renderProductList();
+            }
+        });
+        _panel.querySelector('#pg-alert-significance').addEventListener('change', (e) => {
+            _curAlertSignificance = e.target.value;
+            if (_activeCountyProduct) {
+                _activeCountyProduct.significance = _curAlertSignificance;
+                _activeCountyProduct.color = _countyAlertColor(_curAlertSignificance);
+                _activeCountyProduct.name = _countyAlertName(_activeCountyProduct);
+                _updateCountyAlertLayers();
+                _renderProductList();
+            }
+        });
+        _panel.querySelector('#pg-alert-hazard').addEventListener('change', (e) => {
+            _curAlertHazard = e.target.value;
+            if (_activeCountyProduct) {
+                _activeCountyProduct.hazard = _curAlertHazard;
+                _activeCountyProduct.name = _countyAlertName(_activeCountyProduct);
+                _renderProductList();
+            }
+        });
+        _panel.querySelector('#pg-alert-number').addEventListener('input', (e) => {
+            _curAlertNumber = e.target.value === '' ? '' : String(Math.max(1, Math.round(+e.target.value || 1)));
+            if (_activeCountyProduct) {
+                _activeCountyProduct.alertNumber = _curAlertNumber;
+                _activeCountyProduct.name = _countyAlertName(_activeCountyProduct);
                 _renderProductList();
             }
         });
@@ -365,12 +544,133 @@ export const ProductGen = (() => {
         // Clear all
         _panel.querySelector('#pg-clear-all').addEventListener('click', () => {
             _saveUndo();
+            if (_activeTool === 'county-alert') _enterTool(null);
             _products = [];
             _exitEditMode();
             _renderProductList();
             _updateAllLayers();
         });
 
+        _updateStylePanel();
+    }
+
+    function _applyDataLayerOpacity() {
+        const layers = _getDataLayers() || [];
+        layers.forEach(layer => {
+            if (!layer || typeof layer.setOpacity !== 'function') return;
+            if (_appliedDataLayerOpacity.get(layer) === _dataLayerOpacity) return;
+            layer.setOpacity(_dataLayerOpacity);
+            _appliedDataLayerOpacity.set(layer, _dataLayerOpacity);
+        });
+    }
+
+    function _initializeForecastSuiteControls() {
+        const suiteSelect = _panel.querySelector('#pg-forecast-suite');
+        Object.values(FORECAST_SUITE_DEFINITIONS).forEach(suite => {
+            const option = document.createElement('option');
+            option.value = suite.id;
+            option.textContent = suite.label;
+            suiteSelect.appendChild(option);
+        });
+
+        suiteSelect.addEventListener('change', () => {
+            _activeForecastSuiteId = suiteSelect.value;
+            _activeForecastProductId = null;
+            _activeForecastLevelId = null;
+            _refreshForecastProductOptions();
+        });
+        _panel.querySelector('#pg-forecast-product').addEventListener('change', (event) => {
+            _activeForecastProductId = event.target.value;
+            _activeForecastLevelId = null;
+            _refreshForecastLevelOptions();
+        });
+        _panel.querySelector('#pg-forecast-level').addEventListener('change', (event) => {
+            _activeForecastLevelId = event.target.value;
+            _applyForecastLevelDefaults();
+        });
+        _refreshForecastProductOptions();
+    }
+
+    function _refreshForecastProductOptions() {
+        const productRow = _panel.querySelector('#pg-row-forecast-product');
+        const levelRow = _panel.querySelector('#pg-row-forecast-level');
+        const productSelect = _panel.querySelector('#pg-forecast-product');
+        const suite = getForecastSuite(_activeForecastSuiteId);
+        const configured = Boolean(suite);
+        productRow.style.display = configured ? '' : 'none';
+        levelRow.style.display = configured ? '' : 'none';
+        productSelect.innerHTML = '';
+        if (!suite) return;
+
+        suite.products.forEach(product => {
+            const option = document.createElement('option');
+            option.value = product.id;
+            option.textContent = product.label;
+            productSelect.appendChild(option);
+        });
+        _activeForecastProductId = suite.products.some(product => product.id === _activeForecastProductId)
+            ? _activeForecastProductId : suite.products[0]?.id || null;
+        productSelect.value = _activeForecastProductId || '';
+        _refreshForecastLevelOptions();
+    }
+
+    function _refreshForecastLevelOptions() {
+        const levelSelect = _panel.querySelector('#pg-forecast-level');
+        const product = getForecastProduct(_activeForecastSuiteId, _activeForecastProductId);
+        levelSelect.innerHTML = '';
+        if (!product) return;
+
+        (product.levels || []).forEach(level => {
+            const option = document.createElement('option');
+            option.value = level.id;
+            option.textContent = level.label;
+            levelSelect.appendChild(option);
+        });
+        (product.overlays || []).forEach(level => {
+            const option = document.createElement('option');
+            option.value = level.id;
+            option.textContent = `${level.label} (overlay)`;
+            levelSelect.appendChild(option);
+        });
+        const allLevels = [...(product.levels || []), ...(product.overlays || [])];
+        _activeForecastLevelId = allLevels.some(level => level.id === _activeForecastLevelId)
+            ? _activeForecastLevelId : allLevels[0]?.id || null;
+        levelSelect.value = _activeForecastLevelId || '';
+        _applyForecastLevelDefaults();
+    }
+
+    function _configuredContourContext() {
+        const suite = getForecastSuite(_activeForecastSuiteId);
+        const product = getForecastProduct(_activeForecastSuiteId, _activeForecastProductId);
+        const level = getForecastLevel(_activeForecastSuiteId, _activeForecastProductId, _activeForecastLevelId);
+        return suite && product && level ? {suite, product, level} : null;
+    }
+
+    function _forecastTypeLabel(product, level) {
+        if (level.role === 'overlay') return 'Significant';
+        if (product.valueType === 'probability') return 'Probability';
+        if (product.valueType === 'amount') return 'Amount';
+        if (product.valueType === 'category') return 'Category';
+        return 'General';
+    }
+
+    function _applyForecastLevelDefaults() {
+        const context = _configuredContourContext();
+        if (!context) return;
+        const {product, level} = context;
+        _curType = _forecastTypeLabel(product, level);
+        _curColor = level.color || '#ffff00';
+        _curWidth = level.width || 2;
+        _curPattern = level.pattern || 'solid';
+        _curPatternDensity = level.patternDensity || 3;
+        _curPatternWidth = level.patternWidth || 1.5;
+
+        _panel.querySelector('#pg-type').value = _curType;
+        _panel.querySelector('#pg-color').value = _curColor;
+        _panel.querySelector('#pg-width').value = _curWidth;
+        _panel.querySelector('#pg-pattern').value = _curPattern;
+        _panel.querySelector('#pg-pattern-density').value = _curPatternDensity;
+        _panel.querySelector('#pg-pattern-width').value = _curPatternWidth;
         _updateStylePanel();
     }
 
@@ -383,14 +683,23 @@ export const ProductGen = (() => {
         const isContour = _activeTool === 'contour';
         const isText    = _activeTool === 'text';
         const isHL      = _activeTool === 'H' || _activeTool === 'L';
+        const isCountyAlert = _activeTool === 'county-alert';
         const noTool    = !_activeTool;
 
         // "Type" row only for contour tool
-        _panel.querySelector('#pg-row-ctype').style.display = (isContour || (noTool && _editProduct?.kind === 'contour')) ? '' : 'none';
+        const showContourStyle = isContour || (noTool && _editProduct?.kind === 'contour');
+        const showPatternOptions = showContourStyle && _curPattern !== 'solid';
+        _panel.querySelector('#pg-row-ctype').style.display = showContourStyle ? '' : 'none';
+        _panel.querySelector('#pg-row-pattern').style.display = showContourStyle ? '' : 'none';
+        _panel.querySelector('#pg-row-pattern-density').style.display = showPatternOptions ? '' : 'none';
+        _panel.querySelector('#pg-row-pattern-width').style.display = showPatternOptions ? '' : 'none';
+        _panel.querySelector('#pg-row-alert-significance').style.display = isCountyAlert ? '' : 'none';
+        _panel.querySelector('#pg-row-alert-hazard').style.display = isCountyAlert ? '' : 'none';
+        _panel.querySelector('#pg-row-alert-number').style.display = isCountyAlert ? '' : 'none';
         // "Text" row only for text tool (or editing a text product)
         _panel.querySelector('#pg-row-text').style.display  = (isText || (noTool && _editProduct?.kind === 'text')) ? '' : 'none';
         // "Color+Width" row always, but hidden for H/L (auto-coloured)
-        _panel.querySelector('#pg-row-color').style.display = isHL ? 'none' : '';
+        _panel.querySelector('#pg-row-color').style.display = (isHL || isCountyAlert) ? 'none' : '';
         // Label for width vs. size
         const sizeLabel = _panel.querySelector('#pg-lbl-size');
         if (sizeLabel) sizeLabel.textContent = isText ? 'Size' : 'Width';
@@ -408,6 +717,7 @@ export const ProductGen = (() => {
 
     function _undo() {
         if (!_undoStack.length) return;
+        if (_activeTool === 'county-alert') _enterTool(null);
         _exitEditMode();
         _redoStack.push(JSON.stringify(_products));
         _products = JSON.parse(_undoStack.pop());
@@ -419,6 +729,7 @@ export const ProductGen = (() => {
 
     function _redo() {
         if (!_redoStack.length) return;
+        if (_activeTool === 'county-alert') _enterTool(null);
         _exitEditMode();
         _undoStack.push(JSON.stringify(_products));
         _products = JSON.parse(_redoStack.pop());
@@ -444,9 +755,15 @@ export const ProductGen = (() => {
             _map.off('click',     _onMapClick);
             _map.off('mousemove', _onMapMouseMove);
             _map.off('dblclick',  _onMapDblClick);
+            _map.off('contextmenu', _onCountyRightClick);
             _map.doubleClickZoom.enable();
             _map.getCanvas().style.cursor = '';
             _panel.querySelector(`#pg-tool-${_activeTool}`)?.classList.remove('active');
+        }
+
+        if (toolName !== 'county-alert') {
+            _activeCountyProduct = null;
+            _hideCountyHover();
         }
 
         _activeTool = toolName;
@@ -455,6 +772,7 @@ export const ProductGen = (() => {
             _map.on('click',     _onMapClick);
             _map.on('mousemove', _onMapMouseMove);
             _map.on('dblclick',  _onMapDblClick);
+            if (toolName === 'county-alert') _map.on('contextmenu', _onCountyRightClick);
             _map.doubleClickZoom.disable();
             _map.getCanvas().style.cursor = 'crosshair';
             _panel.querySelector(`#pg-tool-${toolName}`)?.classList.add('active');
@@ -469,15 +787,28 @@ export const ProductGen = (() => {
             else if (toolName === 'H') { _curColor = '#4488ff'; _curWidth = 20; }
             else if (toolName === 'L') { _curColor = '#ff4444'; _curWidth = 20; }
             else if (toolName === 'text') { _curWidth = 18; }
+            else if (toolName === 'county-alert') {
+                _curColor = _countyAlertColor(_curAlertSignificance);
+                _panel.querySelector('#pg-alert-significance').value = _curAlertSignificance;
+                _panel.querySelector('#pg-alert-hazard').value = _curAlertHazard;
+                _panel.querySelector('#pg-alert-number').value = _curAlertNumber;
+            }
 
             // Sync style controls to new defaults
             _panel.querySelector('#pg-color').value = _curColor;
             _panel.querySelector('#pg-width').value = _curWidth;
+            if (toolName === 'contour') {
+                _panel.querySelector('#pg-pattern').value = _curPattern;
+                _panel.querySelector('#pg-pattern-density').value = _curPatternDensity;
+                _panel.querySelector('#pg-pattern-width').value = _curPatternWidth;
+            }
 
             const isFront = toolName.startsWith('front-');
             // Set the hint text for the active tool to help the user understand how to draw it
             if (toolName === 'contour' || isFront) {
                 _setHint('Click to place vertices\nDbl-click to finish\nBackspace to undo\xa0\xa0Esc to cancel');
+            } else if (toolName === 'county-alert') {
+                _setHint('Left-click counties to add or toggle them\nRight-click removes a county\nClick the tool again when finished');
             } else {
                 _setHint('Click on the map to place');
             }
@@ -502,6 +833,8 @@ export const ProductGen = (() => {
             _drawing = true;
             _draftCoords.push([e.lngLat.lng, e.lngLat.lat]);
             _updateDraftLayer();
+        } else if (tool === 'county-alert') {
+            _toggleCountyAtPoint(e.lngLat);
         // Handle single click of the  H/L/text
         } else if (tool === 'H' || tool === 'L') {
             _placeText(e.lngLat.lng, e.lngLat.lat, tool, tool, tool === 'H' ? '#4488ff' : '#ff4444', 22);
@@ -511,8 +844,86 @@ export const ProductGen = (() => {
         }
     }
 
+    function _countyAlertColor(significance) {
+        if (significance === 'Watch') return '#ffff00';
+        if (significance === 'Advisory') return '#00bfff';
+        return '#ff3333';
+    }
+
+    function _countyAlertName(product) {
+        const number = product.alertNumber ? ` #${product.alertNumber}` : ` #${product.id}`;
+        return `${product.hazard} ${product.significance}${number}`;
+    }
+
+    function _pointInRing(lng, lat, ring) {
+        let inside = false;
+        for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+            const [xi, yi] = ring[i];
+            const [xj, yj] = ring[j];
+            if (((yi > lat) !== (yj > lat)) &&
+                (lng < (xj - xi) * (lat - yi) / (yj - yi) + xi)) inside = !inside;
+        }
+        return inside;
+    }
+
+    function _pointInCounty(lng, lat, feature) {
+        const polygons = feature.geometry.type === 'Polygon'
+            ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+        return polygons.some(polygon =>
+            polygon.length && _pointInRing(lng, lat, polygon[0]) &&
+            !polygon.slice(1).some(hole => _pointInRing(lng, lat, hole)));
+    }
+
+    function _countyGridKey(lng, lat) {
+        return `${Math.floor((lng + 180) / COUNTY_GRID_DEGREES)}:${Math.floor((lat + 90) / COUNTY_GRID_DEGREES)}`;
+    }
+
+    function _findCountyAt(lng, lat) {
+        const candidates = _countySpatialGrid.get(_countyGridKey(lng, lat)) || [];
+        return candidates.find(({bbox, feature}) =>
+            lng >= bbox[0] && lng <= bbox[2] && lat >= bbox[1] && lat <= bbox[3] &&
+            _pointInCounty(lng, lat, feature))?.feature || null;
+    }
+
+    function _toggleCountyAtPoint(lngLat) {
+        const feature = _findCountyAt(lngLat.lng, lngLat.lat);
+        if (!feature) return _setHint('County reference data are still loading, or no county was found here.');
+
+        const county = {
+            fips: String(feature.properties.FIPS).padStart(5, '0'),
+            name: feature.properties.COUNTYNAME || feature.properties.NAME || 'Unknown County',
+            state: feature.properties.STATE || '',
+            cwa: feature.properties.CWA || '',
+            geometry: feature.geometry,
+        };
+
+        if (_activeCountyProduct === null) {
+            _saveUndo();
+            _activeCountyProduct = {
+                id: _nextId++, kind: 'county-alert', name: '', visible: true,
+                significance: _curAlertSignificance, hazard: _curAlertHazard,
+                alertNumber: _curAlertNumber,
+                color: _countyAlertColor(_curAlertSignificance), counties: [],
+            };
+            _activeCountyProduct.name = _countyAlertName(_activeCountyProduct);
+            _products.unshift(_activeCountyProduct);
+        }
+
+        const existing = _activeCountyProduct.counties.findIndex(item => item.fips === county.fips);
+        if (existing >= 0) _activeCountyProduct.counties.splice(existing, 1);
+        else _activeCountyProduct.counties.push(county);
+
+        _updateCountyAlertLayers();
+        _renderProductList();
+        _setHint(`${_activeCountyProduct.counties.length} counties selected\nLeft-click toggles; right-click removes`);
+    }
+
     // Handler for keeping track of the mouse position while drawing.
     function _onMapMouseMove(e) {
+        if (_activeTool === 'county-alert') {
+            _onCountyHover(e);
+            return;
+        }
         if (!_drawing) return;
         _mouseCoord = [e.lngLat.lng, e.lngLat.lat];
         _updateDraftLayer();
@@ -559,6 +970,7 @@ export const ProductGen = (() => {
         if (_draftCoords.length < 3) { _cancelDraft(); return; }
         _saveUndo();
         const closed = [..._draftCoords, _draftCoords[0]];
+        const forecastContext = _configuredContourContext();
         const p = {
             id:    _nextId++,
             kind:  'contour',
@@ -568,10 +980,24 @@ export const ProductGen = (() => {
             coords: closed,
             color: _curColor,
             width: _curWidth,
-            label: '',
+            fillPattern: _curPattern,
+            patternDensity: _curPatternDensity,
+            patternWidth: _curPatternWidth,
+            label: forecastContext?.level.label || '',
+            suiteId: forecastContext?.suite.id || null,
+            suiteVersion: forecastContext?.suite.version || null,
+            forecastProductId: forecastContext?.product.id || null,
+            forecastProductLabel: forecastContext?.product.label || null,
+            levelId: forecastContext?.level.id || null,
+            levelLabel: forecastContext?.level.label || null,
+            value: forecastContext?.level.value ?? null,
+            units: forecastContext?.product.units || null,
+            forecastRole: forecastContext?.level.role || 'level',
         };
-        p.name = `${p.type} #${p.id}`;
-        _products.push(p);
+        p.name = forecastContext
+            ? `${forecastContext.product.label} — ${forecastContext.level.label}`
+            : `${p.type} #${p.id}`;
+        _products.unshift(p);
         PG.info(`Contour created → id=${p.id} "${p.name}" vertices=${_draftCoords.length} | total: ${_products.length}`);
         _drawing = false; _draftCoords = []; _mouseCoord = null;
         _updateDraftLayer();
@@ -599,7 +1025,7 @@ export const ProductGen = (() => {
             pipSide:   'right',
         };
         p.name = `${frontType.charAt(0).toUpperCase() + frontType.slice(1)} Front #${p.id}`;
-        _products.push(p);
+        _products.unshift(p);
         PG.info(`Front created → id=${p.id} "${p.name}" type=${frontType} vertices=${p.coords.length} | total: ${_products.length}`);
         _drawing = false; _draftCoords = []; _mouseCoord = null;
         _updateDraftLayer();
@@ -622,7 +1048,7 @@ export const ProductGen = (() => {
             color,
             fontSize: fontSize || 18,
         };
-        _products.push(p);
+        _products.unshift(p);
         PG.info(`Text placed → id=${p.id} text="${text}" at [${lng.toFixed(3)}, ${lat.toFixed(3)}] | total: ${_products.length}`);
         _updateSymbolLayer();
         _renderProductList();
@@ -656,6 +1082,12 @@ export const ProductGen = (() => {
         if (product.kind === 'contour') {
             _panel.querySelector('#pg-type').value = product.type || 'General';
             _curType = product.type || 'General';
+            _curPattern = product.fillPattern || 'solid';
+            _curPatternDensity = product.patternDensity || 3;
+            _curPatternWidth = product.patternWidth || 1.5;
+            _panel.querySelector('#pg-pattern').value = _curPattern;
+            _panel.querySelector('#pg-pattern-density').value = _curPatternDensity;
+            _panel.querySelector('#pg-pattern-width').value = _curPatternWidth;
         }
         if (product.kind === 'text') {
             _panel.querySelector('#pg-text-content').value = product.text || '';
@@ -960,35 +1392,38 @@ export const ProductGen = (() => {
 
         const side  = p.pipSide || 'right';
 
-        // A stationary front uses one shared placement sequence. Alternating
-        // entries are triangles on the cold side and semicircles on the warm
-        // side; generating two complete sequences caused the previous paired
-        // (and visually non-alternating) symbols.
-        if (cfg.pipMode === 'stat') {
+        // Stationary and occluded fronts use one shared placement sequence.
+        // Stationary symbols alternate sides and colors; occluded symbols
+        // alternate shapes on the same side and remain purple.
+        if (cfg.pipMode === 'stat' || cfg.pipMode === 'occ') {
+            const isOccluded = cfg.pipMode === 'occ';
             _pipPositions(frontCoords, side).forEach((position, index) => {
                 const { lng, lat, txKm, tyKm, nxKm, nyKm, cosLat } = position;
                 const isCold = index % 2 === 0;
                 const ring = isCold
                     ? _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat)
-                    : _makeSemicircle(lng, lat, txKm, tyKm, -nxKm, -nyKm, cosLat);
+                    : _makeSemicircle(lng, lat, txKm, tyKm,
+                        isOccluded ? nxKm : -nxKm,
+                        isOccluded ? nyKm : -nyKm,
+                        cosLat);
                 feats.push({
                     type: 'Feature',
                     geometry: { type: 'Polygon', coordinates: [ring] },
                     properties: {
                         id: p.id,
                         prodKind: 'front-pip',
-                        color: isCold ? '#3388ff' : '#ff3333',
+                        color: isOccluded ? color : (isCold ? '#3388ff' : '#ff3333'),
                     },
                 });
             });
             return feats;
         }
 
-        const wantCold = cfg.pipMode === 'cold' || cfg.pipMode === 'occ';
+        const wantCold = cfg.pipMode === 'cold';
         const wantWarm = cfg.pipMode === 'warm';
 
         if (wantCold) {
-            const pipColor = cfg.pipMode === 'occ' ? '#9922cc' : color;
+            const pipColor = color;
             _pipPositions(frontCoords, side).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
                 const ring = _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat);
                 feats.push({ type:'Feature', geometry:{ type:'Polygon', coordinates:[ring] },
@@ -1016,15 +1451,23 @@ export const ProductGen = (() => {
         _map.addSource(SRC_CONTOUR, { type: 'geojson', data: _emptyFC() });
         _map.addLayer({
             id: LYR_CTR_FILL, type: 'fill', source: SRC_CONTOUR,
-            filter: ['==', '$type', 'Polygon'],
+            filter: ['all', ['==', '$type', 'Polygon'], ['==', 'fillPattern', 'solid']],
             paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 0.08 },
         });
         _map.addLayer({
+            id: LYR_CTR_PATTERN, type: 'fill', source: SRC_CONTOUR,
+            filter: ['all', ['==', '$type', 'Polygon'], ['!=', 'fillPattern', 'solid']],
+            paint: { 'fill-pattern': ['get', 'patternImage'], 'fill-opacity': 0.9 },
+        });
+        _map.addLayer({
             id: LYR_CTR_LINE, type: 'line', source: SRC_CONTOUR,
+            filter: ['==', 'featureRole', 'outline'],
+            layout: { 'line-join': 'round', 'line-cap': 'round' },
             paint: { 'line-color': ['get', 'color'], 'line-width': ['get', 'width'], 'line-opacity': 0.95 },
         });
         _map.addLayer({
             id: LYR_CTR_LABEL, type: 'symbol', source: SRC_CONTOUR,
+            filter: ['==', 'featureRole', 'outline'],
             layout: {
                 'text-field': ['get', 'label'], 'text-size': 13,
                 'text-font': ['Trebuchet MS'],
@@ -1034,6 +1477,16 @@ export const ProductGen = (() => {
             paint: { 'text-color': ['get', 'color'], 'text-halo-color': '#000', 'text-halo-width': 1.5 },
         });
 
+        _map.addSource(SRC_COUNTY_ALERTS, {type: 'geojson', data: _emptyFC()});
+        _map.addLayer({
+            id: LYR_COUNTY_SELECTED, type: 'fill', source: SRC_COUNTY_ALERTS,
+            paint: {'fill-color': ['get', 'color'], 'fill-opacity': 0.22},
+        });
+        _map.addLayer({
+            id: LYR_COUNTY_OUTLINE, type: 'line', source: SRC_COUNTY_ALERTS,
+            layout: {'line-join': 'round', 'line-cap': 'round'},
+            paint: {'line-color': ['get', 'color'], 'line-width': 3, 'line-opacity': 1},
+        });
         // ── Front (pip + backbone) layers ─────────────────────────────
         _map.addSource(SRC_FRONTS, { type: 'geojson', data: _emptyFC() });
         _map.addLayer({
@@ -1143,31 +1596,135 @@ export const ProductGen = (() => {
         _map.getSource(SRC_DRAFT).setData({ type: 'FeatureCollection', features });
     }
 
-    // FIXME: Make sure that the outline of the polygon is completely visible and forms a closed loop.  
+    // Rebuild the contour fill and its explicit closed outline geometry.
     function _updateContourLayer() {
         if (!_map || !_map.getSource(SRC_CONTOUR)) return;
-        const features = _products
-            .filter(p => p.kind === 'contour' && p.visible !== false && (!_editProduct || p.id !== _editProduct.id))
-            .map(p => ({
-                type: 'Feature',
-                geometry: { type: 'Polygon', coordinates: [p.coords] },
-                properties: { id: p.id, color: p.color, width: p.width, label: p.label || '' },
-            }));
-        // If editing a contour, render the in-progress version
-        if (_editProduct && _editProduct.kind === 'contour') {
+        const contourProperties = p => {
+            const fillPattern = p.fillPattern || 'solid';
+            return {
+                id: p.id,
+                color: p.color,
+                width: p.width,
+                label: p.label || '',
+                fillPattern,
+                patternDensity: p.patternDensity || 3,
+                patternWidth: p.patternWidth || 1.5,
+                patternImage: fillPattern === 'solid' ? '' : _ensureContourPatternImage(
+                    fillPattern, p.color, p.patternDensity || 3, p.patternWidth || 1.5
+                ),
+            };
+        };
+        const features = [];
+        const addContourFeatures = (p, coordinates) => {
+            if (!coordinates || coordinates.length < 3) return;
+            const first = coordinates[0];
+            const last = coordinates[coordinates.length - 1];
+            const ring = first[0] === last[0] && first[1] === last[1]
+                ? coordinates.map(coord => [...coord])
+                : [...coordinates.map(coord => [...coord]), [...first]];
+            const properties = contourProperties(p);
+
+            // Keep polygon fills and outlines as separate geometries. Rendering
+            // a thick line directly from a polygon boundary can expose tile
+            // clipping/simplification gaps at particular zoom levels.
             features.push({
                 type: 'Feature',
-                geometry: { type: 'Polygon', coordinates: [_editCoords] },
-                properties: { id: _editProduct.id, color: _editProduct.color, width: _editProduct.width, label: _editProduct.label || '' },
+                geometry: { type: 'Polygon', coordinates: [ring] },
+                properties: {...properties, featureRole: 'fill'},
             });
+            features.push({
+                type: 'Feature',
+                geometry: { type: 'LineString', coordinates: ring },
+                properties: {...properties, featureRole: 'outline'},
+            });
+        };
+
+        _productsBackToFront()
+            .filter(p => p.kind === 'contour' && p.visible !== false && (!_editProduct || p.id !== _editProduct.id))
+            .forEach(p => addContourFeatures(p, p.coords));
+
+        // If editing a contour, render the in-progress version
+        if (_editProduct && _editProduct.kind === 'contour') {
+            addContourFeatures(_editProduct, _editCoords);
         }
         _map.getSource(SRC_CONTOUR).setData({ type: 'FeatureCollection', features });
+    }
+
+    function _ensureContourPatternImage(pattern, color, density = 3, patternWidth = 1.5) {
+        const normalizedDensity = Math.max(0.25, Math.min(5, Number(density) || 3));
+        const normalizedWidth = Math.max(0.5, Math.min(6, Number(patternWidth) || 1.5));
+        const densityKey = String(normalizedDensity).replace('.', '_');
+        const widthKey = String(normalizedWidth).replace('.', '_');
+        const imageId = `pg-${pattern}-d${densityKey}-w${widthKey}-${color.replace('#', '').toLowerCase()}`;
+        if (_map.hasImage(imageId)) return imageId;
+
+        const spacing = Math.max(8, Math.round(24 / normalizedDensity + 4));
+        const size = pattern === 'stars' ? Math.max(10, spacing + 8) : pattern === 'dashes' ? spacing * 2 : spacing;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, size, size);
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = normalizedWidth;
+
+        if (pattern === 'hatch' || pattern === 'crosshatch') {
+            const diagonal = reverse => {
+                ctx.beginPath();
+                for (let offset = -size; offset <= size * 2; offset += Math.max(4, spacing / 2)) {
+                    ctx.moveTo(offset, reverse ? 0 : size);
+                    ctx.lineTo(offset + size, reverse ? size : 0);
+                }
+                ctx.stroke();
+            };
+            diagonal(false);
+            if (pattern === 'crosshatch') diagonal(true);
+        } else if (pattern === 'dots') {
+            ctx.beginPath();
+            ctx.arc(size / 2, size / 2, 1.6, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (pattern === 'stars') {
+            ctx.beginPath();
+            for (let i = 0; i < 10; i++) {
+                const radius = i % 2 === 0 ? 4.5 : 2;
+                const angle = -Math.PI / 2 + i * Math.PI / 5;
+                const x = size / 2 + Math.cos(angle) * radius;
+                const y = size / 2 + Math.sin(angle) * radius;
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+            ctx.fill();
+        } else if (pattern === 'checker') {
+            const half = size / 2;
+            ctx.fillRect(0, 0, half, half);
+            ctx.fillRect(half, half, half, half);
+        } else if (pattern === 'dashes') {
+            ctx.lineWidth = normalizedWidth;
+            ctx.lineCap = 'butt';
+            const dashLength = spacing * 0.34;
+            const delta = dashLength / (2 * Math.sqrt(2));
+            ctx.beginPath();
+            for (let row = -2; row <= 3; row++) {
+                const y = spacing * (row + 0.5);
+                const rowOffset = row % 2 === 0 ? 0 : spacing / 2;
+                for (let x = -size; x <= size * 2; x += spacing) {
+                    const centerX = x + rowOffset;
+                    ctx.moveTo(centerX - delta, y - delta);
+                    ctx.lineTo(centerX + delta, y + delta);
+                }
+            }
+            ctx.stroke();
+        }
+
+        _map.addImage(imageId, ctx.getImageData(0, 0, size, size), { pixelRatio: 1 });
+        return imageId;
     }
 
     function _updateFrontLayer() {
         if (!_map || !_map.getSource(SRC_FRONTS)) return;
         const features = [];
-        _products.filter(p => p.kind === 'front' && p.visible !== false && (!_editProduct || p.id !== _editProduct.id))
+        _productsBackToFront().filter(p => p.kind === 'front' && p.visible !== false && (!_editProduct || p.id !== _editProduct.id))
              .forEach(p => _generateFrontFeatures(p).forEach(f => features.push(f)));
         // If editing a front, render the in-progress version
         if (_editProduct && _editProduct.kind === 'front') {
@@ -1178,7 +1735,7 @@ export const ProductGen = (() => {
 
     function _updateSymbolLayer() {
         if (!_map || !_map.getSource(SRC_SYMBOLS)) return;
-        const features = _products
+        const features = _productsBackToFront()
             .filter(p => p.kind === 'text' && p.visible !== false)
             .map(p => ({
                 type: 'Feature',
@@ -1188,10 +1745,140 @@ export const ProductGen = (() => {
         _map.getSource(SRC_SYMBOLS).setData({ type: 'FeatureCollection', features });
     }
 
+    function _updateCountyAlertLayers() {
+        const source = _map?.getSource(SRC_COUNTY_ALERTS);
+        if (!source) return;
+        const features = [];
+        _productsBackToFront()
+            .filter(product => product.kind === 'county-alert' && product.visible !== false)
+            .forEach(product => product.counties.forEach(county => {
+                if (!county.geometry) return;
+                features.push({
+                    type: 'Feature', geometry: county.geometry,
+                    properties: {fips: county.fips, color: product.color, productId: product.id},
+                });
+            }));
+        source.setData({type: 'FeatureCollection', features});
+    }
+
+    async function _loadCountyReference() {
+        try {
+            const response = await fetch('/assets/counties_select.geojson');
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            _countyFeaturesByFips = new Map(data.features.map(feature => [
+                String(feature.properties.FIPS).padStart(5, '0'), feature,
+            ]));
+            _countySpatialGrid = new Map();
+            data.features.forEach(feature => {
+                const bbox = [Infinity, Infinity, -Infinity, -Infinity];
+                const visit = coordinates => {
+                    if (typeof coordinates?.[0] === 'number') {
+                        bbox[0] = Math.min(bbox[0], coordinates[0]);
+                        bbox[1] = Math.min(bbox[1], coordinates[1]);
+                        bbox[2] = Math.max(bbox[2], coordinates[0]);
+                        bbox[3] = Math.max(bbox[3], coordinates[1]);
+                    } else coordinates?.forEach(visit);
+                };
+                visit(feature.geometry.coordinates);
+                const entry = {bbox, feature};
+                const minX = Math.floor((bbox[0] + 180) / COUNTY_GRID_DEGREES);
+                const maxX = Math.floor((bbox[2] + 180) / COUNTY_GRID_DEGREES);
+                const minY = Math.floor((bbox[1] + 90) / COUNTY_GRID_DEGREES);
+                const maxY = Math.floor((bbox[3] + 90) / COUNTY_GRID_DEGREES);
+                for (let x = minX; x <= maxX; x++) {
+                    for (let y = minY; y <= maxY; y++) {
+                        const key = `${x}:${y}`;
+                        if (!_countySpatialGrid.has(key)) _countySpatialGrid.set(key, []);
+                        _countySpatialGrid.get(key).push(entry);
+                    }
+                }
+            });
+            PG.info(`Loaded ${data.features.length} county selection features`);
+        } catch (error) {
+            console.error('[PG] Failed to load county reference data:', error);
+            _setHint('County selection data could not be loaded.');
+        }
+    }
+
+    function _countyHoverElement() {
+        let element = document.querySelector('#pg-county-hover');
+        if (!element) {
+            element = document.createElement('div');
+            element.id = 'pg-county-hover';
+            _map.getContainer().appendChild(element);
+        }
+        return element;
+    }
+
+    function _onCountyHover(e) {
+        if (_activeTool !== 'county-alert') return _hideCountyHover();
+        const feature = _findCountyAt(e.lngLat.lng, e.lngLat.lat);
+        if (!feature) return _hideCountyHover();
+        const properties = feature.properties;
+        const element = _countyHoverElement();
+        element.textContent = `${properties.COUNTYNAME}${properties.STATE ? `, ${properties.STATE}` : ''} (${properties.FIPS})`;
+        element.style.left = `${e.point.x + 14}px`;
+        element.style.top = `${e.point.y + 14}px`;
+        element.style.display = 'block';
+    }
+
+    function _hideCountyHover() {
+        const element = document.querySelector('#pg-county-hover');
+        if (element) element.style.display = 'none';
+    }
+
+    function _onCountyRightClick(e) {
+        if (_activeTool !== 'county-alert' || !_activeCountyProduct) return;
+        e.preventDefault();
+        e.originalEvent?.preventDefault();
+        const feature = _findCountyAt(e.lngLat.lng, e.lngLat.lat);
+        if (!feature) return;
+        const fips = String(feature.properties.FIPS).padStart(5, '0');
+        const index = _activeCountyProduct.counties.findIndex(county => county.fips === fips);
+        if (index < 0) return;
+        _activeCountyProduct.counties.splice(index, 1);
+        _updateCountyAlertLayers();
+        _renderProductList();
+        _setHint(`${_activeCountyProduct.counties.length} counties selected\nRight-click removes a county`);
+    }
+
     function _updateAllLayers() {
         _updateContourLayer();
         _updateFrontLayer();
         _updateSymbolLayer();
+        _updateCountyAlertLayers();
+    }
+
+    function _productsBackToFront() {
+        return [..._products].reverse();
+    }
+
+    function _moveProductToIndex(productId, targetIndex) {
+        const fromIndex = _products.findIndex(product => product.id === productId);
+        const boundedIndex = Math.max(0, Math.min(_products.length - 1, targetIndex));
+        if (fromIndex < 0 || fromIndex === boundedIndex) return;
+        _saveUndo();
+        const [product] = _products.splice(fromIndex, 1);
+        _products.splice(boundedIndex, 0, product);
+        _renderProductList();
+        _updateAllLayers();
+    }
+
+    function _dropProductAt(productId, targetProductId, placeBefore) {
+        if (productId === targetProductId) return;
+        const fromIndex = _products.findIndex(product => product.id === productId);
+        if (fromIndex < 0) return;
+        const nextProducts = [..._products];
+        const [product] = nextProducts.splice(fromIndex, 1);
+        const targetIndex = nextProducts.findIndex(item => item.id === targetProductId);
+        if (targetIndex < 0) return;
+        nextProducts.splice(targetIndex + (placeBefore ? 0 : 1), 0, product);
+        if (nextProducts.every((item, index) => item.id === _products[index].id)) return;
+        _saveUndo();
+        _products = nextProducts;
+        _renderProductList();
+        _updateAllLayers();
     }
 
     // ------------------------------------------------------------------
@@ -1204,16 +1891,49 @@ export const ProductGen = (() => {
             return;
         }
         ul.innerHTML = '';
-        _products.forEach(p => {
-            const isEditing  = _editProduct?.id === p.id;
+        _products.forEach((p, productIndex) => {
+            const isEditing  = _editProduct?.id === p.id || _activeCountyProduct?.id === p.id;
             const isVisible  = p.visible !== false;
             const li = document.createElement('li');
             li.className = 'pg-product-item' + (isEditing ? ' selected' : '') + (isVisible ? '' : ' pg-hidden-prod');
             li.dataset.prodId = p.id;
 
+            li.addEventListener('dragover', event => {
+                if (_draggedProductId === null || _draggedProductId === p.id) return;
+                event.preventDefault();
+                const before = event.clientY < li.getBoundingClientRect().top + li.offsetHeight / 2;
+                li.classList.toggle('pg-drop-before', before);
+                li.classList.toggle('pg-drop-after', !before);
+            });
+            li.addEventListener('dragleave', () => {
+                li.classList.remove('pg-drop-before', 'pg-drop-after');
+            });
+            li.addEventListener('drop', event => {
+                event.preventDefault();
+                const before = event.clientY < li.getBoundingClientRect().top + li.offsetHeight / 2;
+                _dropProductAt(_draggedProductId, p.id, before);
+            });
+
             // ---- Header row: vis / swatch / badge / name / edit? / del ----
             const hdrRow = document.createElement('div');
             hdrRow.className = 'pg-item-hdr';
+
+            const dragHandle = document.createElement('span');
+            dragHandle.className = 'pg-drag-handle';
+            dragHandle.draggable = true;
+            dragHandle.title = 'Drag to reorder';
+            dragHandle.textContent = '⋮⋮';
+            dragHandle.addEventListener('dragstart', event => {
+                _draggedProductId = p.id;
+                li.classList.add('pg-dragging');
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', String(p.id));
+            });
+            dragHandle.addEventListener('dragend', () => {
+                _draggedProductId = null;
+                _panel.querySelectorAll('.pg-product-item').forEach(item =>
+                    item.classList.remove('pg-dragging', 'pg-drop-before', 'pg-drop-after'));
+            });
 
             // Visibility toggle
             const visBtn = document.createElement('button');
@@ -1229,6 +1949,10 @@ export const ProductGen = (() => {
             const swatch = document.createElement('span');
             swatch.className = 'pg-prod-swatch';
             swatch.style.background = p.color;
+            if (p.kind === 'contour' && (p.fillPattern || 'solid') !== 'solid') {
+                swatch.title = `${p.fillPattern} fill`;
+                swatch.style.backgroundImage = 'repeating-linear-gradient(45deg, transparent 0 3px, rgba(0,0,0,.65) 3px 4px)';
+            }
 
             // Kind-aware badge
             const badge = document.createElement('span');
@@ -1238,8 +1962,13 @@ export const ProductGen = (() => {
                 badge.style.color = (FRONT_CFG[p.frontType] || {}).color || p.color;
             } else if (p.kind === 'text') {
                 badge.textContent = p.text === 'H' ? 'H' : p.text === 'L' ? 'L' : 'TXT';
+            } else if (p.kind === 'county-alert') {
+                badge.textContent = `${p.hazard} ${p.significance}`;
+                badge.title = `${p.counties.length} counties`;
             } else {
-                badge.textContent = p.type || 'CTR';
+                badge.textContent = p.forecastProductLabel
+                    ? `${p.forecastProductLabel}: ${p.levelLabel}`
+                    : p.type || 'CTR';
             }
 
             const nameInput = document.createElement('input');
@@ -1255,10 +1984,30 @@ export const ProductGen = (() => {
                 if (e.key === 'Enter') nameInput.blur();
             });
 
+            hdrRow.appendChild(dragHandle);
             hdrRow.appendChild(visBtn);
             hdrRow.appendChild(swatch);
             hdrRow.appendChild(badge);
             hdrRow.appendChild(nameInput);
+
+            const orderControls = document.createElement('span');
+            orderControls.className = 'pg-order-controls';
+            const upBtn = document.createElement('button');
+            upBtn.type = 'button';
+            upBtn.title = 'Move product up';
+            upBtn.setAttribute('aria-label', `Move ${p.name} up`);
+            upBtn.textContent = '▲';
+            upBtn.disabled = productIndex === 0;
+            upBtn.addEventListener('click', () => _moveProductToIndex(p.id, productIndex - 1));
+            const downBtn = document.createElement('button');
+            downBtn.type = 'button';
+            downBtn.title = 'Move product down';
+            downBtn.setAttribute('aria-label', `Move ${p.name} down`);
+            downBtn.textContent = '▼';
+            downBtn.disabled = productIndex === _products.length - 1;
+            downBtn.addEventListener('click', () => _moveProductToIndex(p.id, productIndex + 1));
+            orderControls.append(upBtn, downBtn);
+            hdrRow.appendChild(orderControls);
 
             // Edit button only for contour and front (not for text/H/L)
             if (p.kind === 'contour' || p.kind === 'front') {
@@ -1271,6 +2020,27 @@ export const ProductGen = (() => {
                     else _enterEditMode(p);
                 });
                 hdrRow.appendChild(editBtn);
+            } else if (p.kind === 'county-alert') {
+                const editBtn = document.createElement('button');
+                editBtn.className = 'pg-edit-btn' + (isEditing ? ' active' : '');
+                editBtn.title = isEditing ? 'Finish selecting counties' : 'Edit selected counties';
+                editBtn.innerHTML = '&#9998;';
+                editBtn.addEventListener('click', () => {
+                    if (_activeCountyProduct?.id === p.id) {
+                        _enterTool(null);
+                    } else {
+                        _curAlertSignificance = p.significance;
+                        _curAlertHazard = p.hazard;
+                        _curAlertNumber = p.alertNumber || '';
+                        _enterTool('county-alert');
+                        _activeCountyProduct = p;
+                        _panel.querySelector('#pg-alert-significance').value = p.significance;
+                        _panel.querySelector('#pg-alert-hazard').value = p.hazard;
+                        _panel.querySelector('#pg-alert-number').value = _curAlertNumber;
+                        _renderProductList();
+                    }
+                });
+                hdrRow.appendChild(editBtn);
             }
 
             const delBtn = document.createElement('button');
@@ -1279,6 +2049,10 @@ export const ProductGen = (() => {
             delBtn.innerHTML = '&#10005;';
             delBtn.addEventListener('click', () => {
                 if (_editProduct?.id === p.id) _exitEditMode();
+                if (_activeCountyProduct?.id === p.id) {
+                    _activeCountyProduct = null;
+                    _enterTool(null);
+                }
                 _saveUndo();
                 _products = _products.filter(x => x.id !== p.id);
                 _renderProductList();
@@ -1286,6 +2060,14 @@ export const ProductGen = (() => {
             });
             hdrRow.appendChild(delBtn);
             li.appendChild(hdrRow);
+
+            if (p.kind === 'county-alert') {
+                const countySummary = document.createElement('div');
+                countySummary.className = 'pg-county-summary';
+                countySummary.textContent = `${p.counties.length} ${p.counties.length === 1 ? 'county' : 'counties'}`;
+                countySummary.title = p.counties.map(county => `${county.name}${county.state ? `, ${county.state}` : ''} (${county.fips})`).join('\n');
+                li.appendChild(countySummary);
+            }
 
             // ---- Label row (contour edit only) ----
             if (isEditing && p.kind === 'contour') {
@@ -1319,6 +2101,15 @@ export const ProductGen = (() => {
     }
 
     // TODO: export to GeoJSON, import from GeoJSON, undo/redo, save/load from localStorage
+    function _countyAlertMultiPolygon(counties) {
+        const polygons = [];
+        counties.forEach(county => {
+            if (county.geometry?.type === 'Polygon') polygons.push(county.geometry.coordinates);
+            else if (county.geometry?.type === 'MultiPolygon') polygons.push(...county.geometry.coordinates);
+        });
+        return polygons.length ? {type: 'MultiPolygon', coordinates: polygons} : null;
+    }
+
     function _exportGeoJSON() {
         // Build a FeatureCollection with all products in their natural geometries
         const features = [];
@@ -1327,7 +2118,22 @@ export const ProductGen = (() => {
                 features.push({
                     type: 'Feature',
                     geometry: { type: 'Polygon', coordinates: [p.coords] },
-                    properties: { kind: 'contour', id: p.id, name: p.name, color: p.color, width: p.width, label: p.label || '', type: p.type || '' },
+                    properties: {
+                        kind: 'contour', id: p.id, name: p.name,
+                        color: p.color, width: p.width, label: p.label || '', type: p.type || '',
+                        fillPattern: p.fillPattern || 'solid',
+                        patternDensity: p.patternDensity || 3,
+                        patternWidth: p.patternWidth || 1.5,
+                        suiteId: p.suiteId || null,
+                        suiteVersion: p.suiteVersion || null,
+                        forecastProductId: p.forecastProductId || null,
+                        forecastProductLabel: p.forecastProductLabel || null,
+                        levelId: p.levelId || null,
+                        levelLabel: p.levelLabel || null,
+                        value: p.value ?? null,
+                        units: p.units || null,
+                        forecastRole: p.forecastRole || null,
+                    },
                 });
             } else if (p.kind === 'front') {
                 features.push({
@@ -1341,9 +2147,35 @@ export const ProductGen = (() => {
                     geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
                     properties: { kind: 'text', id: p.id, name: p.name, color: p.color, text: p.text, fontSize: p.fontSize || 18 },
                 });
+            } else if (p.kind === 'county-alert') {
+                features.push({
+                    type: 'Feature',
+                    geometry: _countyAlertMultiPolygon(p.counties),
+                    properties: {
+                        kind: 'county-alert', id: p.id, name: p.name,
+                        significance: p.significance, hazard: p.hazard,
+                        alertNumber: p.alertNumber || null,
+                        color: p.color,
+                        counties: p.counties.map(({geometry, ...county}) => county),
+                        county_fips: p.counties.map(county => county.fips),
+                    },
+                });
             }
         });
-        const fc  = JSON.stringify({ type: 'FeatureCollection', features }, null, 2);
+        const configuredSuites = [...new Map(_products
+            .filter(product => product.suiteId)
+            .map(product => [product.suiteId, {
+                id: product.suiteId,
+                version: product.suiteVersion,
+                label: getForecastSuite(product.suiteId)?.label || product.suiteId,
+            }])).values()];
+        const fc  = JSON.stringify({
+            type: 'FeatureCollection',
+            schemaVersion: 1,
+            forecastSuites: configuredSuites,
+            productOrder: _products.map(product => product.id),
+            features,
+        }, null, 2);
         const a   = document.createElement('a');
         a.href    = 'data:application/json,' + encodeURIComponent(fc);
         a.download = 'products.geojson';
