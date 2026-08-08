@@ -480,10 +480,10 @@ export const LayerManager = (() => {
             LM.info(`Source added → uid=${uid} | id="${id}" product="${productKey || 'none'}" name="${entry.name}" cycle=${storedCycle ? storedCycle.toISOString() : 'n/a'} dominant=${_dominantId === id}`);
         }
 
-        _renderAll();
-
-        // Return focus to layer manager (DataSelector already closed)
+        // Return focus to the layer manager before rendering so the timeline
+        // can measure the dialog's actual width.
         _overlay.style.display = 'flex';
+        _renderAll();
         // If adding/replacing a source changed the dominant or we auto-assigned one, probe for frames
         if (_dominantId) _scheduleProbe();
     }
@@ -741,13 +741,29 @@ export const LayerManager = (() => {
         const tlEnd   = _rangeEnd   || defaultEnd;
         const tlStart = _rangeStart || defaultStart;
 
-        const totalMs   = Math.max(tlEnd.getTime() - tlStart.getTime(), 3600000); // min 1 h
+        // Use the actual displayed range so even sub-hour timelines span the
+        // full viewport.  Keep only a tiny non-zero floor for a single frame.
+        const totalMs   = Math.max(tlEnd.getTime() - tlStart.getTime(), 1);
         const totalHr   = totalMs / 3600000;
 
-        const containerW = Math.max(200,
-            (container.parentElement ? container.parentElement.clientWidth - 24 : 700) || 700);
-        const pxPerHr   = Math.min(60, containerW / Math.max(totalHr, 1));
-        const totalPx   = Math.round(totalHr * pxPerHr);
+        // Fill the usable timeline viewport.  The previous 60 px/hour cap
+        // left short time ranges compressed against the left side instead of
+        // allowing the axis, frame markers, and selection box to span the
+        // panel.  clientWidth includes padding, so remove it from the usable
+        // width rather than relying on a fixed offset.
+        const scrollContainer = container.parentElement;
+        let containerW = 700;
+        if (scrollContainer) {
+            const scrollStyle = window.getComputedStyle(scrollContainer);
+            const horizontalPadding =
+                (parseFloat(scrollStyle.paddingLeft) || 0) +
+                (parseFloat(scrollStyle.paddingRight) || 0);
+            containerW = scrollContainer.clientWidth - horizontalPadding;
+        }
+        containerW = Math.max(200, containerW || 700);
+
+        const totalPx   = Math.ceil(containerW);
+        const pxPerHr   = totalPx / totalHr;
         _tlPxPerMs      = pxPerHr / 3600000;
 
         const posX = (t) => Math.round((t.getTime() - tlStart.getTime()) * _tlPxPerMs);
@@ -1326,6 +1342,105 @@ export const LayerManager = (() => {
         }
     }
 
+    function getConfiguration() {
+        const sources = _sources.map((source, index) => ({
+            slotId: String(source.uid || `source-${index + 1}`),
+            sourceId: source.id,
+            productId: source.productKey || null,
+            cyclePolicy: 'latest',
+            savedCycleTime: source.cycleTime?.toISOString?.() || null,
+            frameMode: source.frameMode || null,
+            queryParams: source.queryParams || {},
+        }));
+        const dominant = _sources.find(source => source.id === _dominantId);
+        return {
+            sources,
+            sourceOrder: sources.map(source => source.slotId),
+            dominantSlotId: dominant ? String(dominant.uid) : sources[0]?.slotId || null,
+            timeline: {
+                anchor: 'latest',
+                numberOfFrames: _numFrames,
+                frameSkip: _frameSkip,
+                intervalMinutes: _rangeIntervalMin,
+                initialFrame: 'newest',
+            },
+        };
+    }
+
+    async function loadConfiguration(configuration, onApply) {
+        const slots = Array.isArray(configuration?.sources) ? configuration.sources : [];
+        if (!slots.length) throw new Error('The procedure does not contain any data sources.');
+        const restored = [];
+        for (let index = 0; index < slots.length; index++) {
+            const slot = slots[index];
+            const entry = _makeEntry(slot.sourceId);
+            if (!entry) throw new Error(`Data source "${slot.sourceId}" is not available.`);
+            const product = slot.productId ? PRODUCT_SUITES[slot.productId] : null;
+            if (slot.productId && !product) {
+                throw new Error(`Data product "${slot.productId}" is not available.`);
+            }
+            const queryParams = slot.queryParams && typeof slot.queryParams === 'object'
+                ? {...slot.queryParams} : _defaultQueryParamsForProduct(slot.productId);
+            const frameMode = slot.frameMode || _productFrameMode(slot.productId, entry);
+            let cycleTime = null;
+            if (entry.has_forecast_hour && frameMode === 'fhr') {
+                if (slot.cyclePolicy === 'fixed' && slot.savedCycleTime) {
+                    cycleTime = new Date(slot.savedCycleTime);
+                } else {
+                    const latest = await CatalogClient.latestCycle(slot.sourceId, {queryParams});
+                    cycleTime = new Date(latest.cycle_time);
+                }
+                if (!Number.isFinite(cycleTime.getTime())) {
+                    throw new Error(`No usable cycle was found for "${slot.sourceId}".`);
+                }
+            }
+            restored.push({
+                uid: slot.slotId || `procedure-source-${index + 1}`,
+                id: slot.sourceId,
+                name: entry.name,
+                color: PALETTE[index % PALETTE.length],
+                entry,
+                productKey: slot.productId || null,
+                frameMode,
+                cycleTime,
+                queryParams,
+            });
+        }
+
+        const orderedSlots = Array.isArray(configuration.sourceOrder)
+            ? configuration.sourceOrder : [];
+        if (orderedSlots.length) {
+            const order = new Map(orderedSlots.map((slotId, index) => [String(slotId), index]));
+            restored.sort((a, b) =>
+                (order.get(String(a.uid)) ?? Number.MAX_SAFE_INTEGER) -
+                (order.get(String(b.uid)) ?? Number.MAX_SAFE_INTEGER));
+        }
+        _sources = restored;
+        const dominant = restored.find(source =>
+            String(source.uid) === String(configuration.dominantSlotId)) || restored[0];
+        _dominantId = dominant.id;
+        _numFrames = Math.max(1, Number(configuration.timeline?.numberOfFrames) || 12);
+        _frameSkip = Math.max(1, Number(configuration.timeline?.frameSkip) || 1);
+        _rangeStart = null;
+        _rangeEnd = null;
+        _rangeIntervalMin = Number(configuration.timeline?.intervalMinutes) || null;
+        _selectedUid = null;
+        _renderSourceList();
+        _renderDominantDropdown();
+        await _runProbe();
+        if (!_probedFrames.length) throw new Error('No matching frames are currently available.');
+
+        const payload = {
+            sources: _sources.slice(),
+            dominantId: _dominantId,
+            numFrames: _numFrames,
+            frameSkip: _frameSkip,
+            frames: _probedFrames.map(frame => frame.valid),
+        };
+        if (typeof onApply === 'function') await onApply(payload);
+        return payload;
+    }
+
     // ------------------------------------------------------------------
     // Public API
     // ------------------------------------------------------------------
@@ -1358,9 +1473,13 @@ export const LayerManager = (() => {
             _updateSliderMax();  // reflect any already-probed frames
 
             _selectedUid = null;
-            _renderAll();
+            // Render after displaying the dialog so timeline width
+            // calculations use the real panel dimensions.
             _overlay.style.display = 'flex';
+            _renderAll();
         },
+        getConfiguration,
+        loadConfiguration,
     };
     
 })();

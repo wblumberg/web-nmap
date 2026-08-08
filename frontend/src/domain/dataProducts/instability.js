@@ -4,6 +4,40 @@
 import COLORMAPS from '../../config/colormaps.js';
 import { smooth2D } from './utils.js';
 
+function makeContourLabelLayersByColor(field, levels, colors, layerIdPrefix, haloColor) {
+    const levelsByColor = new Map();
+
+    levels.forEach((level, idx) => {
+        const color = colors[Math.min(idx, colors.length - 1)];
+        if (!levelsByColor.has(color)) {
+            levelsByColor.set(color, []);
+        }
+        levelsByColor.get(color).push(level);
+    });
+
+    let layerIdx = 0;
+    return [...levelsByColor.entries()].map(([color, colorLevels]) => {
+        const labelContour = new apgl.Contour(field, {
+            color,
+            opacity: 0,
+            line_width: 1,
+            levels: colorLevels,
+        });
+
+        const labels = new apgl.ContourLabels(labelContour, {
+            text_color: color,
+            halo: true,
+            halo_color: haloColor,
+            font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+            label_formatter: val => Math.round(val).toString(),
+        });
+
+        const layer = new apgl.PlotLayer(`${layerIdPrefix}_labels_${layerIdx}`, labels);
+        layerIdx += 1;
+        return layer;
+    });
+}
+
 export default {
 
     'mlcape_fill': {
@@ -69,9 +103,22 @@ export default {
             const fill = new apgl.ContourFill(field, {
                 cmap: transparent,
                 patterns: [{
-                    range: [-Infinity, -50],
+                    range: [-100, -50],
                     type: 'hatch',
-                    color: '#6f42c1',
+                    color: '#43bddc',
+                    opacity: 0.9,
+                    spacing: 9,
+                    width: 1.5,
+                    angle: 45,
+                }],
+            });
+
+            const fill2 = new apgl.ContourFill(field, {
+                cmap: transparent,
+                patterns: [{
+                    range: [-Infinity, -100],
+                    type: 'hatch',
+                    color: '#4380dc',
                     opacity: 0.9,
                     spacing: 9,
                     width: 1.5,
@@ -80,7 +127,8 @@ export default {
             });
 
             return {
-                layers: [new apgl.PlotLayer('mlcin_lt50_hatched', fill)],
+                layers: [new apgl.PlotLayer('mlcin_lt50_hatched', fill),
+                         new apgl.PlotLayer('mlcin_lt100_hatched', fill2)],
                 colorbar: [],
                 sampler: (lon, lat) => ({ mlcin: field.sampleField(lon, lat) }),
             };
@@ -88,11 +136,11 @@ export default {
     },
 
     'mlcape_contour': {
-        label: 'MLCAPE',
-        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Mixed-Layer CAPE [J kg⁻¹]',
+        label: 'MLCAPE and MLCIN',
+        title: '{valid_YYYY}-{valid_MM}-{valid_DD}  {valid_HH}{valid_mm} UTC  Mesoanalysis Mixed-Layer CAPE and CIN [J kg⁻¹]',
         group: 'instability',
         available_for: ['MESOANALYSIS_GRID'],
-        data_keys: ['mlcape'],
+        data_keys: ['mlcape', 'mlcin'],
         make_layers(data, grid) {
             const cape = new apgl.RawScalarField(grid, smooth2D(data.mlcape.data, grid.ni, grid.nj));
             //const cin = new apgl.RawScalarField(grid, data.mlcin.data.map(v => Math.max(v, 0)));
@@ -102,14 +150,46 @@ export default {
             
             const cb = new apgl.ColorMap(levels, colors);
             const contour  = new apgl.Contour(cape, { cmap: cb, opacity: 1, line_width: level => level < 1000 ? 1.0 : 2.5, levels: levels });
-    
-            const cape_lbls  = new apgl.ContourLabels(contour, {
-                cmap: cb, halo: true, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf', label_formatter: val => Math.round(val).toString(),
+            const capeLabelLayers = makeContourLabelLayersByColor(cape, levels, colors, 'mlcape', '#080808');
+
+            // Keep the underlying field transparent; only the requested CIN
+            // interval is visible through the procedural hatch overlay.
+            const transparent = new apgl.ColorMap(
+                [-10000, 10000],
+                ['#00000000'],
+                {underflow_color: '#00000000', overflow_color: '#00000000'},
+            );
+            const fill = new apgl.ContourFill(data.mlcin, {
+                cmap: transparent,
+                patterns: [{
+                    range: [-100, -50],
+                    type: 'hatch',
+                    color: '#43bddc',
+                    opacity: 0.9,
+                    spacing: 9,
+                    width: 1.5,
+                    angle: 45,
+                }],
+            });
+
+            const fill2 = new apgl.ContourFill(data.mlcin, {
+                cmap: transparent,
+                patterns: [{
+                    range: [-Infinity, -100],
+                    type: 'hatch',
+                    color: '#4380dc',
+                    opacity: 0.9,
+                    spacing: 9,
+                    width: 1.5,
+                    angle: 45,
+                }],
             });
 
             return {
-                layers: [new apgl.PlotLayer('mlcape_contour', contour), new apgl.PlotLayer('mlcape_labels', cape_lbls)],
+                layers: [new apgl.PlotLayer('mlcin_fill', fill),
+                         new apgl.PlotLayer('mlcin_fill2', fill2),
+                         new apgl.PlotLayer('mlcape_contour', contour),
+                         ...capeLabelLayers],
                 colorbar: [],
                 sampler: null,
             };
@@ -132,13 +212,10 @@ export default {
             
             const cb = new apgl.ColorMap(levels, colors);
             const contour  = new apgl.Contour(cape, { cmap: cb, opacity: 1, line_width: level => level < 1000 ? 1.0 : 2.5, levels: levels });
-            const cape_lbls  = new apgl.ContourLabels(contour, {
-                cmap: cb, halo: true, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf', label_formatter: val => Math.round(val).toString(),
-            });
+            const capeLabelLayers = makeContourLabelLayersByColor(cape, levels, colors, 'sbcape', '#000000');
 
             return {
-                layers: [new apgl.PlotLayer('sbcape_contour', contour), new apgl.PlotLayer('sbcape_labels', cape_lbls)],
+                layers: [new apgl.PlotLayer('sbcape_contour', contour), ...capeLabelLayers],
                 colorbar: [],
                 sampler: null,
             };
@@ -161,13 +238,10 @@ export default {
             
             const cb = new apgl.ColorMap(levels, colors);
             const contour  = new apgl.Contour(cape, { cmap: cb, opacity: 1, line_width: level => level < 1000 ? 1.0 : 2.5, levels: levels });
-            const cape_lbls  = new apgl.ContourLabels(contour, {
-                cmap: cb, halo: true, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf', label_formatter: val => Math.round(val).toString(),
-            });
+            const capeLabelLayers = makeContourLabelLayersByColor(cape, levels, colors, 'mucape', '#000000');
 
             return {
-                layers: [new apgl.PlotLayer('mucape_contour', contour), new apgl.PlotLayer('mucape_labels', cape_lbls)],
+                layers: [new apgl.PlotLayer('mucape_contour', contour), ...capeLabelLayers],
                 colorbar: [],
                 sampler: null,
             };

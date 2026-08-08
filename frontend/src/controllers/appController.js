@@ -82,6 +82,7 @@ import { LayerManager }    from '../views/panels/productManager.js';
 import { ProductGen }      from '../views/panels/productGenView.js';
 import { DatasetStatus }   from '../views/panels/datasetStatus.js';
 import { BasemapStyleView } from '../views/panels/basemapStyleView.js';
+import { ProcedureManager } from '../views/panels/procedureManager.js';
 import { resolveTitle }    from '../domain/titleResolver.js';
 import {
     buildPointFrames,
@@ -292,6 +293,15 @@ function _wireToolbar() {
         if (el) el.addEventListener('click', handler);
     };
 
+    ProcedureManager.init({
+        captureProcedure: _captureProcedureDefinition,
+        loadProcedure: _loadProcedureDefinition,
+    });
+    wire('#btn-procedures', () => {
+        const open = ProcedureManager.toggle();
+        document.querySelector('#btn-procedures').classList.toggle('active', open);
+    });
+
     // ── Playback buttons ──
     wire('#btn-goto-first', () => { _stopPlayback(); _setFrame(0); });
     wire('#btn-goto-last',  () => { _stopPlayback(); _setFrame(_frameTimes.length - 1); });
@@ -305,7 +315,9 @@ function _wireToolbar() {
     // Map slider range → milliseconds per frame. Read slider min/max so
     // the mapping remains robust if the HTML is edited.
     const MIN_MS = 10;
-    const MAX_MS = 1000;
+    // The former default was approximately 500 ms/frame. It is now the
+    // slowest permitted rate and occupies the slider's far-left position.
+    const MAX_MS = 500;
     const _sliderToMs = (v, minV, maxV) => {
         const vv = Number(v);
         const lo = Number.isFinite(Number(minV)) ? Number(minV) : 1;
@@ -362,16 +374,7 @@ function _wireToolbar() {
 
     // ── Auto-Update — SSE-driven live frame append ──
     wire('#btn-autoupdate', () => {
-        const btn = document.querySelector('#btn-autoupdate');
-        if (_autoUpdateActive) {
-            _stopAutoUpdate();
-            btn.classList.remove('active');
-            btn.title = 'Auto-Update (off)';
-        } else {
-            _startAutoUpdate();
-            btn.classList.add('active');
-            btn.title = 'Auto-Update (on)';
-        }
+        _setAutoUpdateEnabled(!_autoUpdateActive);
     });
 
     // ── Product Generation panel toggle ──
@@ -403,6 +406,54 @@ function _wireToolbar() {
         const open = DatasetStatus.toggle();
         document.querySelector('#btn-dataset-status').classList.toggle('active', open);
     });
+}
+
+function _captureProcedureDefinition() {
+    const layerConfiguration = LayerManager.getConfiguration();
+    const center = _map.getCenter();
+    return {
+        schemaVersion: 1,
+        display: {
+            sources: layerConfiguration.sources,
+            sourceOrder: layerConfiguration.sourceOrder,
+            dominantSlotId: layerConfiguration.dominantSlotId,
+        },
+        timeline: layerConfiguration.timeline,
+        runtime: {
+            autoUpdate: _autoUpdateActive,
+        },
+        map: {
+            view: {
+                center: [center.lng, center.lat],
+                zoom: _map.getZoom(),
+                bearing: _map.getBearing(),
+                pitch: _map.getPitch(),
+            },
+            basemap: BasemapStyleView.getConfiguration(),
+        },
+    };
+}
+
+async function _loadProcedureDefinition(definition) {
+    _stopPlayback();
+    _setAutoUpdateEnabled(false);
+    if (definition.map?.basemap) {
+        BasemapStyleView.setConfiguration(definition.map.basemap);
+    }
+    const view = definition.map?.view;
+    if (Array.isArray(view?.center) && view.center.length === 2) {
+        _map.jumpTo({
+            center: view.center,
+            zoom: Number.isFinite(view.zoom) ? view.zoom : _map.getZoom(),
+            bearing: Number.isFinite(view.bearing) ? view.bearing : 0,
+            pitch: Number.isFinite(view.pitch) ? view.pitch : 0,
+        });
+    }
+    await LayerManager.loadConfiguration({
+        ...definition.display,
+        timeline: definition.timeline,
+    }, _onLayerManagerApply);
+    _setAutoUpdateEnabled(definition.runtime?.autoUpdate === true);
 }
 
 function _wireKeyboard() {
@@ -2065,8 +2116,8 @@ function _setupReadout() {
  * then drop the oldest to keep the frame count constant.
  */
 function _startAutoUpdate() {
-    if (_autoUpdateSse) return;  // already running
     _autoUpdateActive = true;
+    if (_autoUpdateSse) return;  // already running
 
     const es = new EventSource('/api/v1/events/data');
     _autoUpdateSse = es;
@@ -2097,6 +2148,16 @@ function _startAutoUpdate() {
     };
 
     console.info('[NMAP] Auto-update started (SSE)');
+}
+
+function _setAutoUpdateEnabled(enabled) {
+    if (enabled) _startAutoUpdate();
+    else _stopAutoUpdate();
+    const button = document.querySelector('#btn-autoupdate');
+    if (button) {
+        button.classList.toggle('active', Boolean(enabled));
+        button.title = enabled ? 'Auto-Update (on)' : 'Auto-Update (off)';
+    }
 }
 
 /** Stop the SSE connection and disable auto-update. */

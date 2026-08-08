@@ -4,6 +4,7 @@ import {
     getForecastProduct,
     getForecastLevel,
 } from '../../config/forecastSuites.js';
+import {validateForecastProducts} from '../../domain/forecastValidation.js';
 
 /* productgen.js — Product Generation module for web-nmap
  *
@@ -221,6 +222,7 @@ export const ProductGen = (() => {
   <div class="pg-tb-btns">
     <button class="pg-hdr-btn" id="pg-undo" title="Undo (Ctrl+Z)" disabled>&#8617;</button>
     <button class="pg-hdr-btn" id="pg-redo" title="Redo (Ctrl+Y)" disabled>&#8618;</button>
+    <button class="pg-hdr-btn" id="pg-validate-btn" title="Validate forecast suite geometry">&#10003;</button>
     <button class="pg-hdr-btn" id="pg-export-btn" title="Export products as GeoJSON">&#8681;</button>
     <button id="pg-close" title="Close">&#10005;</button>
   </div>
@@ -248,6 +250,9 @@ export const ProductGen = (() => {
   <div class="pg-style-row pg-forecast-config-row" id="pg-row-forecast-level">
     <label class="pg-lbl" for="pg-forecast-level">Level</label>
     <select id="pg-forecast-level"></select>
+  </div>
+  <div id="pg-forecast-validation" class="pg-forecast-validation pg-validation-empty" role="status">
+    Validity: draw a suite contour to check
   </div>
 </div>
 
@@ -537,6 +542,12 @@ export const ProductGen = (() => {
         // Undo / redo
         _panel.querySelector('#pg-undo').addEventListener('click', _undo);
         _panel.querySelector('#pg-redo').addEventListener('click', _redo);
+
+        _panel.querySelector('#pg-validate-btn').addEventListener('click', () => {
+            const issues = validateForecastProducts(_products);
+            _updateForecastValidationStatus(issues, true);
+            _renderProductList();
+        });
 
         // Export to GeoJSON
         _panel.querySelector('#pg-export-btn').addEventListener('click', _exportGeoJSON);
@@ -1227,9 +1238,11 @@ export const ProductGen = (() => {
 
     function _onEditVertMouseUp() {
         if (_dragVertIdx < 0) return;
+        const validateContour = _editProduct?.kind === 'contour';
         _dragVertIdx = -1;
         _map.dragPan.enable();
         _map.getCanvas().style.cursor = _overEditVertex ? 'move' : '';
+        if (validateContour) _renderProductList();
     }
 
     function _removeEditVertex(index) {
@@ -1245,6 +1258,7 @@ export const ProductGen = (() => {
         _updateEditLayer();
         if (_editProduct.kind === 'contour')    _updateContourLayer();
         else if (_editProduct.kind === 'front') _updateFrontLayer();
+        if (_editProduct.kind === 'contour') _renderProductList();
         _setHint('Drag vertex to move\nClick \u2295 midpoint to add vertex\nRight-click or Alt-click vertex to delete\nEsc to finish');
         return true;
     }
@@ -1884,8 +1898,56 @@ export const ProductGen = (() => {
     // ------------------------------------------------------------------
     // Product list UI
     // ------------------------------------------------------------------
+    function _issuesByProductId(issues) {
+        const byProductId = new Map();
+        issues.forEach(issue => issue.productIds.forEach(productId => {
+            if (!byProductId.has(productId)) byProductId.set(productId, []);
+            byProductId.get(productId).push(issue.message);
+        }));
+        return byProductId;
+    }
+
+    function _updateForecastValidationStatus(issues, announce = false) {
+        const status = _panel?.querySelector('#pg-forecast-validation');
+        const button = _panel?.querySelector('#pg-validate-btn');
+        const configuredContours = _products.filter(product =>
+            product.kind === 'contour' && product.suiteId && product.forecastProductId
+        );
+        if (!status || !button) return;
+
+        status.classList.remove('pg-validation-empty', 'pg-validation-valid', 'pg-validation-invalid');
+        button.classList.toggle('pg-validation-invalid', issues.length > 0);
+        if (!configuredContours.length) {
+            status.classList.add('pg-validation-empty');
+            status.textContent = 'Validity: draw a suite contour to check';
+            status.title = '';
+        } else if (!issues.length) {
+            status.classList.add('pg-validation-valid');
+            status.textContent = `Validity: no spatial overlaps (${configuredContours.length} area${configuredContours.length === 1 ? '' : 's'})`;
+            status.title = 'Forecast categories and probability levels are spatially exclusive.';
+        } else {
+            status.classList.add('pg-validation-invalid');
+            status.textContent = `Validity: ${issues.length} spatial overlap${issues.length === 1 ? '' : 's'}`;
+            status.title = issues.map(issue => issue.message).join('\n');
+        }
+
+        if (announce) {
+            const message = issues.length
+                ? `Forecast validity check found ${issues.length} overlap${issues.length === 1 ? '' : 's'}:\n` +
+                    issues.slice(0, 5).map(issue => `• ${issue.message}`).join('\n') +
+                    (issues.length > 5 ? `\n• ${issues.length - 5} more (hover over Validity)` : '')
+                : configuredContours.length
+                    ? 'Forecast validity check passed: no category or probability areas overlap.'
+                    : 'Draw contours from a forecast suite before running the validity check.';
+            _setHint(message);
+        }
+    }
+
     function _renderProductList() {
         const ul = _panel.querySelector('#pg-product-list');
+        const validationIssues = validateForecastProducts(_products);
+        const issuesByProductId = _issuesByProductId(validationIssues);
+        _updateForecastValidationStatus(validationIssues);
         if (!_products.length) {
             ul.innerHTML = '<li class="pg-no-products">No products drawn.</li>';
             return;
@@ -1897,6 +1959,11 @@ export const ProductGen = (() => {
             const li = document.createElement('li');
             li.className = 'pg-product-item' + (isEditing ? ' selected' : '') + (isVisible ? '' : ' pg-hidden-prod');
             li.dataset.prodId = p.id;
+            const productIssues = issuesByProductId.get(p.id) || [];
+            if (productIssues.length) {
+                li.classList.add('pg-product-invalid');
+                li.title = productIssues.join('\n');
+            }
 
             li.addEventListener('dragover', event => {
                 if (_draggedProductId === null || _draggedProductId === p.id) return;
@@ -1989,6 +2056,14 @@ export const ProductGen = (() => {
             hdrRow.appendChild(swatch);
             hdrRow.appendChild(badge);
             hdrRow.appendChild(nameInput);
+
+            if (productIssues.length) {
+                const warning = document.createElement('span');
+                warning.className = 'pg-validity-warning';
+                warning.textContent = '⚠';
+                warning.title = productIssues.join('\n');
+                hdrRow.appendChild(warning);
+            }
 
             const orderControls = document.createElement('span');
             orderControls.className = 'pg-order-controls';
@@ -2111,6 +2186,20 @@ export const ProductGen = (() => {
     }
 
     function _exportGeoJSON() {
+        const validationIssues = validateForecastProducts(_products);
+        _updateForecastValidationStatus(validationIssues);
+        if (validationIssues.length) {
+            const preview = validationIssues.slice(0, 5)
+                .map(issue => `• ${issue.message}`).join('\n');
+            const remainder = validationIssues.length > 5
+                ? `\n• ${validationIssues.length - 5} more overlap(s)` : '';
+            const shouldExport = window.confirm(
+                `Forecast validity check found ${validationIssues.length} spatial overlap(s):\n\n` +
+                `${preview}${remainder}\n\nExport anyway?`
+            );
+            if (!shouldExport) return;
+        }
+
         // Build a FeatureCollection with all products in their natural geometries
         const features = [];
         _products.forEach(p => {
@@ -2173,6 +2262,11 @@ export const ProductGen = (() => {
             type: 'FeatureCollection',
             schemaVersion: 1,
             forecastSuites: configuredSuites,
+            forecastValidation: {
+                valid: validationIssues.length === 0,
+                issueCount: validationIssues.length,
+                issues: validationIssues,
+            },
             productOrder: _products.map(product => product.id),
             features,
         }, null, 2);

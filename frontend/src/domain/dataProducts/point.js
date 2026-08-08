@@ -935,6 +935,11 @@ export default {
         available_for: ['LIGHTNING'],
         // Request only the fields we need from the backend
         data_keys: ['age_minutes', 'peak_current', 'polarity'],
+        // A multi-hour lightning loop can easily exceed the point endpoint's
+        // per-response row limit. Fetch every page so the earliest frame still
+        // has its complete trailing 60-minute strike history.
+        point_range_page_size: 100000,
+        point_range_paginate: true,
 
         make_layers(data, _grid) {
             const strike_age_levels = [0, 5, 10, 15, 20, 30, 45, 60];

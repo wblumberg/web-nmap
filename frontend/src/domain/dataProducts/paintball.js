@@ -178,7 +178,7 @@ export default {
     '1km_refl_and_uh': {
         label: '1-km Refl. and UH',
         group: 'storm_attributes',
-        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  1-km Base Reflectivity & 2-5 km Updraft Helicity > 25 m²/s²',
+        title: '{cycle_YYYY}-{cycle_MM}-{cycle_DD}  {cycle_HH}z  {source}  F{fhr3}  1-km Base Reflectivity & 2-5 km Updraft Helicity > 75 m²/s²',
         available_for: ['NSSL_WRF', "HRRR", 'HRW_ARW', 'HRW_FV3', 'NAM_NEST', 'NSSL_MPAS_RN'],
         data_keys: ['REFD_hght_1000', 'MXUPHL_hght_5000_2000_max_1h'],
         make_layers(data, grid) {
@@ -202,7 +202,7 @@ export default {
             }
 
             const fill = new apgl.ContourFill(reflField, { cmap: COLORMAPS['pw_refl'] });
-            const contour = new apgl.Contour(data.MXUPHL_hght_5000_2000_max_1h, { levels: [25], color: '#ff00e1', line_width: 2 });
+            const contour = new apgl.Contour(data.MXUPHL_hght_5000_2000_max_1h, { levels: [75], color: '#ff00e1', line_width: 2 });
 
             const svg = apgl.makeColorBar(COLORMAPS['pw_refl'], {
                 label: 'Reflectivity [dBZ]',

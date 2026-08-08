@@ -284,7 +284,26 @@ export const BasemapStyleView = (() => {
         document.querySelector('#btn-basemap')?.classList.remove('active');
     }
 
-    return { init, toggle, close };
+    function getConfiguration() {
+        return JSON.parse(JSON.stringify(config));
+    }
+
+    function setConfiguration(value) {
+        const next = cloneDefaults();
+        if (PROJECTION_VALUES.has(value?.projection)) next.projection = value.projection;
+        if (typeof value?.backgroundColor === 'string') next.backgroundColor = value.backgroundColor;
+        Object.keys(next.layers).forEach(key => {
+            if (value?.layers?.[key] && typeof value.layers[key] === 'object') {
+                Object.assign(next.layers[key], value.layers[key]);
+            }
+        });
+        config = next;
+        saveConfig(config);
+        if (panel) render();
+        if (map) applyConfig(map, config);
+    }
+
+    return { init, toggle, close, getConfiguration, setConfiguration };
 })();
 
 export { DEFAULT_CONFIG, PROJECTIONS, applyConfig };

@@ -147,6 +147,18 @@
 #pg-forecast-suite-controls .pg-lbl {
     flex: 0 0 54px;
 }
+.pg-forecast-validation {
+    margin: 2px 10px 7px;
+    padding: 4px 6px;
+    border: 1px solid #252540;
+    border-radius: 2px;
+    font-size: 10px;
+    line-height: 1.35;
+    cursor: help;
+}
+.pg-validation-empty { color: #667; background: #0a0a18; }
+.pg-validation-valid { color: #70c990; background: #0a1b14; border-color: #214d34; }
+.pg-validation-invalid { color: #ffad66 !important; background: #24150a; border-color: #704018; }
 #pg-data-opacity-row {
     flex-wrap: nowrap;
     background: #0c0c1c;
@@ -304,6 +316,15 @@
     background: #0b1720;
     border-left: 2px solid #00cccc;
     padding-left: 8px;
+}
+.pg-product-item.pg-product-invalid {
+    box-shadow: inset 3px 0 0 #d87828;
+}
+.pg-validity-warning {
+    color: #ff9b42;
+    cursor: help;
+    flex: 0 0 auto;
+    font-size: 12px;
 }
 .pg-item-hdr {
     display: flex;
