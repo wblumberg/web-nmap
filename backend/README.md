@@ -31,6 +31,8 @@ The following roles for this backend are:
 - Providing the frontend with information about how many frames/times should be selected by default for this data source.
 - Watching the data directories for new datasets that arrive that the frontend should know about (e.g., auto-updating loops).
 - Sending the frontend information about how to configure the AutumnPlot-GL grids for a specific data source (e.g., LambertGrid, Geostationary, PlateCarree, UnstructuredGrid)
+- Providing forecast metadata (cycles, forecast hours, valid times, variable inventory) used by the Product Generation forecast-suite workflow.
+- Supporting procedure replay by serving consistent source/catalog metadata when the frontend reloads saved procedure definitions.
 
 - Sending the frontend data to be visualized.  For example:
     - Forecast Grids (e.g., mean 2-m dewpoint temperature, paintball plots, forecast precip types.)
@@ -44,6 +46,11 @@ The following roles for this backend are:
 To optimize the sending of data, we will rely primarily on binary formats, like the ProtocolBuffer format.  The scripts in this repository are there to act as the intermediary between the frontend and the different datasets that exist on disk.
 
 The various dataProduct scripts in the frontend specify the variables we will need to get from the backend for a specific data source.
+
+The Product Generation and Procedure Manager features are frontend-managed:
+
+- Procedure definitions are persisted in browser localStorage and do not currently require backend storage.
+- The backend still provides the catalog/timeline/grid metadata required for a loaded procedure to resolve sources and frames.
 
 ## How the directories are structured:
 

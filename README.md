@@ -77,6 +77,16 @@ The frontend in [`frontend`](frontend) is a JavaScript application built with we
 
 The browser fetches the backend catalog, presents compatible products for each source, retrieves the requested variables and frames, constructs autumnplot-gl grids and layers, and manages multi-layer animation on the MapLibre map.
 
+### Product Generation and procedures
+
+WebNMAP includes a browser-side authoring workflow for manually drawn meteorological products:
+
+- ProductGen supports contour, front, and text products with map-based drawing/editing, undo/redo, and GeoJSON export.
+- Forecast-suite mode provides predefined suites, products, and level defaults (color, pattern, width) for faster and more consistent forecast graphics.
+- Validation checks enforce suite geometry rules (for example, mutually exclusive categorical areas and nested threshold rules where configured).
+- Procedure Manager stores full map configurations (sources, timeline, map view, basemap settings, and auto-update state) in browser localStorage.
+- Procedures can be saved, updated, loaded, exported to JSON, and imported back into another browser session.
+
 ### Zarr stores and efficient chunking
 
 Large gridded datasets live primarily in **Zarr v2** stores. Zarr lets the application fetch only the array metadata and chunks required for a selected field and time instead of reading or transferring an entire model file. WebNMAP uses compressed chunks (typically Blosc with Zstandard for floating-point fields), display-oriented numeric precision, lazy xarray/Dask processing, and a FastAPI Zarr proxy that streams the stored bytes directly to the browser.
@@ -343,8 +353,12 @@ Never commit `.env`, credentials, or provider configuration containing secrets.
 | `backend/api/ingest/` | Feed-specific ingestion programs |
 | `backend/processing/` | Offline conversion and derived-product tools |
 | `frontend/src/controllers/` | Application orchestration and UI control flow |
+| `frontend/src/config/forecastSuites.js` | Declarative forecast-suite product/level definitions for ProductGen |
+| `frontend/src/domain/forecastValidation.js` | Forecast-suite geometry validation rules and polygon overlap/containment logic |
 | `frontend/src/domain/dataProducts/` | Product/restore-style visualization definitions |
 | `frontend/src/services/` | API clients and binary decoders |
+| `frontend/src/services/procedureStore.js` | Local persistence and schema validation for saved procedures |
+| `frontend/src/views/panels/procedureManager.js` | Procedure save/load/import/export user interface |
 | `frontend/public/` | Static styles, map configuration, fonts, and WASM assets |
 | `frontend/external/autumnplot-gl/` | Local autumnplot-gl dependency/submodule |
 | `proto/` | Shared Protocol Buffer schemas and generated Python bindings |

@@ -16,6 +16,13 @@ Within the `public/` folder are the static assets for the webapp such as:
 - tiles.json file to provide the map information about the mapping tiles and vector layers.
 - the main index.html page that initiates the webapp.
 
+Recent frontend additions include a forecast-aware ProductGen workflow and a Procedure Manager:
+
+- ProductGen supports forecast suites with predefined products/levels and style defaults.
+- ProductGen can validate suite geometry rules before product export.
+- Procedure Manager saves and restores complete map/procedure definitions in browser localStorage.
+- Procedures can be exported/imported as JSON for sharing between browser sessions.
+
 Below describes the `frontend` directory structure:
 
 ```
@@ -70,6 +77,7 @@ Below describes the `frontend` directory structure:
 |   |   |-- blues_probability.json                              <-- Example colormap definition.
 |   |   |-- colormaps copy.js                                   <-- |DEPRECIATED| (old colormap registry)
 |   |   |-- colormaps.js                                        <-- Custom colormap registry.
+|   |   |-- forecastSuites.js                                   <-- Declarative forecast-suite definitions used by ProductGen.
 |   |   |-- ...
 |   |   `-- yrp_probability.json
 |   |
@@ -81,6 +89,7 @@ Below describes the `frontend` directory structure:
 |   |   `-- timeMatcherController.js                            <-- |DEPRECIATED| TimeMatching code.
 |   |
 |   |-- domain/                                                 <-- Core business logic (rules, models, data types for app)
+|   |   |-- forecastValidation.js                               <-- Forecast-suite polygon validation (overlap + nesting rules).
 |   |   |-- dataProducts/                                       <-- Data product scripts using APGL (like NMAP restore files)
 |   |   |   |-- README.md                                       <-- README to help you understand how the dataProducts work.
 |   |   |   |-- aircraft.js                                     <-- Scripts to draw FAA aircraft tracks, positions, and labels.
@@ -108,6 +117,7 @@ Below describes the `frontend` directory structure:
 |   |   `-- titleResolver.js                                    <-- Code to construct the title for the dataProduct.
 |   |
 |   |-- services/                                               <-- Manages communication with external systems (APIs)
+|   |   |-- procedureStore.js                                   <-- Save/load/import/export helpers for local procedures.
 |   |   |-- api/                                                <-- Clients to communicate with backend.
 |   |   |   |-- catalogClient.js                                <-- Client to obtain Data Catalog info from API
 |   |   |   |-- dataClient.js                                   <-- Client to obtain Point, Geometry, Grid, and Profile data from API
@@ -136,6 +146,7 @@ Below describes the `frontend` directory structure:
 |           |-- dataSelector.js                                 <-- Logic for the Data Selector panel w/ data products & sources
 |           |-- datasetStatus.js                                <-- Displays backend dataset health and freshness status.
 |           |-- productGenView.js                               <-- Logic for the Product Generation panel.
+|           |-- procedureManager.js                             <-- UI for saving/loading named procedures.
 |           `-- productManager.js                               <-- Logic for the Map Builder panel (timeline, layering, src priority)
 |
 |   |-- index.js                                                <-- Exports APGL library.
@@ -150,6 +161,26 @@ Below describes the `frontend` directory structure:
 `-- webpack.config.cjs
 
 ```
+
+## ProductGen and Procedure Manager details
+
+The Product Generation panel now supports two drawing modes:
+
+- Free drawing mode for unconstrained contour/front/text authoring.
+- Forecast suite mode for guided meteorological products with predefined product families and levels.
+
+Forecast suite mode behavior:
+
+- Selecting suite/product/level applies default styling (color, width, pattern, and overlay behavior).
+- Validation checks are available from the panel and run against all suite contours currently on the map.
+- Rule types include mutually exclusive areas and nested threshold checks (for suite products configured as nested).
+
+Procedure Manager behavior:
+
+- Captures the current source list, source order, timeline settings, map view, basemap style, and auto-update state.
+- Stores procedures under a versioned schema in browser localStorage.
+- Supports Save New, Update Selected, Load, Export, Import, and Delete actions.
+- Persists the active procedure selection between sessions in the same browser profile.
 
 # TODO:
 - Enable AutumnPlot-GL to color wind barbs and text using a different variable (e.g., Coloring wind barbs from RECON flights by max 10s wind speed).
