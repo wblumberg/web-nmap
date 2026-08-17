@@ -106,6 +106,11 @@ class GridCache:
         """Return the number of entries currently held by the cache."""
         return len(self._store)
 
+    @property
+    def max_bytes(self) -> int:
+        """Return the configured byte limit."""
+        return self._max_bytes
+
     def __repr__(self) -> str:
         """Return a diagnostic string representation of the instance."""
         return (

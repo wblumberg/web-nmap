@@ -74,12 +74,53 @@ import { buildStaticLayers, buildMultiLayers } from '../LayerBuilder.js';
 // ── Step 3: import the mock classes so our test fixtures can use them too ─────
 // This resolves to the SAME mock registered above, not the real library.
 import { PlotLayer, MultiPlotLayer } from 'autumnplot-gl';
+import {
+    clearDiagnosticEvents,
+    getDiagnosticEvents,
+} from '../services/mapDiagnostics.js';
 
 // ════════════════════════════════════════════════════════════════════════════
 // buildStaticLayers — layer ID namespacing
 // ════════════════════════════════════════════════════════════════════════════
 
 describe('buildStaticLayers — layer ID namespacing', () => {
+
+    it('records requested data keys that are absent from a frame', () => {
+        clearDiagnosticEvents();
+        const suite = {
+            label: 'Temperature and pressure',
+            data_keys: ['temperature', 'pressure'],
+            make_layers() {
+                return { layers: [new PlotLayer('fill', {})], colorbar: [], sampler: null };
+            },
+        };
+
+        buildStaticLayers(suite, { temperature: {} }, null, 'href');
+
+        expect(getDiagnosticEvents()).toContainEqual(expect.objectContaining({
+            type: 'data-keys-missing',
+            source: 'href',
+            missingDataKeys: ['pressure'],
+            availableDataKeys: ['temperature'],
+        }));
+    });
+
+    it('validates point-product keys inside obs_json records', () => {
+        clearDiagnosticEvents();
+        const suite = {
+            label: 'Surface observations',
+            data_keys: ['tmpc', 'dwpc'],
+            make_layers() {
+                return { layers: [new PlotLayer('stations', {})], colorbar: [], sampler: null };
+            },
+        };
+
+        buildStaticLayers(suite, {
+            obs_json: [{data: {tmpc: 72, dwpc: 65}}],
+        }, null, 'metar');
+
+        expect(getDiagnosticEvents().filter(event => event.type === 'data-keys-missing')).toHaveLength(0);
+    });
 
     it('prefixes layer IDs with the namespace', () => {
         const suite = {

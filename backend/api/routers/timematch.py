@@ -48,6 +48,8 @@ TODO: Implement a time matching strategy that matches data to only the nearest t
 
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import asyncio
+import time
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -55,6 +57,8 @@ from pydantic import BaseModel, Field
 from ..sources.registry import get_source, SOURCES
 
 router = APIRouter(tags=["Time Matching"])
+_time_inventory_cache: dict[str, tuple[float, list]] = {}
+_time_inventory_locks: dict[str, asyncio.Lock] = {}
 
 
 # ─── Request / Response models ────────────────────────────────────────────────
@@ -238,8 +242,6 @@ async def build_match_map(req: BuildMapRequest):
     The "map" object can be stored directly in the browser and used exactly
     like the output of TimeMatchingEngine.buildMatchMap().
     """
-    import asyncio
-
     # ── Step 1: determine which dominant keys to process ──────────────────
     if req.dominant_keys is not None:
         # Caller specified explicit keys — parse them to datetimes
@@ -268,14 +270,19 @@ async def build_match_map(req: BuildMapRequest):
     # We do this once upfront rather than once per dominant key, so we're
     # doing N + S database/disk queries instead of N * S queries.
     # (N = number of dominant keys, S = number of secondary sources)
-    secondary_time_lists: dict[str, list] = {}
-    for source_id in req.secondary_source_ids:
+    async def load_secondary(source_id: str):
         try:
             source = get_source(source_id)
             # Expand single-store forecast sources to per-fhr virtual entries
-            secondary_time_lists[source_id] = await _list_times_with_fhrs(source)
+            return source_id, await _list_times_with_fhrs(source)
         except KeyError:
-            secondary_time_lists[source_id] = []   # unknown source → no matches
+            return source_id, []   # unknown source → no matches
+
+    # Source inventories are independent. Loading them concurrently avoids
+    # serial filesystem/database latency for multi-overlay configurations.
+    secondary_time_lists = dict(await asyncio.gather(*(
+        load_secondary(source_id) for source_id in req.secondary_source_ids
+    )))
 
     # ── Step 3: build the match map ───────────────────────────────────────
     match_map: dict[str, dict[str, str | None]] = {}
@@ -481,14 +488,29 @@ async def _list_times_with_fhrs(source) -> list:
     from ..sources.types.base import AvailableTime
     from ..readers import get_reader
 
-    times      = await source.list_times(limit=2000)
+    cache_seconds = max(0, float(getattr(source, "time_match_cache_seconds", 0) or 0))
+    cache_key = source.source_id
+    now = time.monotonic()
+    cached = _time_inventory_cache.get(cache_key)
+    if cache_seconds and cached and now - cached[0] < cache_seconds:
+        return cached[1]
+
+    lock = _time_inventory_locks.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        now = time.monotonic()
+        cached = _time_inventory_cache.get(cache_key)
+        if cache_seconds and cached and now - cached[0] < cache_seconds:
+            return cached[1]
+        times = await source.list_times(limit=2000)
     cycle_re   = getattr(source, 'cycle_regex', None)
     fhr_re     = getattr(source, 'fhr_regex',   None)
 
     # Only expand sources that have cycles but no per-file fhr encoding
     if not (cycle_re and not fhr_re):
+        if cache_seconds: _time_inventory_cache[cache_key] = (time.monotonic(), times)
         return times
     if not any(t.fhr is None and t.cycle for t in times):
+        if cache_seconds: _time_inventory_cache[cache_key] = (time.monotonic(), times)
         return times
 
     expanded: list = []
@@ -537,6 +559,7 @@ async def _list_times_with_fhrs(source) -> list:
                 size_bytes = t.size_bytes,
             ))
 
+    if cache_seconds: _time_inventory_cache[cache_key] = (time.monotonic(), expanded)
     return expanded
 
 

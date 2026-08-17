@@ -19,6 +19,9 @@ const PROJECTIONS = Object.freeze([
 ]);
 const PROJECTION_VALUES = new Set(PROJECTIONS.map(({ value }) => value));
 const appliedProjections = new WeakMap();
+const appliedGraticuleSpacing = new WeakMap();
+const GRATICULE_SOURCE = 'nmap-graticule';
+const GRATICULE_LAYER = 'nmap-graticule-lines';
 
 const DEFAULT_CONFIG = Object.freeze({
     projection: 'globe',
@@ -29,9 +32,13 @@ const DEFAULT_CONFIG = Object.freeze({
         countries:  { visible: true,  color: '#333333', opacity: 1, width: 2 },
         states:     { visible: true,  color: '#ffffff', opacity: 1, width: 1.5 },
         counties:   { visible: true,  color: '#333333', opacity: 1, width: 1.5 },
+        graticule:  { visible: false, color: '#667080', opacity: 0.55, width: 0.75, spacing: 10 },
         majorRoads: { visible: false, color: '#f5c542', opacity: 0.9, width: 1.5 },
         minorRoads: { visible: false, color: '#6574cd', opacity: 0.75, width: 1 },
         places:     { visible: false, color: '#ffffff', opacity: 1, size: 13 },
+        terrainColor: {visible: false, opacity: 0.75},
+        terrainGray:  {visible: false, opacity: 0.75},
+        population:   {visible: false, opacity: 0.65},
     },
 });
 
@@ -41,10 +48,20 @@ const CONTROLS = [
     { key: 'countries',  label: 'Country boundaries', type: 'line' },
     { key: 'states',     label: 'States / provinces', type: 'line' },
     { key: 'counties',   label: 'Counties', type: 'line' },
+    { key: 'graticule',  label: 'Latitude / longitude lines', type: 'graticule' },
     { key: 'majorRoads', label: 'Major highways', type: 'line' },
     { key: 'minorRoads', label: 'Secondary highways', type: 'line' },
     { key: 'places',     label: 'Places', type: 'symbol' },
+    { key: 'terrainColor', label: 'Terrain — color', type: 'raster' },
+    { key: 'terrainGray',  label: 'Terrain — grayscale', type: 'raster' },
+    { key: 'population',   label: 'Population density', type: 'raster' },
 ];
+
+const OPTIONAL_RASTERS = Object.freeze({
+    terrainColor: {layer: 'terrain_color', source: 'local_terrain'},
+    terrainGray: {layer: 'terrain_gray', source: 'local_terrain'},
+    population: {layer: 'population_density', source: 'local_population'},
+});
 
 function cloneDefaults() {
     return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
@@ -98,12 +115,96 @@ function applyLine(map, ids, config) {
     }
 }
 
+function makeGraticule(spacing) {
+    const interval = [5, 10, 15, 30].includes(Number(spacing)) ? Number(spacing) : 10;
+    const features = [];
+    for (let lon = -180; lon < 180; lon += interval) {
+        const coordinates = [];
+        for (let lat = -85; lat <= 85; lat += 1) coordinates.push([lon, lat]);
+        features.push({
+            type: 'Feature', properties: {axis: 'longitude', value: lon},
+            geometry: {type: 'LineString', coordinates},
+        });
+    }
+    for (let lat = -Math.floor(80 / interval) * interval; lat <= 80; lat += interval) {
+        const coordinates = [];
+        for (let lon = -180; lon <= 180; lon += 2) coordinates.push([lon, lat]);
+        features.push({
+            type: 'Feature', properties: {axis: 'latitude', value: lat},
+            geometry: {type: 'LineString', coordinates},
+        });
+    }
+    return {type: 'FeatureCollection', features};
+}
+
+function ensureGraticuleLayer(map, config) {
+    if (!map.getSource(GRATICULE_SOURCE)) {
+        map.addSource(GRATICULE_SOURCE, {type: 'geojson', data: makeGraticule(config.spacing)});
+        appliedGraticuleSpacing.set(map, config.spacing);
+    }
+    if (!map.getLayer(GRATICULE_LAYER)) {
+        map.addLayer({
+            id: GRATICULE_LAYER,
+            type: 'line',
+            source: GRATICULE_SOURCE,
+            layout: {visibility: 'none', 'line-cap': 'round'},
+            paint: {'line-color': config.color, 'line-opacity': config.opacity, 'line-width': config.width},
+        }, map.getLayer('coastline') ? 'coastline' : undefined);
+    }
+    if (appliedGraticuleSpacing.get(map) !== config.spacing) {
+        map.getSource(GRATICULE_SOURCE)?.setData(makeGraticule(config.spacing));
+        appliedGraticuleSpacing.set(map, config.spacing);
+    }
+}
+
+function ensureOptionalRasterLayers(map) {
+    if (!map.getSource('local_terrain')) {
+        map.addSource('local_terrain', {
+            type: 'raster', tiles: ['/static/basemap/terrain/{z}/{x}/{y}.png'],
+            tileSize: 256, minzoom: 0, maxzoom: 8,
+            attribution: 'Terrain data: NOAA/NWS AWIPS via NSF Unidata',
+        });
+    }
+    if (!map.getSource('local_population')) {
+        map.addSource('local_population', {
+            type: 'raster', tiles: ['/static/basemap/population/{z}/{x}/{y}.png'],
+            tileSize: 256, minzoom: 0, maxzoom: 7,
+            attribution: 'Population data: WorldPop (CC BY 4.0)',
+        });
+    }
+    const before = map.getLayer('coastline') ? 'coastline' : undefined;
+    if (!map.getLayer('terrain_color')) map.addLayer({
+        id: 'terrain_color', type: 'raster', source: 'local_terrain',
+        layout: {visibility: 'none'},
+        paint: {'raster-opacity': 0.75},
+    }, before);
+    if (!map.getLayer('terrain_gray')) map.addLayer({
+        id: 'terrain_gray', type: 'raster', source: 'local_terrain',
+        layout: {visibility: 'none'},
+        paint: {'raster-opacity': 0.75, 'raster-saturation': -1},
+    }, before);
+    if (!map.getLayer('population_density')) map.addLayer({
+        id: 'population_density', type: 'raster', source: 'local_population',
+        layout: {visibility: 'none'},
+        paint: {'raster-opacity': 0.65},
+    }, before);
+}
+
+function applyRaster(map, key, config) {
+    const definition = OPTIONAL_RASTERS[key];
+    if (!definition) return;
+    setVisibility(map, [definition.layer], config.visible);
+    setPaint(map, definition.layer, 'raster-opacity', config.opacity);
+}
+
 function applyConfig(map, config) {
     // `isStyleLoaded()` can briefly return false during projection setup even
     // though the style graph and its layers already exist. The setters below
     // are individually guarded by getLayer(), so the style itself is the
     // reliable readiness check here.
     if (!map?.getStyle?.()) return false;
+    ensureGraticuleLayer(map, config.layers.graticule);
+    ensureOptionalRasterLayers(map);
 
     if (PROJECTION_VALUES.has(config.projection)
             && appliedProjections.get(map) !== config.projection) {
@@ -122,6 +223,7 @@ function applyConfig(map, config) {
     applyLine(map, ['countries'], config.layers.countries);
     applyLine(map, ['states_provinces'], config.layers.states);
     applyLine(map, ['counties'], config.layers.counties);
+    applyLine(map, [GRATICULE_LAYER], config.layers.graticule);
 
     const major = config.layers.majorRoads;
     applyLine(map, ['major_highways'], major);
@@ -142,21 +244,34 @@ function applyConfig(map, config) {
     setPaint(map, 'places', 'text-color', places.color);
     setPaint(map, 'places', 'text-opacity', places.opacity);
     if (map.getLayer('places')) map.setLayoutProperty('places', 'text-size', places.size);
+    applyRaster(map, 'terrainColor', config.layers.terrainColor);
+    applyRaster(map, 'terrainGray', config.layers.terrainGray);
+    applyRaster(map, 'population', config.layers.population);
     map.triggerRepaint();
     return true;
 }
 
 function controlMarkup(definition, config) {
-    const widthControl = definition.type === 'line' ? `
+    const widthControl = definition.type === 'line' || definition.type === 'graticule' ? `
         <label class="bm-field">Width
           <input data-property="width" type="range" min="0.5" max="6" step="0.25" value="${config.width}">
           <output data-output="width">${config.width}</output>
+        </label>` : '';
+    const spacingControl = definition.type === 'graticule' ? `
+        <label class="bm-field">Spacing
+          <select data-property="spacing">
+            ${[5, 10, 15, 30].map(value => `<option value="${value}" ${config.spacing === value ? 'selected' : ''}>${value}&deg;</option>`).join('')}
+          </select>
         </label>` : '';
     const sizeControl = definition.type === 'symbol' ? `
         <label class="bm-field">Size
           <input data-property="size" type="range" min="8" max="24" step="1" value="${config.size}">
           <output data-output="size">${config.size}</output>
         </label>` : '';
+    const colorControl = config.color ? `
+          <label class="bm-field bm-color">Color
+            <input data-property="color" type="color" value="${config.color}">
+          </label>` : '';
     return `
       <fieldset class="bm-layer" data-layer="${definition.key}">
         <legend>
@@ -164,14 +279,12 @@ function controlMarkup(definition, config) {
           ${definition.label}</label>
         </legend>
         <div class="bm-layer-controls">
-          <label class="bm-field bm-color">Color
-            <input data-property="color" type="color" value="${config.color}">
-          </label>
+          ${colorControl}
           <label class="bm-field">Opacity
             <input data-property="opacity" type="range" min="0" max="1" step="0.05" value="${config.opacity}">
             <output data-output="opacity">${config.opacity}</output>
           </label>
-          ${widthControl}${sizeControl}
+          ${widthControl}${sizeControl}${spacingControl}
         </div>
       </fieldset>`;
 }
@@ -219,16 +332,22 @@ export const BasemapStyleView = (() => {
             config.backgroundColor = event.target.value;
             commit();
         });
-        panel.querySelectorAll('.bm-layer input').forEach(input => {
+        panel.querySelectorAll('.bm-layer input, .bm-layer select').forEach(input => {
             input.addEventListener('input', event => {
                 const fieldset = event.target.closest('.bm-layer');
                 const property = event.target.dataset.property;
                 const layerConfig = config.layers[fieldset.dataset.layer];
                 layerConfig[property] = event.target.type === 'checkbox'
                     ? event.target.checked
-                    : event.target.type === 'range'
+                    : event.target.type === 'range' || event.target.tagName === 'SELECT'
                         ? Number(event.target.value)
                         : event.target.value;
+                if (property === 'visible' && layerConfig.visible &&
+                    (fieldset.dataset.layer === 'terrainColor' || fieldset.dataset.layer === 'terrainGray')) {
+                    const otherKey = fieldset.dataset.layer === 'terrainColor' ? 'terrainGray' : 'terrainColor';
+                    config.layers[otherKey].visible = false;
+                    panel.querySelector(`[data-layer="${otherKey}"] input[data-property="visible"]`).checked = false;
+                }
                 fieldset.querySelector(`[data-output="${property}"]`)?.replaceChildren(
                     String(layerConfig[property])
                 );
@@ -262,6 +381,7 @@ export const BasemapStyleView = (() => {
         }
         styleLoadHandler = () => {
             appliedProjections.delete(map);
+            appliedGraticuleSpacing.delete(map);
             applyConfig(map, config);
         };
         map.on('style.load', styleLoadHandler);

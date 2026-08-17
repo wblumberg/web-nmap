@@ -42,7 +42,10 @@ import {
     streamZarrAnalysisFrames,
     streamZarrForecastFrames,
     invalidateZarrSourceCache,
+    evictZarrCacheKey,
+    getZarrCacheStats,
 } from './zarrClient.js';
+import { estimateValueBytes } from '../mapDiagnostics.js';
 
 const API_BASE = '/api/v1';
 
@@ -138,11 +141,11 @@ function _cacheGet(ck) {
 }
 
 function _cachePut(ck, result) {
-    // Estimate bytes from the underlying int16 data arrays (×2 = bytes per element).
-    // Multiply by 2 to account for the Float32Array inside each RawScalarField.
+    // Count every typed-array representation used by RawScalarField. Quantized
+    // products commonly materialize as Float16Array rather than Float32Array.
     let bytes = 0;
     for (const field of Object.values(result.fields || {})) {
-        if (field && field.data instanceof Float32Array) bytes += field.data.byteLength;
+        if (field && ArrayBuffer.isView(field.data)) bytes += field.data.byteLength;
     }
     if (bytes === 0) return;
 
@@ -172,6 +175,37 @@ export function invalidateSourceCache(sourceId) {
             _cacheBytes -= entry.bytes;
         }
     }
+}
+
+function evictFieldCacheKey(sourceId, key) {
+    const prefix = `${sourceId}|`;
+    const marker = `|${key}`;
+    let reclaimedBytes = 0;
+    for (const [cacheKey, entry] of _fieldCache) {
+        if (cacheKey.startsWith(prefix) &&
+            (cacheKey.endsWith(marker) || cacheKey.includes(`${marker}|qp=`))) {
+            _fieldCache.delete(cacheKey);
+            _cacheBytes -= entry.bytes;
+            reclaimedBytes += entry.bytes;
+        }
+    }
+    return reclaimedBytes;
+}
+
+/** Release a decoded source frame from both protobuf and Zarr transport caches. */
+export function evictSourceFrameCache(sourceId, key) {
+    const fieldBytes = evictFieldCacheKey(sourceId, key);
+    const zarrBytes = evictZarrCacheKey(sourceId, key);
+    const pointBytes = evictPointCacheKey(sourceId, key);
+    return {fieldBytes, zarrBytes, pointBytes, totalBytes: fieldBytes + zarrBytes + pointBytes};
+}
+
+export function getAllCacheStats() {
+    return {
+        field: getCacheStats(),
+        zarr: getZarrCacheStats(),
+        point: getPointCacheStats(),
+    };
 }
 
 /**
@@ -594,27 +628,38 @@ export async function streamAnalysisFrames(sourceId, variables, keys, onFrame, o
 //
 // Cache key: "sourceId|centerKey"  — window parameters are source-defined on
 // the backend so the same centerKey always produces the same result.
-// Eviction: simple LRU via Map insertion order; capped at POINT_CACHE_MAX entries.
+// Eviction: LRU via Map insertion order, capped by both entries and bytes.
 
 const POINT_CACHE_MAX = 60;   // frames; large enough for a typical loop
+const POINT_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+let _pointCacheBytes = 0;
 /** @type {Map<string, object>} */
 const _pointCache = new Map();
 
 function _pointCacheGet(ck) {
-    const val = _pointCache.get(ck);
-    if (!val) return null;
+    const entry = _pointCache.get(ck);
+    if (!entry) return null;
     // Promote to MRU
     _pointCache.delete(ck);
-    _pointCache.set(ck, val);
-    return val;
+    _pointCache.set(ck, entry);
+    return entry.result;
 }
 
 function _pointCachePut(ck, fc) {
-    if (_pointCache.size >= POINT_CACHE_MAX) {
-        // Evict LRU (first entry in Map)
-        _pointCache.delete(_pointCache.keys().next().value);
+    const bytes = estimateValueBytes(fc);
+    if (bytes > POINT_CACHE_MAX_BYTES) return;
+    const existing = _pointCache.get(ck);
+    if (existing) {
+        _pointCache.delete(ck);
+        _pointCacheBytes -= existing.bytes;
     }
-    _pointCache.set(ck, fc);
+    while ((_pointCache.size >= POINT_CACHE_MAX || _pointCacheBytes + bytes > POINT_CACHE_MAX_BYTES) && _pointCache.size) {
+        const [oldKey, oldEntry] = _pointCache.entries().next().value;
+        _pointCache.delete(oldKey);
+        _pointCacheBytes -= oldEntry.bytes;
+    }
+    _pointCache.set(ck, {result: fc, bytes});
+    _pointCacheBytes += bytes;
 }
 
 /**
@@ -623,9 +668,36 @@ function _pointCachePut(ck, fc) {
  */
 export function invalidatePointCache(sourceId) {
     const prefix = `${sourceId}|`;
-    for (const k of _pointCache.keys()) {
-        if (k.startsWith(prefix)) _pointCache.delete(k);
+    for (const [k, entry] of _pointCache) {
+        if (k.startsWith(prefix)) {
+            _pointCache.delete(k);
+            _pointCacheBytes -= entry.bytes;
+        }
     }
+}
+
+function evictPointCacheKey(sourceId, key) {
+    const prefix = `${sourceId}|`;
+    const marker = `|${key}`;
+    let reclaimedBytes = 0;
+    for (const [cacheKey, entry] of _pointCache) {
+        if (cacheKey.startsWith(prefix) &&
+            (cacheKey.endsWith(marker) || cacheKey.includes(`${marker}|`))) {
+            _pointCache.delete(cacheKey);
+            _pointCacheBytes -= entry.bytes;
+            reclaimedBytes += entry.bytes;
+        }
+    }
+    return reclaimedBytes;
+}
+
+export function getPointCacheStats() {
+    return {
+        entries: _pointCache.size,
+        bytes: _pointCacheBytes,
+        maxBytes: POINT_CACHE_MAX_BYTES,
+        utilizationPct: Math.round(_pointCacheBytes / POINT_CACHE_MAX_BYTES * 100),
+    };
 }
 
 /**
@@ -735,7 +807,8 @@ export async function fetchDbPointRange(sourceId, fields, start, end, opts = {})
     const endIso = end instanceof Date ? end.toISOString() : String(end);
     const ck = `${sourceId}|range|${startIso}|${endIso}|${fieldsKey}|${opts.bbox || ''}|${opts.limit || ''}|${opts.paginate ? 'paged' : 'single'}` +
         _queryParamsCacheSuffix(opts.queryParams);
-    const cached = _pointCacheGet(ck);
+    const useCache = opts.cache !== false;
+    const cached = useCache ? _pointCacheGet(ck) : null;
     if (cached) {
         console.info(
             `[NMAP timing] Point range ${sourceId}: cache hit in ${(performance.now() - requestStarted).toFixed(1)} ms ` +
@@ -813,7 +886,7 @@ export async function fetchDbPointRange(sourceId, fields, start, end, opts = {})
         combinedMeta.pages = String(pageCount);
     }
     const result = { obs_json: points, meta: combinedMeta || {} };
-    _pointCachePut(ck, result);
+    if (useCache) _pointCachePut(ck, result);
     console.info(`[NMAP timing] Point range ${sourceId}: response delivered`, {
         requestToHeadersMs: +requestToHeadersMs.toFixed(1),
         bodyDownloadMs: +bodyDownloadMs.toFixed(1),
@@ -1032,7 +1105,7 @@ export async function fetchAnalysisFieldsAuto(
     if (srcEntry?.zarr_transport) {
         return fetchZarrFields(
             sourceId, key, variables, gridInfo,
-            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+            { zarrVarMap: srcEntry.variable_map ?? {}, decodeWorker: srcEntry.zarr_decode_worker === true, preserveNativeDtype: srcEntry.zarr_preserve_native_dtype === true, cacheResult: srcEntry.zarr_cache_decoded !== false, compressedChunkCache: srcEntry.zarr_chunk_cache_enabled ? {enabled: true, maxBytes: srcEntry.zarr_chunk_cache_max_bytes, ttlMs: srcEntry.zarr_chunk_cache_ttl_ms} : null, ...opts }
         );
     }
     return fetchAnalysisFields(sourceId, variables, key, opts);
@@ -1059,7 +1132,7 @@ export async function streamAnalysisFramesAuto(
     if (srcEntry?.zarr_transport) {
         return streamZarrAnalysisFrames(
             sourceId, variables, keys, gridInfo, onFrame,
-            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+            { zarrVarMap: srcEntry.variable_map ?? {}, decodeWorker: srcEntry.zarr_decode_worker === true, preserveNativeDtype: srcEntry.zarr_preserve_native_dtype === true, cacheResult: srcEntry.zarr_cache_decoded !== false, compressedChunkCache: srcEntry.zarr_chunk_cache_enabled ? {enabled: true, maxBytes: srcEntry.zarr_chunk_cache_max_bytes, ttlMs: srcEntry.zarr_chunk_cache_ttl_ms} : null, concurrency: srcEntry.zarr_stream_concurrency ?? undefined, ...opts }
         );
     }
     return streamAnalysisFrames(sourceId, variables, keys, onFrame, opts);
@@ -1097,7 +1170,7 @@ export async function fetchForecastFieldsAuto(
     if (srcEntry?.zarr_transport) {
         return fetchZarrForecastFields(
             sourceId, cycle, fhr, variables, gridInfo,
-            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+            { zarrVarMap: srcEntry.variable_map ?? {}, decodeWorker: srcEntry.zarr_decode_worker === true, cacheResult: srcEntry.zarr_cache_decoded !== false, ...opts }
         );
     }
     return fetchForecastFields(sourceId, variables, cycle, fhr, opts);
@@ -1125,7 +1198,7 @@ export async function streamForecastFramesAuto(
     if (srcEntry?.zarr_transport) {
         return streamZarrForecastFrames(
             sourceId, cycle, fhrs, variables, gridInfo, onFrame,
-            { zarrVarMap: srcEntry.variable_map ?? {}, ...opts }
+            { zarrVarMap: srcEntry.variable_map ?? {}, decodeWorker: srcEntry.zarr_decode_worker === true, cacheResult: srcEntry.zarr_cache_decoded !== false, ...opts }
         );
     }
     return streamForecastFrames(sourceId, variables, cycle, fhrs, onFrame, opts);

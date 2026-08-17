@@ -55,18 +55,22 @@ describe('polygon interior overlap', () => {
 });
 
 describe('forecast product validation', () => {
-    it('keeps categorical levels mutually exclusive', () => {
+    it('requires higher ordinal categories to be contained by lower categories', () => {
         const issues = validateForecastProducts([
             contour({id: 1, level: 'marginal', label: 'Marginal', coords: rectangle(0, 0, 2, 2)}),
             contour({id: 2, level: 'slight', label: 'Slight', coords: rectangle(1, 1, 3, 3)}),
         ]);
 
-        expect(issues).toHaveLength(1);
-        expect(issues[0]).toMatchObject({
-            code: 'cross-level-overlap',
-            productIds: [1, 2],
-            message: 'Categorical Outlook: Marginal overlaps Slight.',
-        });
+        expect(issues.some(issue => issue.code === 'nested-level-violation')).toBe(true);
+        expect(issues[0]?.message).toContain('Slight must be contained within Marginal');
+    });
+
+    it('allows a higher ordinal category contained by a lower category', () => {
+        const issues = validateForecastProducts([
+            contour({id: 1, level: 'marginal', label: 'Marginal', coords: rectangle(0, 0, 4, 4)}),
+            contour({id: 2, level: 'slight', label: 'Slight', coords: rectangle(1, 1, 2, 2)}),
+        ]);
+        expect(issues).toEqual([]);
     });
 
     it('requires tornado probabilities to be nested by threshold', () => {

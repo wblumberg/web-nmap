@@ -81,7 +81,13 @@ const COLORMAPS = {
     
     'wv_tpc':     new apgl.ColorMap( wv_tpc_data.levels,  wv_tpc_data.colors),
     'satellite_ir_rainbow': new apgl.ColorMap(satellite_ir_rainbow.levels, satellite_ir_rainbow.colors, {overflow_color: satellite_ir_rainbow.overflow_color}),
-    'satellite_ir_winter': new apgl.ColorMap(satellite_ir_winter.levels, satellite_ir_winter.colors),
+    // This source table is authored warm-to-cold. ColorMap and ColorBar both
+    // require monotonically increasing levels, so reverse levels and bins
+    // together to preserve the intended temperature-to-color mapping.
+    'satellite_ir_winter': new apgl.ColorMap(
+        satellite_ir_winter.levels.slice().reverse(),
+        satellite_ir_winter.colors.slice().reverse(),
+    ),
 
     // EPA AQI colormaps for various pollutants, based on https://www.airnow.gov/aqi/aqi-basics/
     'epa_aqi_pm25': new apgl.ColorMap(epa_aqi_pm25.levels, epa_aqi_pm25.colors, {overflow_color: epa_aqi_pm25.overflow_color}),

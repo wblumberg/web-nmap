@@ -24,3 +24,8 @@ MESO_SOURCE = FilesystemSource(
   timeline_hours = 24,
   zarr_transport=True,
 )
+
+# Time matching is requested much more frequently than this hourly inventory
+# changes. Keep this opt-in at the source level rather than imposing stale
+# inventory behavior on unrelated source types.
+MESO_SOURCE.time_match_cache_seconds = 300

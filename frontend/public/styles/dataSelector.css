@@ -220,7 +220,7 @@
 /* Individual product row */
 .ds-prod-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 7px;
     padding: 5px 10px;
     cursor: pointer;
@@ -238,10 +238,43 @@
     font-size: 0.55rem;
     color: #334466;
     flex-shrink: 0;
+    margin-top: 5px;
 }
 .ds-prod-item.selected .ds-prod-indicator { color: #4488dd; }
 
-.ds-prod-label { flex: 1; }
+.ds-prod-content {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+}
+.ds-prod-label { line-height: 1.25; }
+.ds-prod-badges,
+.ds-info-prod-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+}
+.ds-info-prod-badges { margin: 3px 0 5px; }
+.ens-product-badge {
+    display: inline-block;
+    width: fit-content;
+    padding: 1px 5px;
+    border: 1px solid currentColor;
+    border-radius: 8px;
+    font-size: 0.58rem;
+    font-weight: bold;
+    line-height: 1.35;
+    letter-spacing: 0.045em;
+    white-space: nowrap;
+}
+.ens-product-badge-statistic { color: #86b8ff; background: #14243f; }
+.ens-product-badge-spread { color: #c7a1ff; background: #281b42; }
+.ens-product-badge-probability { color: #65dfad; background: #102f28; }
+.ens-product-badge-member { color: #ffbd72; background: #38230f; }
+.ens-product-badge-experimental { color: #ff8f9c; background: #3b1720; }
+.ens-product-badge-other { color: #b0b0c8; background: #24243a; }
 
 /* Shared implemented/unimplemented dot */
 .ds-ds-indicator {
@@ -413,4 +446,3 @@
     border-color: #1a1a2e;
     cursor: not-allowed;
 }
-

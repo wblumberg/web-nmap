@@ -81,6 +81,7 @@ import { getState, setState } from '../app/store.js';
 import { LayerManager }    from '../views/panels/productManager.js';
 import { ProductGen }      from '../views/panels/productGenView.js';
 import { DatasetStatus }   from '../views/panels/datasetStatus.js';
+import { MapDiagnostics }  from '../views/panels/mapDiagnostics.js';
 import { BasemapStyleView } from '../views/panels/basemapStyleView.js';
 import { ProcedureManager } from '../views/panels/procedureManager.js';
 import { resolveTitle }    from '../domain/titleResolver.js';
@@ -90,6 +91,17 @@ import {
     pointRangeForFrames,
 } from '../domain/pointFrames.js';
 import { runRollingFramePipeline } from '../services/rollingFramePipeline.js';
+import { fetchLivePointFrame, fetchLightningAgeFramesInWorker } from '../services/livePointFrame.js';
+import { orderSourcesForRendering } from '../domain/sourceRenderOrder.js';
+import {
+    ensureGeometryDiagnostics,
+    shareAdjacentGeometryData,
+} from '../domain/geometryFrames.js';
+import {
+    estimateValueBytes,
+    recordDiagnostic,
+    setDiagnosticSnapshotProvider,
+} from '../services/mapDiagnostics.js';
 
 // Load TimeMatcher (IIFE side-effect import — sets window.TimeMatcher)
 import './timeMatcherController.js';
@@ -113,7 +125,11 @@ let _activeColorbars   = [];    // SVG colorbar elements
 /** @deprecated — use _layerControllers + getSampler() instead */ 
 let _activeSampler     = null;  // kept only for legacy non-progressive paths
 let _samplerEnabled    = false; // whether the cursor popup is active
+let _dataLayerOpacity  = 1;
+let _appliedDataLayerOpacity = new WeakMap();
 let _mousemoveHandler  = null;  // current map mousemove handler
+let _mousemoveRaf      = null;  // coalesce high-frequency pointer events
+let _pendingMouseEvent = null;
 
 // ── Frame timeline ──
 let _frameTimes      = [];      // Date[], sorted oldest → newest
@@ -123,16 +139,48 @@ let _currentFrameIdx = -1;      // index into _frameTimes / _frameKeys
 // ── Playback state ──
 let _playbackTimer      = null;
 let _loopEndTimeout     = null;    // setTimeout handle for end-of-loop pause
+let _playbackTickPending = false;
 let _playbackMode       = 'pause'; // 'pause' | 'loop-fwd' | 'loop-back' | 'rock'
 let _rockDirection      = 1;       // +1 = forward, -1 = backward
 let PLAY_INTERVAL_MS    = 100;     // ms between frames during playback
 let END_OF_LOOP_PAUSE_MS = 500;    // ms to hold at the last frame before wrapping
+const MIN_PLAY_INTERVAL_MS = 10;
+const MAX_PLAY_INTERVAL_MS = 500;
+
+function _sliderToMs(value, minValue, maxValue) {
+    const sliderValue = Number(value);
+    const low = Number.isFinite(Number(minValue)) ? Number(minValue) : 0;
+    const high = Number.isFinite(Number(maxValue)) ? Number(maxValue) : 100;
+    if (!Number.isFinite(sliderValue)) return MAX_PLAY_INTERVAL_MS;
+    const clamped = Math.min(high, Math.max(low, sliderValue));
+    const fraction = (clamped - low) / Math.max(1, high - low);
+    return Math.round(MAX_PLAY_INTERVAL_MS - fraction * (MAX_PLAY_INTERVAL_MS - MIN_PLAY_INTERVAL_MS));
+}
+
+function _msToSlider(ms, minValue, maxValue) {
+    const low = Number(minValue);
+    const high = Number(maxValue);
+    const dwell = Math.min(MAX_PLAY_INTERVAL_MS, Math.max(MIN_PLAY_INTERVAL_MS, Number(ms)));
+    const fraction = (MAX_PLAY_INTERVAL_MS - dwell) / (MAX_PLAY_INTERVAL_MS - MIN_PLAY_INTERVAL_MS);
+    return low + fraction * (high - low);
+}
+
+function _setPlaybackDwell(ms, {syncSlider = true} = {}) {
+    const parsed = Number(ms);
+    if (!Number.isFinite(parsed)) return;
+    PLAY_INTERVAL_MS = Math.round(Math.min(MAX_PLAY_INTERVAL_MS, Math.max(MIN_PLAY_INTERVAL_MS, parsed)));
+    const slider = document.getElementById('loop_speed');
+    if (slider && syncSlider) slider.value = String(Math.round(_msToSlider(PLAY_INTERVAL_MS, slider.min, slider.max)));
+    const label = `${PLAY_INTERVAL_MS} ms/frame`;
+    const tooltip = document.getElementById('loop-speed-tooltip');
+    if (tooltip) tooltip.textContent = label;
+    if (slider) slider.title = `Dwell: ${label} — move right to play faster`;
+}
 
 // ── Cached DOM elements ──
 let _frameTimeEl       = null;
 let _colorbarPanel     = null;
 let _colorbarContainer = null;
-let _readoutEl         = null;
 let _samplerPopupEl    = null;
 
 // ── Auto-update state ──
@@ -151,6 +199,7 @@ let _sourceUpdateState  = [];
 let _autoUpdateSse      = null;
 let _autoUpdateActive   = false;
 let _autoUpdatePending  = new Set();
+let _autoUpdateQueue    = Promise.resolve();
 
 // Accumulates switch-to-render latency while the user plays through a loop.
 // A summary is emitted after every frame has reached a MapLibre render event.
@@ -196,7 +245,6 @@ export async function init() {
     _frameTimeEl       = document.querySelector('#frame-time-value');
     _colorbarPanel     = document.querySelector('#colorbar-panel');
     _colorbarContainer = document.querySelector('#colorbar');
-    _readoutEl         = document.querySelector('#readout');
     _samplerPopupEl    = document.querySelector('#sampler-popup');
 
     // ── Step 1: Fetch the catalog of available data sources from the API ──
@@ -255,6 +303,7 @@ export async function init() {
     // Register before the initial style finishes loading so the persisted
     // basemap projection and layer settings are applied on the first paint.
     BasemapStyleView.init(_map);
+    _map.on('idle', _applyDataLayerOpacity);
 
     // ── Step 5: Wire everything after the map's GL context is ready ──
     //
@@ -263,8 +312,15 @@ export async function init() {
     _map.on('load', () => {
         console.info('%c[NMAP]%c Map loaded — ready for layers',
             'color:#55d46a;font-weight:bold', 'color:inherit');
-        ProductGen.init(_map, {getDataLayers: () => _activeMultiLayers});
+        ProductGen.init(_map, {
+            getCurrentFrameTime: () => (
+                _currentFrameIdx >= 0 && _currentFrameIdx < _frameTimes.length
+                    ? new Date(_frameTimes[_currentFrameIdx].getTime()) : null
+            ),
+        });
         DatasetStatus.init();
+        setDiagnosticSnapshotProvider(_getFrameDiagnostics);
+        MapDiagnostics.init();
         _wireToolbar();
         _wireKeyboard();
         _updateFrameDisplay();
@@ -293,6 +349,14 @@ function _wireToolbar() {
         if (el) el.addEventListener('click', handler);
     };
 
+    const opacitySlider = document.querySelector('#data-opacity');
+    const opacityValue = document.querySelector('#data-opacity-value');
+    opacitySlider?.addEventListener('input', event => {
+        _dataLayerOpacity = Number(event.target.value) / 100;
+        if (opacityValue) opacityValue.value = `${event.target.value}%`;
+        _applyDataLayerOpacity();
+    });
+
     ProcedureManager.init({
         captureProcedure: _captureProcedureDefinition,
         loadProcedure: _loadProcedureDefinition,
@@ -312,24 +376,6 @@ function _wireToolbar() {
     wire('#btn-rock',       () => _togglePlayback('rock'));
 
     const slider = document.getElementById('loop_speed');
-    // Map slider range → milliseconds per frame. Read slider min/max so
-    // the mapping remains robust if the HTML is edited.
-    const MIN_MS = 10;
-    // The former default was approximately 500 ms/frame. It is now the
-    // slowest permitted rate and occupies the slider's far-left position.
-    const MAX_MS = 500;
-    const _sliderToMs = (v, minV, maxV) => {
-        const vv = Number(v);
-        const lo = Number.isFinite(Number(minV)) ? Number(minV) : 1;
-        const hi = Number.isFinite(Number(maxV)) ? Number(maxV) : 50;
-        if (!Number.isFinite(vv)) return Math.round((MAX_MS + MIN_MS) / 2);
-        const clamped = Math.min(hi, Math.max(lo, Math.round(vv)));
-        // Interpolate linearly from [lo,hi] → [MAX_MS, MIN_MS]
-        const t = (clamped - lo) / Math.max(1, (hi - lo));
-        const ms = Math.round(MAX_MS - t * (MAX_MS - MIN_MS));
-        return Math.max(MIN_MS, Math.min(MAX_MS, ms));
-    };
-
     // Initialize PLAY_INTERVAL_MS to match the slider default value so UI and
     // runtime are consistent. Fall back to a sane default if the slider is
     // missing or malformed.
@@ -337,9 +383,9 @@ function _wireToolbar() {
         const minV = slider.min ?? 1;
         const maxV = slider.max ?? 50;
         const valV = slider.value ?? ((Number(minV) + Number(maxV)) / 2);
-        PLAY_INTERVAL_MS = _sliderToMs(valV, minV, maxV);
+        _setPlaybackDwell(_sliderToMs(valV, minV, maxV), {syncSlider: false});
     } else {
-        PLAY_INTERVAL_MS = 500;
+        _setPlaybackDwell(500, {syncSlider: false});
     }
 
     if (slider) slider.addEventListener('input', (ev) => {
@@ -349,13 +395,17 @@ function _wireToolbar() {
         const maxV = target.max ?? slider.max ?? 50;
         const prevMode = _playbackMode;
         const wasPlaying = !!_playbackTimer;
-        PLAY_INTERVAL_MS = _sliderToMs(val, minV, maxV);
+        _setPlaybackDwell(_sliderToMs(val, minV, maxV), {syncSlider: false});
+        document.getElementById('loop-speed-tooltip')?.classList.add('visible');
         console.info(`[NMAP] Playback speed set to ${PLAY_INTERVAL_MS} ms/frame (slider value: ${val}, range: ${minV}-${maxV})`);
         if (wasPlaying) {
             // Restart playback using the previous mode so changes take effect immediately.
             _stopPlayback();
             if (prevMode && prevMode !== 'pause') _togglePlayback(prevMode);
         }
+    });
+    slider?.addEventListener('change', () => {
+        document.getElementById('loop-speed-tooltip')?.classList.remove('visible');
     });
 
     // ── Freeze Map Location ──
@@ -406,6 +456,19 @@ function _wireToolbar() {
         const open = DatasetStatus.toggle();
         document.querySelector('#btn-dataset-status').classList.toggle('active', open);
     });
+    wire('#btn-map-diagnostics', () => {
+        const open = MapDiagnostics.toggle();
+        document.querySelector('#btn-map-diagnostics').classList.toggle('active', open);
+    });
+}
+
+function _applyDataLayerOpacity() {
+    for (const layer of _activeMultiLayers) {
+        if (!layer || typeof layer.setOpacity !== 'function') continue;
+        if (_appliedDataLayerOpacity.get(layer) === _dataLayerOpacity) continue;
+        layer.setOpacity(_dataLayerOpacity);
+        _appliedDataLayerOpacity.set(layer, _dataLayerOpacity);
+    }
 }
 
 function _captureProcedureDefinition() {
@@ -421,6 +484,7 @@ function _captureProcedureDefinition() {
         timeline: layerConfiguration.timeline,
         runtime: {
             autoUpdate: _autoUpdateActive,
+            dwellTimeMs: PLAY_INTERVAL_MS,
         },
         map: {
             view: {
@@ -437,6 +501,9 @@ function _captureProcedureDefinition() {
 async function _loadProcedureDefinition(definition) {
     _stopPlayback();
     _setAutoUpdateEnabled(false);
+    if (Number.isFinite(Number(definition.runtime?.dwellTimeMs))) {
+        _setPlaybackDwell(Number(definition.runtime.dwellTimeMs));
+    }
     if (definition.map?.basemap) {
         BasemapStyleView.setConfiguration(definition.map.basemap);
     }
@@ -515,6 +582,9 @@ function _wireKeyboard() {
 
 async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip, frames }) {
     const loadStarted = performance.now();
+    recordDiagnostic('map-load-start', {
+        message: `${sources.length} source(s), ${frames.length} frame(s)`,
+    });
     console.group(
         '%c[NMAP]%c Loading data — %d source(s), %d frame(s), dominant=%s',
         'color:#55d46a;font-weight:bold', 'color:inherit',
@@ -567,7 +637,17 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
         // immediately so the user sees data right away.  Remaining
         // frames are fetched in batches and appended incrementally.
         let firstFrameRendered = false;
-        for (const src of sources) {
+        const renderSources = orderSourcesForRendering(sources, PRODUCT_SUITES);
+        console.info('[NMAP] Render stack (bottom → top):', renderSources.map(src => ({
+            source: src.id,
+            product: src.productKey,
+        })));
+        for (const src of renderSources) {
+            const sourceStarted = performance.now();
+            recordDiagnostic('source-load-start', {
+                source: src.id, product: src.productKey,
+                message: `${sortedFrames.length} requested frame(s)`,
+            });
             try {
                 await _loadAndBuildSource(src, sortedFrames, {
                     onFirstFrame() {
@@ -583,8 +663,17 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
                         _setFrameDisplayText(`Loading ${loaded}/${total} frames\u2026`);
                     },
                 });
+                recordDiagnostic('source-load-complete', {
+                    source: src.id, product: src.productKey,
+                    durationMs: performance.now() - sourceStarted,
+                });
             } catch (err) {
                 console.error(`[NMAP] Failed to load source "${src.id}":`, err);
+                recordDiagnostic('source-load-error', {
+                    source: src.id, product: src.productKey,
+                    durationMs: performance.now() - sourceStarted,
+                    message: err.message,
+                });
             }
         }
 
@@ -602,10 +691,17 @@ async function _onLayerManagerApply({ sources, dominantId, numFrames, frameSkip,
             frames: sortedFrames.length,
             totalMs: +(performance.now() - loadStarted).toFixed(1),
         });
+        recordDiagnostic('map-load-complete', {
+            durationMs: performance.now() - loadStarted,
+            message: `${sources.length} source(s), ${sortedFrames.length} frame(s)`,
+        });
 
     } catch (err) {
         console.error('[NMAP] Error during data load:', err);
         setState({ ui: { loading: false, error: err.message } });
+        recordDiagnostic('map-load-error', {
+            durationMs: performance.now() - loadStarted, message: err.message,
+        });
     } finally {
         setState({ ui: { loading: false, error: null } });
     }
@@ -745,6 +841,9 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
     const namespace = src.uid || src.id;
     const frameEntries = [...frameToKey.entries()];  // [[ms, apiKey], ...]
     const totalFrames = frameEntries.length;
+    const frameApiKeys = new Map(frameEntries.map(([frameMs, apiKey]) => [
+        _dateToKey(new Date(frameMs)), apiKey,
+    ]));
 
     if (isForecast && src.cycleTime && !src.entry?.has_fhrs) {
         // ────────────────────────────────────────────────────────────────────────────
@@ -821,6 +920,7 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
             productSuite, cycleTime: src.cycleTime ?? null,
             srcEntry: src.entry, gridInfo,
             queryParams,
+            frameApiKeys,
         });
 
     } else if (!isForecast) {
@@ -878,6 +978,22 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
                     if (progressive.colorbars?.length) _activeColorbars.push(...progressive.colorbars);
                     if (progressive.sampler) _activeSampler = progressive.sampler;
                     onFirstFrame?.();
+                    if (src.entry?.gpu_frame_budget_bytes) {
+                        progressive.controller.configureFrameRing?.({
+                            keys: frameEntries.map(([frameMs]) => _dateToKey(new Date(frameMs))),
+                            gpuBytes: src.entry.gpu_frame_budget_bytes,
+                            uploadAhead: src.entry.gpu_upload_ahead_frames ?? 4,
+                            loadFrame: async frameKey => {
+                                const apiKey = frameApiKeys.get(frameKey);
+                                if (!apiKey) return null;
+                                const result = await fetchAnalysisFieldsAuto(
+                                    src.id, dataKeys, apiKey, gridInfo, src.entry,
+                                    {queryParams, apglGrid: grid},
+                                );
+                                return result.fields;
+                            },
+                        });
+                    }
                     // Register any additional dominant keys that share this API key
                     for (let i = 1; i < frameKeys.length; i++) {
                         await progressive.addFrame(frameKeys[i], fields);
@@ -909,6 +1025,7 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
             productSuite, cycleTime: src.cycleTime ?? null,
             srcEntry: src.entry, gridInfo,
             queryParams,
+            frameApiKeys,
         });
 
     } else {
@@ -991,6 +1108,7 @@ async function _loadGriddedSource(src, frameTimes, { onFirstFrame, onProgress } 
             productSuite, cycleTime: src.cycleTime ?? null,
             srcEntry: src.entry, gridInfo,
             queryParams,
+            frameApiKeys,
         });
     }
 }
@@ -1088,8 +1206,10 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
     console.info(
         `[NMAP] First geometry frame "${firstResult.frameKey}" — building layers (namespace="${namespace}")`
     );
+    let previousGeometryData = shareAdjacentGeometryData(null, firstResult.data);
+    _recordGeometryFrameDiagnostic(namespace, firstResult.frameKey, previousGeometryData);
     const progressive = buildProgressiveMultiLayers(
-        productSuite, firstResult.frameKey, firstResult.data, null, namespace
+        productSuite, firstResult.frameKey, previousGeometryData, null, namespace
     );
 
     for (const ml of progressive.layers) {
@@ -1102,8 +1222,8 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
     if (progressive.sampler) _activeSampler = progressive.sampler;
     onFirstFrame?.();
     let loaded = 1;
-    let lastNonEmptyData = _geometryDataHasFeatures(firstResult.data)
-        ? firstResult.data
+    let lastNonEmptyData = _geometryDataHasFeatures(previousGeometryData)
+        ? previousGeometryData
         : null;
     onProgress?.(loaded, totalFrames);
 
@@ -1117,8 +1237,11 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
         fetchOneFrame,
         async ({ frameKey, data }) => {
             if (data) {
-                await progressive.addFrame(frameKey, data);
-                if (_geometryDataHasFeatures(data)) lastNonEmptyData = data;
+                const sharedData = shareAdjacentGeometryData(previousGeometryData, data);
+                previousGeometryData = sharedData;
+                _recordGeometryFrameDiagnostic(namespace, frameKey, sharedData);
+                await progressive.addFrame(frameKey, sharedData);
+                if (_geometryDataHasFeatures(sharedData)) lastNonEmptyData = sharedData;
                 loaded++;
             }
             onProgress?.(loaded, totalFrames);
@@ -1134,6 +1257,7 @@ async function _loadGeometrySource(src, frameTimes, { onFirstFrame, onProgress }
         productSuite, cycleTime: null,
         queryParams,
         lastNonEmptyData,
+        lastGeometryData: previousGeometryData,
     });
 }
 
@@ -1142,6 +1266,22 @@ function _geometryDataHasFeatures(data) {
     return Object.values(data).some(value =>
         Array.isArray(value?.features) && value.features.length > 0
     );
+}
+
+function _recordGeometryFrameDiagnostic(source, key, data) {
+    const stats = ensureGeometryDiagnostics(data);
+    if (!stats) return;
+    recordDiagnostic('geometry-frame-prepared', {
+        source,
+        key,
+        bytes: stats.retainedBytes,
+        geometryLogicalBytes: stats.logicalBytes,
+        geometrySharedBytes: stats.sharedBytes,
+        featureCount: stats.featureCount,
+        coordinateCount: stats.coordinateCount,
+        message: `${stats.featureCount} feature(s) · ${stats.coordinateCount} coordinate(s)` +
+            (stats.sharedFeatures ? ` · ${stats.sharedFeatures} shared` : ''),
+    });
 }
 
 
@@ -1217,19 +1357,55 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
     const requiredRange = pointRangeForFrames(frameSpecs, catalogPolicy);
 
     let rangeResult;
+    let workerFrameResults = null;
     const rangeRequestStarted = performance.now();
     try {
-        rangeResult = await DataClient.fetchDbPointRange(
-            src.id,
-            dataKeys,
-            new Date(requiredRange.startMs),
-            new Date(requiredRange.endMs),
-            {
-                queryParams,
-                limit: productSuite.point_range_page_size ?? productSuite.point_range_limit,
-                paginate: productSuite.point_range_paginate === true,
-            },
-        );
+        if (productSuite.live_point_worker === 'lightning-age') {
+            try {
+                const workerResult = await fetchLightningAgeFramesInWorker({
+                    sourceId: src.id,
+                    fields: dataKeys,
+                    startIso: new Date(requiredRange.startMs).toISOString(),
+                    endIso: new Date(requiredRange.endMs).toISOString(),
+                    frameSpecs,
+                    beforeMinutes: catalogPolicy.beforeMinutes,
+                    afterMinutes: catalogPolicy.afterMinutes,
+                    binflag: catalogPolicy.binflag,
+                    queryParams,
+                    limit: productSuite.point_range_page_size ?? productSuite.point_range_limit,
+                    paginate: productSuite.point_range_paginate === true,
+                });
+                workerFrameResults = workerResult.frames;
+                rangeResult = {obs_json: [], meta: workerResult.meta, timing: workerResult.timing};
+                recordDiagnostic('point-worker-initial', {
+                    source: src.id,
+                    durationMs: workerResult.timing.workerMs,
+                    bytes: workerFrameResults.reduce((sum, frame) => sum + estimateValueBytes(frame.data), 0),
+                    workerNetworkMs: workerResult.timing.networkMs,
+                    workerDecodeMs: workerResult.timing.decodeMs,
+                    workerPrepareMs: workerResult.timing.prepareMs,
+                    payloadBytes: workerResult.timing.payloadBytes,
+                    message: `${workerResult.timing.points} unique point(s) · ${workerFrameResults.length} packed frame(s)`,
+                });
+            } catch (workerError) {
+                console.warn(
+                    `[NMAP] Initial lightning worker failed for "${src.id}"; ` +
+                    'falling back to main-thread range preparation:',
+                    workerError,
+                );
+                recordDiagnostic('point-worker-fallback', {
+                    source: src.id,
+                    message: workerError.message,
+                });
+            }
+        }
+
+        if (!rangeResult) {
+            rangeResult = await DataClient.fetchDbPointRange(
+                src.id, dataKeys, new Date(requiredRange.startMs), new Date(requiredRange.endMs),
+                {queryParams, limit: productSuite.point_range_page_size ?? productSuite.point_range_limit, paginate: productSuite.point_range_paginate === true},
+            );
+        }
     } catch (err) {
         console.warn(`[NMAP] Failed to fetch point range for "${src.id}":`, err.message);
         return;
@@ -1287,24 +1463,18 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
             productSuite,
             cycleTime: null,
             queryParams,
+            pointPolicy: responsePolicy,
         });
         return;
     }
 
     const reconstructionStarted = performance.now();
-    const dataByFrame = buildPointFrames(
-        rangeResult.obs_json,
-        frameSpecs,
-        responsePolicy,
-    );
-    const frameResults = frameSpecs.map(({ frameKey }) => ({
-        frameKey,
-        data: dataByFrame.get(frameKey),
-    }));
+    const dataByFrame = workerFrameResults ? null : buildPointFrames(rangeResult.obs_json, frameSpecs, responsePolicy);
+    const frameResults = workerFrameResults || frameSpecs.map(({ frameKey }) => ({frameKey, data: dataByFrame.get(frameKey)}));
     const reconstructionFinished = performance.now();
 
     // Find a non-empty frame to bootstrap the progressive layer build.
-    let firstIndex = frameResults.findIndex(result => result.data?.obs_json?.length);
+    let firstIndex = frameResults.findIndex(result => result.data?.obs_json?.length || result.data?.lightning_columns?.ages?.length);
     if (firstIndex < 0) firstIndex = frameResults.findIndex(result => result.data);
     const firstResult = firstIndex >= 0 ? frameResults[firstIndex] : null;
 
@@ -1372,7 +1542,7 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
         frameLayerBuildTotalMs: +frameBuildTotal.toFixed(1),
         averageFrameLayerBuildMs: +(frameBuildTotal / frameBuildDurations.length).toFixed(1),
         slowestFrame: slowestFrame && { key: slowestFrame.key, ms: +slowestFrame.ms.toFixed(1) },
-        observations: rangeResult.obs_json.length,
+        observations: rangeResult.timing?.points ?? rangeResult.obs_json.length,
         framesPrepared: frameBuildDurations.length,
         sourceTotalMs: +(performance.now() - sourceStarted).toFixed(1),
     });
@@ -1381,6 +1551,7 @@ async function _loadPointObsSource(src, frameTimes, { onFirstFrame, onProgress }
         controller: progressive.controller, isPointObs: true, isForecast: false, dataKeys,
         productSuite, cycleTime: null,
         queryParams,
+        pointPolicy: responsePolicy,
     });
 }
 
@@ -1424,6 +1595,9 @@ async function _loadProfileObsSource(src, frameTimes, { onFirstFrame, onProgress
     const namespace = src.uid || src.id;
     const frameEntries = [...frameToKey.entries()];
     const totalFrames = frameEntries.length;
+    const frameApiKeys = new Map(frameEntries.map(([frameMs, apiKey]) => [
+        _dateToKey(new Date(frameMs)), apiKey,
+    ]));
 
     const fetchOneFrame = async ([frameMs, apiKey]) => {
         const frameKey = _dateToKey(new Date(frameMs));
@@ -1494,6 +1668,7 @@ async function _loadProfileObsSource(src, frameTimes, { onFirstFrame, onProgress
         controller: progressive.controller, isPointObs: true, isProfileObs: true, isForecast: false, dataKeys: [],
         productSuite, cycleTime: null,
         queryParams,
+        frameApiKeys,
     });
 }
 
@@ -1695,28 +1870,21 @@ function _setFrame(idx) {
 
     // Tell each source's MultiPlotLayer controller to switch to this frame
     const key = _frameKeys[_currentFrameIdx];
-    const frameNumber = _currentFrameIdx + 1;
     const renderStarted = performance.now();
-    console.warn(`[NMAP] _setFrame(${idx}) → idx=${_currentFrameIdx} key="${key}"`);
-    console.warn(`[NMAP]   _layerControllers.length=${_layerControllers.length}`);
-    console.warn(`[NMAP]   _activeMultiLayers.length=${_activeMultiLayers.length}`);
     for (const ctrl of _layerControllers) {
         // Only set the key if this controller has data for that frame.
         // (Some sources might be missing certain frames due to time matching.)
-        console.warn(`[NMAP]   controller keys: [${ctrl.keys.join(', ')}]`);
         if (ctrl.keys.includes(key)) {
             ctrl.setKey(key);
             // Swap the active sampler to whichever frame is now displayed.
             // Geometry products (alerts) return a per-frame sampler closure.
             const s = ctrl.getSampler?.();
             if (s) _activeSampler = s;
-            console.warn(`[NMAP]   → set key "${key}" on controller`);
         } else {
             // No data for this frame — hide the layer so the previous frame
             // doesn't linger on screen.  MultiPlotLayer.render() is a no-op
             // when field_key is null.
             ctrl.hide?.();
-            console.warn(`[NMAP]   → key "${key}" NOT found in controller keys — hiding`);
         }
     }
 
@@ -1727,7 +1895,6 @@ function _setFrame(idx) {
     // This measures UI-visible frame-switch latency (not a GPU timer query).
     _map.once('render', () => {
         const elapsed = performance.now() - renderStarted;
-        console.info(`[NMAP timing] Frame ${frameNumber}/${_frameTimes.length} ${key} render event: ${elapsed.toFixed(1)} ms`);
         if (!_loopRenderTiming || _loopRenderTiming.seen.has(key)) return;
         _loopRenderTiming.seen.add(key);
         _loopRenderTiming.samples.push(elapsed);
@@ -1800,6 +1967,7 @@ function _stopPlayback() {
         _loopEndTimeout = null;
     }
     _playbackMode = 'pause';
+    _playbackTickPending = false;
     _loopRenderTiming = null;
 }
 
@@ -1833,7 +2001,23 @@ function _togglePlayback(mode) {
     };
 
     // Named tick function so the end-of-loop pause can restart the same interval.
-    const tick = () => {
+    const showWhenReady = async (idx, direction) => {
+        const expectedMode = _playbackMode;
+        const key = _frameKeys[idx];
+        _layerControllers.forEach(ctrl => ctrl.setPlaybackPolicy?.({
+            dwellMs: PLAY_INTERVAL_MS,
+            direction,
+        }));
+        const ready = await Promise.all(_layerControllers.map(ctrl =>
+            ctrl.keys.includes(key) ? (ctrl.prepareKey?.(key) ?? true) : true
+        ));
+        if (_playbackMode === expectedMode && ready.every(Boolean)) _setFrame(idx);
+    };
+
+    const tick = async () => {
+        if (_playbackTickPending) return;
+        _playbackTickPending = true;
+        try {
         switch (_playbackMode) {
             case 'loop-fwd': {
                 const next = _currentFrameIdx + 1;
@@ -1841,14 +2025,15 @@ function _togglePlayback(mode) {
                     // Reached the last frame — hold for END_OF_LOOP_PAUSE_MS before wrapping.
                     clearInterval(_playbackTimer);
                     _playbackTimer = null;
-                    _loopEndTimeout = setTimeout(() => {
+                    _loopEndTimeout = setTimeout(async () => {
                         _loopEndTimeout = null;
                         if (_playbackMode !== 'loop-fwd') return;
-                        _setFrame(0);
+                        await showWhenReady(0, 1);
+                        if (_playbackMode !== 'loop-fwd') return;
                         _playbackTimer = setInterval(tick, PLAY_INTERVAL_MS);
                     }, END_OF_LOOP_PAUSE_MS);
                 } else {
-                    _setFrame(next);
+                    await showWhenReady(next, 1);
                 }
                 break;
             }
@@ -1858,19 +2043,20 @@ function _togglePlayback(mode) {
                     // Reached the first frame — hold for END_OF_LOOP_PAUSE_MS before wrapping.
                     clearInterval(_playbackTimer);
                     _playbackTimer = null;
-                    _loopEndTimeout = setTimeout(() => {
+                    _loopEndTimeout = setTimeout(async () => {
                         _loopEndTimeout = null;
                         if (_playbackMode !== 'loop-back') return;
-                        _setFrame(_frameTimes.length - 1);
+                        await showWhenReady(_frameTimes.length - 1, -1);
+                        if (_playbackMode !== 'loop-back') return;
                         _playbackTimer = setInterval(tick, PLAY_INTERVAL_MS);
                     }, END_OF_LOOP_PAUSE_MS);
                 } else {
-                    _setFrame(next);
+                    await showWhenReady(next, -1);
                 }
                 break;
             }
             case 'rock': {
-                if (_frameTimes.length <= 1) { _setFrame(0); break; }
+                if (_frameTimes.length <= 1) { await showWhenReady(0, 1); break; }
                 let next = _currentFrameIdx + _rockDirection;
                 if (next >= _frameTimes.length) {
                     _rockDirection = -1;
@@ -1879,9 +2065,12 @@ function _togglePlayback(mode) {
                     _rockDirection = 1;
                     next = 1;
                 }
-                _setFrame(next);
+                await showWhenReady(next, _rockDirection);
                 break;
             }
+        }
+        } finally {
+            _playbackTickPending = false;
         }
     };
 
@@ -2025,8 +2214,13 @@ function _setupReadout() {
         _map.off('mousemove', _mousemoveHandler);
         _mousemoveHandler = null;
     }
+    if (_mousemoveRaf !== null) {
+        cancelAnimationFrame(_mousemoveRaf);
+        _mousemoveRaf = null;
+    }
+    _pendingMouseEvent = null;
 
-    _mousemoveHandler = (ev) => {
+    const sampleMouseEvent = (ev) => {
         const coord = ev.lngLat.wrap();
         const lat = coord.lat.toFixed(2);
         const lon = coord.lng.toFixed(2);
@@ -2070,13 +2264,10 @@ function _setupReadout() {
             text += ` | ${parts.join(', ')}`;
         }
 
-        if (_readoutEl) _readoutEl.textContent = text;
-
         // ── Cursor popup ─────────────────────────────────────────────────────
         if (_samplerEnabled && _samplerPopupEl) {
-            if (hits.length) {
-                // Build rows: one per sampler key-value pair
-                _samplerPopupEl.innerHTML = hits.map(({ key, val }) => {
+            const coordinateRow = `<div class="sp-row sp-coordinate"><span class="sp-key">Location:</span><span class="sp-val">${text.split(' | ')[0]}</span></div>`;
+            const valueRows = hits.map(({ key, val }) => {
                     let display;
                     if (Array.isArray(val)) {
                         display = `${val[0].toFixed(0)} / ${val[1].toFixed(0)}`;
@@ -2087,20 +2278,33 @@ function _setupReadout() {
                     }
                     return `<div class="sp-row"><span class="sp-key">${key}:</span><span class="sp-val">${display}</span></div>`;
                 }).join('');
+            _samplerPopupEl.innerHTML = coordinateRow + valueRows;
 
-                // Position the popup at the raw pixel position of the mouse
-                const px = ev.originalEvent;
-                _samplerPopupEl.style.left = `${px.clientX}px`;
-                _samplerPopupEl.style.top  = `${px.clientY}px`;
-                _samplerPopupEl.classList.remove('hidden');
-            } else {
-                _samplerPopupEl.classList.add('hidden');
-            }
+            // Position the popup at the raw pixel position of the mouse.
+            const px = ev.originalEvent;
+            _samplerPopupEl.style.left = `${px.clientX}px`;
+            _samplerPopupEl.style.top  = `${px.clientY}px`;
+            _samplerPopupEl.classList.remove('hidden');
         }
+    };
+
+    _mousemoveHandler = (ev) => {
+        // MapLibre may emit several mousemove events within one display frame.
+        // Retain only the newest cursor position so gridded and polygon
+        // samplers run no more than once per animation frame.
+        _pendingMouseEvent = ev;
+        if (_mousemoveRaf !== null) return;
+        _mousemoveRaf = requestAnimationFrame(() => {
+            _mousemoveRaf = null;
+            const pending = _pendingMouseEvent;
+            _pendingMouseEvent = null;
+            if (pending) sampleMouseEvent(pending);
+        });
     };
 
     // Hide popup when mouse leaves the map
     _map.on('mouseout', () => {
+        _pendingMouseEvent = null;
         if (_samplerPopupEl) _samplerPopupEl.classList.add('hidden');
     });
 
@@ -2130,6 +2334,10 @@ function _startAutoUpdate() {
         let payload;
         try { payload = JSON.parse(ev.data); } catch (err) { console.warn('[NMAP] SSE parse error:', err); return; }
         console.warn('[NMAP] SSE new_data received:', payload);
+        recordDiagnostic('auto-update-event', {
+            source: payload?.source_id, key: payload?.key,
+            message: payload?.valid_time,
+        });
         _handleNewDataEvent(payload);
     });
 
@@ -2160,6 +2368,42 @@ function _setAutoUpdateEnabled(enabled) {
     }
 }
 
+function _getFrameDiagnostics() {
+    const layers = _activeMultiLayers.map(layer => layer.getFrameDiagnostics?.()).filter(Boolean);
+    const cpuBytes = layers.reduce((sum, item) => sum + item.cpuBytes, 0);
+    const gpuResources = layers.reduce((sum, item) => sum + item.gpuResources, 0);
+    const gpuBytes = layers.reduce((sum, item) => sum + (item.gpuBytes || 0), 0);
+    const cpuReleasedBytes = layers.reduce((sum, item) => sum + (item.cpuReleasedBytes || 0), 0);
+    const geometry = _layerControllers.reduce((totals, controller) => {
+        const item = controller.getGeometryDiagnostics?.();
+        if (!item) return totals;
+        totals.frameCount += item.frameCount || 0;
+        totals.featureCount += item.featureCount || 0;
+        totals.coordinateCount += item.coordinateCount || 0;
+        totals.logicalBytes += item.logicalBytes || 0;
+        totals.sharedBytes += item.sharedBytes || 0;
+        totals.retainedBytes += item.retainedBytes || 0;
+        return totals;
+    }, {frameCount: 0, featureCount: 0, coordinateCount: 0, logicalBytes: 0, sharedBytes: 0, retainedBytes: 0});
+    const caches = DataClient.getAllCacheStats();
+    return {
+        timelineFrames: _frameKeys.length,
+        layerFrames: layers.reduce((sum, item) => sum + item.frameCount, 0),
+        cpuTypedArrayBytes: cpuBytes,
+        gpuResourceCount: gpuResources,
+        gpuResourceBytes: gpuBytes,
+        cpuReleasedAfterUploadBytes: cpuReleasedBytes,
+        geometry,
+        caches,
+        totalCacheBytes: Object.values(caches).reduce((sum, cache) => sum + (cache.bytes || 0), 0),
+        browserMemory: performance.memory ? {
+            usedJSHeapSize: performance.memory.usedJSHeapSize,
+            totalJSHeapSize: performance.memory.totalJSHeapSize,
+        } : null,
+        layers,
+    };
+}
+
 /** Stop the SSE connection and disable auto-update. */
 function _stopAutoUpdate() {
     _autoUpdateActive = false;
@@ -2186,9 +2430,40 @@ function _handleNewDataEvent(payload) {
     }
     if (!_autoUpdateActive) { console.warn('[NMAP] Auto-update blocked: not active'); return; }
 
-    _applyNewDominantFrame(payload).catch(err => {
+    // Process distinct SSE keys sequentially. Frame construction includes async
+    // contour/GPU setup and must finish before the oldest key is evicted.
+    _autoUpdateQueue = _autoUpdateQueue.then(() => _applyNewDominantFrame(payload)).catch(err => {
         console.error('[NMAP] Auto-update error:', err);
+        recordDiagnostic('auto-update-error', {
+            source: payload?.source_id, key: payload?.key, message: err.message,
+        });
     });
+}
+
+async function _fetchLivePointUpdate(secState, key, newDate) {
+    const pointFetchStarted = performance.now();
+    const liveFrame = await fetchLivePointFrame({
+        sourceId: secState.srcId,
+        frameKey: key,
+        centerTime: newDate,
+        dataKeys: secState.dataKeys,
+        pointPolicy: secState.pointPolicy,
+        productSuite: secState.productSuite,
+        queryParams: secState.queryParams,
+        fetchRange: DataClient.fetchDbPointRange,
+    });
+    recordDiagnostic('auto-update-point-fetch', {
+        source: secState.srcId, key,
+        bytes: estimateValueBytes(liveFrame.data),
+        durationMs: performance.now() - pointFetchStarted,
+        workerMs: liveFrame.timing?.workerMs,
+        workerNetworkMs: liveFrame.timing?.networkMs,
+        workerDecodeMs: liveFrame.timing?.decodeMs,
+        workerPrepareMs: liveFrame.timing?.prepareMs,
+        payloadBytes: liveFrame.timing?.payloadBytes,
+        message: `${liveFrame.timing?.points ?? liveFrame.data?.obs_json?.length ?? 0} point(s)${liveFrame.timing ? ` · worker decode ${liveFrame.timing.decodeMs.toFixed(0)} ms` : ''}${secState.productSuite.cache_live_point_ranges === false ? ' · uncached live range' : ''}`,
+    });
+    return liveFrame;
 }
 
 /**
@@ -2198,6 +2473,7 @@ function _handleNewDataEvent(payload) {
  * @param {{ source_id: string, key: string, valid_time: string }} payload  SSE event data
  */
 async function _applyNewDominantFrame({ source_id, key, valid_time }) {
+    const updateStarted = performance.now();
     // ── Guard: dedup in-flight requests for the same key ──
     if (_autoUpdatePending.has(key)) return;
 
@@ -2218,11 +2494,44 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
     if (_frameKeys.includes(key)) return;
 
     _autoUpdatePending.add(key);
+    recordDiagnostic('auto-update-start', {source: source_id, key, message: valid_time});
     console.info(`[NMAP] Auto-update: ingesting new dominant frame ${key} (${source_id})`);
 
     try {
+        const secondaryStates = _sourceUpdateState.filter(s => s.srcId !== source_id);
+        const matchingStates = secondaryStates.filter(
+            state => state.productSuite?.auto_update_skip_timematch !== true
+        );
+        const parallelPrefetch = secondaryStates.some(
+            state => state.productSuite?.auto_update_prefetch === true
+        );
+        const pointPrefetches = new Map();
+
+        const startTimemap = () => matchingStates.length
+            ? CatalogClient.buildTimemap(
+                source_id, matchingStates.map(state => state.srcId), [key], 3
+            ).then(value => ({value}), error => ({error}))
+            : Promise.resolve({value: null});
+
+        // Only explicitly opted-in products begin work before the dominant
+        // frame is ready. Settled wrappers prevent a secondary failure from
+        // becoming an unhandled rejection or cancelling the dominant update.
+        let timemapTask = parallelPrefetch ? startTimemap() : null;
+        if (parallelPrefetch) {
+            for (const state of secondaryStates) {
+                if (state.productSuite?.auto_update_prefetch !== true) continue;
+                if (!state.isPointObs || state.isProfileObs) continue;
+                pointPrefetches.set(
+                    state,
+                    _fetchLivePointUpdate(state, key, newDate)
+                        .then(value => ({value}), error => ({error})),
+                );
+            }
+        }
+
         // ── 1. Fetch the new dominant-source frame ──
         let dominantFields;
+        const dominantFetchStarted = performance.now();
         try {
             const result = await fetchAnalysisFieldsAuto(
                 source_id, dominantState.dataKeys, key,
@@ -2230,32 +2539,39 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
                 { queryParams: dominantState.queryParams }
             );
             dominantFields = result.fields;
+            recordDiagnostic('auto-update-fetch', {
+                source: source_id, key,
+                bytes: estimateValueBytes(dominantFields),
+                durationMs: performance.now() - dominantFetchStarted,
+                message: dominantState.dataKeys.join(', '),
+            });
         } catch (err) {
             console.warn(`[NMAP] Auto-update: failed to fetch ${source_id} key=${key}:`, err.message);
             return;
         }
+        const dominantFetchedBytes = estimateValueBytes(dominantFields);
 
         // ── 2. Time-match secondary sources via the build_map API ──
-        const secondaryStates = _sourceUpdateState.filter(s => s.srcId !== source_id);
         let timemap = null;
-        if (secondaryStates.length > 0) {
-            try {
-                const tmResult = await CatalogClient.buildTimemap(
-                    source_id,
-                    secondaryStates.map(s => s.srcId),
-                    [key],
-                    3
-                );
-                timemap = tmResult.map;
-            } catch (err) {
-                console.warn('[NMAP] Auto-update: build_map failed:', err.message);
-            }
+        timemapTask ||= startTimemap();
+        const timemapResult = await timemapTask;
+        if (timemapResult.error) {
+            console.warn('[NMAP] Auto-update: build_map failed:', timemapResult.error.message);
+        } else {
+            timemap = timemapResult.value?.map ?? null;
         }
 
-        // ── 3. Append the new dominant frame (using the SSE key as canonical key) ──
-        dominantState.addFrame(key, dominantFields);
+        // ── 3. Stage every source before mutating any live map layer ──
+        // Keeping the fetched payloads on the CPU until all sources are ready
+        // prevents a newly uploaded raster texture from sitting alongside the
+        // displaced texture while a slower point/profile request finishes.
+        const stagedFrames = [{
+            state: dominantState,
+            data: dominantFields,
+            apiKey: key,
+        }];
+        const stagingStarted = performance.now();
 
-        // ── 4. Append new secondary frames ──
         for (const secState of secondaryStates) {
             // Skip if this canonical key is already registered in the secondary controller
             if (secState.controller.keys.includes(key)) continue;
@@ -2280,9 +2596,15 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
                         }
                         data[slug] = await DataClient.fetchGeometryFeatures(secState.srcId, key, fetchOpts);
                     }));
+                    const sharedData = shareAdjacentGeometryData(secState.lastGeometryData, data);
+                    _recordGeometryFrameDiagnostic(secState.srcId, key, sharedData);
                     if (_geometryDataHasFeatures(data)) {
-                        secState.lastNonEmptyData = data;
-                        secState.addFrame(key, data);
+                        stagedFrames.push({
+                            state: secState,
+                            data: sharedData,
+                            setLastNonEmptyData: true,
+                            setLastGeometryData: true,
+                        });
                     } else if (
                         secState.srcId === 'FAA_ASDI' &&
                         secState.lastNonEmptyData
@@ -2291,9 +2613,13 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
                             `[NMAP] FAA_ASDI returned no tracks for ${key}; ` +
                             'carrying forward the last valid frame'
                         );
-                        secState.addFrame(key, secState.lastNonEmptyData);
+                        stagedFrames.push({state: secState, data: secState.lastNonEmptyData});
                     } else {
-                        secState.addFrame(key, data);
+                        stagedFrames.push({
+                            state: secState,
+                            data: sharedData,
+                            setLastGeometryData: true,
+                        });
                     }
                 } catch (err) {
                     console.warn(
@@ -2307,8 +2633,38 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
                         console.warn(
                             `[NMAP] Carrying forward the last FAA_ASDI frame for ${key}`
                         );
-                        secState.addFrame(key, secState.lastNonEmptyData);
+                        stagedFrames.push({state: secState, data: secState.lastNonEmptyData});
                     }
+                }
+                continue;
+            }
+
+
+            // Point products use an exact frame-centered raw range, just like
+            // initial bulk loop construction. In particular, dense lightning
+            // windows must paginate or the newest-first row limit removes the
+            // oldest (dark-red) strikes from newly appended frames.
+            if (secState.isPointObs && !secState.isProfileObs) {
+                try {
+                    const prefetched = pointPrefetches.get(secState);
+                    const pointResult = prefetched
+                        ? await prefetched
+                        : await _fetchLivePointUpdate(secState, key, newDate)
+                            .then(value => ({value}), error => ({error}));
+                    if (pointResult.error) throw pointResult.error;
+                    const liveFrame = pointResult.value;
+                    if (liveFrame.meta?.possibly_truncated === 'true') {
+                        console.warn(`[NMAP] Live point frame ${secState.srcId}/${key} may be truncated`);
+                    }
+                    stagedFrames.push({
+                        state: secState,
+                        data: liveFrame.data || {obs_json: []},
+                    });
+                } catch (err) {
+                    console.warn(
+                        `[NMAP] Auto-update: failed to reconstruct point frame ${secState.srcId} key=${key}:`,
+                        err.message
+                    );
                 }
                 continue;
             }
@@ -2331,20 +2687,22 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
                         secState.srcId, matchedApiKey,
                         { queryParams: secState.queryParams }
                     );
-                    secState.addFrame(key, { obs_json });
-                } else if (secState.isPointObs) {
-                    const { obs_json } = await DataClient.fetchDbPoints(
-                        secState.srcId, secState.dataKeys, matchedApiKey,
-                        { queryParams: secState.queryParams }
-                    );
-                    secState.addFrame(key, { obs_json });
+                    stagedFrames.push({
+                        state: secState,
+                        data: {obs_json},
+                        apiKey: matchedApiKey,
+                    });
                 } else {
                     const secResult = await fetchAnalysisFieldsAuto(
                         secState.srcId, secState.dataKeys, matchedApiKey,
                         secState.gridInfo, secState.srcEntry,
                         { queryParams: secState.queryParams }
                     );
-                    secState.addFrame(key, secResult.fields);
+                    stagedFrames.push({
+                        state: secState,
+                        data: secResult.fields,
+                        apiKey: matchedApiKey,
+                    });
                 }
             } catch (err) {
                 console.warn(
@@ -2352,6 +2710,48 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
                     err.message
                 );
             }
+        }
+
+        const stagedBytes = stagedFrames.reduce(
+            (total, frame) => total + estimateValueBytes(frame.data),
+            0,
+        );
+        recordDiagnostic('auto-update-staged', {
+            source: source_id, key,
+            bytes: stagedBytes,
+            durationMs: performance.now() - stagingStarted,
+            message: `${stagedFrames.length}/${_sourceUpdateState.length} source frame(s) ready`,
+        });
+
+        // ── 4. Commit the staged frame set in one short, synchronous-looking phase ──
+        // addFrame may upload GPU resources, so no network request is allowed
+        // between the first add and the purge below.
+        const commitStarted = performance.now();
+        const committedFrames = [];
+        try {
+            for (const frame of stagedFrames) {
+                await frame.state.addFrame(key, frame.data);
+                committedFrames.push(frame);
+            }
+        } catch (err) {
+            // Restore the pre-commit map if any layer construction/upload fails.
+            // The old timeline frame has not been purged yet, so rollback only
+            // needs to remove resources created for the staged key.
+            for (const frame of committedFrames.reverse()) {
+                await frame.state.removeFrame?.(key);
+            }
+            recordDiagnostic('auto-update-commit-error', {
+                source: source_id, key,
+                bytes: stagedBytes,
+                durationMs: performance.now() - commitStarted,
+                message: err.message,
+            });
+            throw err;
+        }
+        for (const frame of stagedFrames) {
+            if (frame.apiKey) frame.state.frameApiKeys?.set(key, frame.apiKey);
+            if (frame.setLastNonEmptyData) frame.state.lastNonEmptyData = frame.data;
+            if (frame.setLastGeometryData) frame.state.lastGeometryData = frame.data;
         }
 
         // ── 5. Maintain frame count — drop the oldest frame and free its memory ──
@@ -2362,12 +2762,28 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
 
             // Free the field data held inside every MultiPlotLayer for this key
             for (const state of _sourceUpdateState) {
-                state.removeFrame?.(oldestKey);
+                const apiKey = state.frameApiKeys?.get(oldestKey);
+                await state.removeFrame?.(oldestKey);
+                state.frameApiKeys?.delete(oldestKey);
+                if (apiKey && ![...(state.frameApiKeys?.values() || [])].includes(apiKey)) {
+                    const reclaimed = DataClient.evictSourceFrameCache(state.srcId, apiKey);
+                    recordDiagnostic('cache-frame-evicted', {
+                        source: state.srcId, key: apiKey,
+                        reclaimedBytes: reclaimed.totalBytes,
+                        message: `display frame ${oldestKey} no longer references this source key`,
+                    });
+                }
             }
 
             // Adjust current frame index to account for the removed oldest frame
             if (_currentFrameIdx > 0) _currentFrameIdx--;
         }
+        recordDiagnostic('auto-update-commit', {
+            source: source_id, key,
+            bytes: stagedBytes,
+            durationMs: performance.now() - commitStarted,
+            message: `${stagedFrames.length} source frame(s) committed and displaced frame purged`,
+        });
 
         // ── 6. Insert new frame at the correct chronological position ──
         // Sorted insertion (oldest → newest) guards against out-of-order SSE
@@ -2402,6 +2818,13 @@ async function _applyNewDominantFrame({ source_id, key, valid_time }) {
             `[NMAP] Auto-update complete: loop now ${_frameTimes.length} frames, ` +
             `newest=${key}`
         );
+        console.info('[NMAP memory] Rolling-frame diagnostics', _getFrameDiagnostics());
+        recordDiagnostic('auto-update-complete', {
+            source: source_id, key,
+            bytes: dominantFetchedBytes,
+            durationMs: performance.now() - updateStarted,
+            message: `${_frameTimes.length} retained timeline frame(s)`,
+        });
 
     } finally {
         _autoUpdatePending.delete(key);
@@ -2525,4 +2948,5 @@ window.NmapFrameState = {
             : null;
     },
     setCurrentIndex: (idx) => _setFrame(+idx || 0),
+    getDiagnostics:  () => _getFrameDiagnostics(),
 };

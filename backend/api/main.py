@@ -16,6 +16,7 @@ from .metrics import REQUEST_COUNT, REQUEST_LATENCY, RESPONSE_SIZE
 from .routers import catalog, lightning, timematch, events, gridded, geometries, points_db, profiles_db, zarr_proxy
 from .watcher import start_watching, start_db_polling
 from .services.dataset_status import status_refresh_loop
+from .services.backend_diagnostics import backend_diagnostics
 
 _observer = None
 _TRACKED_QUERY_PARAMS = (
@@ -214,7 +215,20 @@ async def metrics_middleware(request: Request, call_next):
     delaying delivery to the client.
     """
     start = time.perf_counter()
-    response = await call_next(request)
+    diagnostics_enabled = request.url.path not in ("/metrics", "/api/v1/diagnostics/backend")
+    diagnostic_token = backend_diagnostics.start() if diagnostics_enabled else None
+    try:
+        response = await call_next(request)
+    except Exception:
+        if diagnostic_token:
+            backend_diagnostics.finish(
+                diagnostic_token, method=request.method, endpoint=request.url.path,
+                status=500, source_id=_extract_source_id(request),
+                variable_group=_extract_variable_group(request),
+                ttfb_ms=(time.perf_counter() - start) * 1000,
+                response_bytes=0, completed=False,
+            )
+        raise
     duration = time.perf_counter() - start
 
     # Prefer the matched route pattern; fall back to the raw path.
@@ -227,8 +241,12 @@ async def metrics_middleware(request: Request, call_next):
     variable_group = _extract_variable_group(request)
     query_group = _build_query_group(request)
 
+    if diagnostic_token:
+        response.headers["X-WebNMAP-Request-ID"] = diagnostic_token.request_id
+        response.headers["Server-Timing"] = f"app;dur={duration * 1000:.3f}"
+
     # Avoid polluting metrics with Prometheus self-scrapes.
-    if endpoint != "/metrics":
+    if endpoint not in ("/metrics", "/api/v1/diagnostics/backend"):
         REQUEST_COUNT.labels(
             method=method,
             endpoint=endpoint,
@@ -270,12 +288,28 @@ async def metrics_middleware(request: Request, call_next):
                     # so do not report it as the size of a complete response.
                     if completed:
                         size_metric.observe(response_size)
+                    if diagnostic_token:
+                        backend_diagnostics.finish(
+                            diagnostic_token, method=method, endpoint=endpoint,
+                            status=int(status), source_id=source_id,
+                            variable_group=variable_group,
+                            ttfb_ms=duration * 1000, response_bytes=response_size,
+                            completed=completed,
+                        )
 
             response.body_iterator = count_response_bytes()
         else:
             # Defensive fallback for a custom Response without an iterator.
             body = getattr(response, "body", b"")
             size_metric.observe(len(body) if body is not None else 0)
+            if diagnostic_token:
+                backend_diagnostics.finish(
+                    diagnostic_token, method=method, endpoint=endpoint,
+                    status=int(status), source_id=source_id,
+                    variable_group=variable_group,
+                    ttfb_ms=duration * 1000,
+                    response_bytes=len(body) if body is not None else 0,
+                )
 
     # Return the original response; the iterator wrapper records as it streams.
     return response
@@ -303,6 +337,13 @@ print("Serving: ", PUBLIC_DIR)
 def health():
     """Return the API health status."""
     return {"status": "ok"}
+
+
+@app.get("/api/v1/diagnostics/backend", tags=["metrics"])
+def backend_diagnostic_snapshot(since_sequence: int = 0, recent_limit: int | None = None):
+    """Return a bounded application-focused view of recent API behavior."""
+    bounded_limit = None if recent_limit is None else max(1, min(100, recent_limit))
+    return backend_diagnostics.snapshot(max(0, since_sequence), bounded_limit)
 
 
 @app.get("/metrics", tags=["metrics"], summary="Prometheus metrics scrape endpoint")

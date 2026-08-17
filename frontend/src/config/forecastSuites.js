@@ -59,6 +59,10 @@ function _nestedThresholdRules() {
     return {requireNestedLevels: true, preventSameLevelOverlap: true};
 }
 
+function _nestedOrdinalRules() {
+    return {spatialMode: 'nestedOrdinal', requireNestedLevels: true, preventSameLevelOverlap: true};
+}
+
 export const FORECAST_SUITE_DEFINITIONS = {
     'convective-outlook': {
         id: 'convective-outlook',
@@ -68,14 +72,14 @@ export const FORECAST_SUITE_DEFINITIONS = {
             {
                 id: 'categorical', label: 'Categorical Outlook',
                 valueType: 'category', units: null,
-                rules: _exclusiveAreaRules(),
+                rules: _nestedOrdinalRules(),
                 levels: [
-                    {id: 'general-thunder', label: 'General Thunder', value: 'TSTM', color: '#66a366'},
-                    {id: 'marginal', label: 'Marginal', value: 'MRGL', color: '#147d26'},
-                    {id: 'slight', label: 'Slight', value: 'SLGT', color: '#c6c600'},
-                    {id: 'enhanced', label: 'Enhanced', value: 'ENH', color: '#e58a20'},
-                    {id: 'moderate', label: 'Moderate', value: 'MDT', color: '#d52b2b'},
-                    {id: 'high', label: 'High', value: 'HIGH', color: '#d12bd1'},
+                    {id: 'general-thunder', label: 'General Thunder', value: 'TSTM', rank: 0, color: '#66a366'},
+                    {id: 'marginal', label: 'Marginal', value: 'MRGL', rank: 1, color: '#147d26'},
+                    {id: 'slight', label: 'Slight', value: 'SLGT', rank: 2, color: '#c6c600'},
+                    {id: 'enhanced', label: 'Enhanced', value: 'ENH', rank: 3, color: '#e58a20'},
+                    {id: 'moderate', label: 'Moderate', value: 'MDT', rank: 4, color: '#d52b2b'},
+                    {id: 'high', label: 'High', value: 'HIGH', rank: 5, color: '#d12bd1'},
                 ],
             },
             {
@@ -108,9 +112,21 @@ export const FORECAST_SUITE_DEFINITIONS = {
         label: 'Precipitation & Winter',
         products: [
             {
+                id: 'weather-type', label: 'Weather Type',
+                valueType: 'category', units: null,
+                rules: _exclusiveAreaRules(),
+                levels: [
+                    {id: 'fog', label: 'Fog', value: 'FOG', color: '#a8a8a8'},
+                    {id: 'rain', label: 'Rain', value: 'RAIN', color: '#36a852'},
+                    {id: 'snow', label: 'Snow', value: 'SNOW', color: '#63b8ff'},
+                    {id: 'mixed', label: 'Mixed Precipitation', value: 'MIX', color: '#c76de0'},
+                    {id: 'freezing-rain', label: 'Freezing Rain', value: 'FZRA', color: '#f05bb5'},
+                ],
+            },
+            {
                 id: 'precipitation-probability', label: 'Probability of Precipitation',
                 valueType: 'probability', units: '%',
-                rules: _exclusiveAreaRules(),
+                rules: _nestedThresholdRules(),
                 levels: _probabilityLevels([10, 20, 30, 40, 50, 60, 70, 80, 90], PROBABILITY_COLORS),
             },
             {

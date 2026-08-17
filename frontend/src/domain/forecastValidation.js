@@ -203,6 +203,7 @@ function _levelValue(product, definition) {
     }
     const level = [...(definition.levels || []), ...(definition.overlays || [])]
         .find(item => item.id === product.levelId);
+    if (typeof level?.rank === 'number' && Number.isFinite(level.rank)) return level.rank;
     return typeof level?.value === 'number' && Number.isFinite(level.value) ? level.value : null;
 }
 
@@ -285,9 +286,13 @@ export function validateForecastProducts(products) {
 
         for (let i = 0; i < levelContours.length; i++) {
             const inner = levelContours[i];
-            const lowerLevels = levelContours.filter(item => item.value < inner.value);
-            for (const outer of lowerLevels) {
-                if (!_containsPolygon(outer.contour.coords, inner.contour.coords)) {
+            const lowerValues = [...new Set(levelContours
+                .filter(item => item.value < inner.value)
+                .map(item => item.value))];
+            for (const lowerValue of lowerValues) {
+                const possibleOuters = levelContours.filter(item => item.value === lowerValue);
+                if (!possibleOuters.some(outer => _containsPolygon(outer.contour.coords, inner.contour.coords))) {
+                    const outer = possibleOuters[0];
                     issues.push({
                         severity: 'error',
                         code: 'nested-level-violation',

@@ -158,7 +158,6 @@ async def get_geometry_features(
             fc["features"] = [
                 _simplify_feature(f, simplify_deg) for f in fc["features"]
             ]
-        print(fc)
         return JSONResponse(fc)
 
     # ── DB-backed FAA aircraft tracks ────────────────────────────────────

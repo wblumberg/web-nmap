@@ -3,6 +3,8 @@
 
 import COLORMAPS from '../../config/colormaps.js';
 
+const IR_COLORBAR_TICKS_C = [-100, -80, -60, -40, -20, 0, 20, 40];
+
 export default {
 
     'mrms_cref': {
@@ -44,11 +46,12 @@ export default {
         make_layers(data, grid) {
             const field = data.CMI;
 
-            // CMI is uint16 (0–65535). Matplotlib shows clouds at low values and
-            // ground at high values, so map low → white and high → dark (linear).
+            // CMI is dequantized on the GPU to physical TOA reflectance. The
+            // ingest range is [0, 1.5], regardless of whether the backing Zarr
+            // frame is legacy uint16 or current uint8 packed data.
             const N = 257;  // 257 levels → 256 color bins
             const levels = Array.from({ length: N }, (_, i) =>
-                Math.round(i * (65535) / (N - 1))
+                i * 1.5 / (N - 1)
             );
             const colors = Array.from({ length: N - 1 }, (_, i) => {
                 const gray = Math.round((1 - i / (N - 2)) * 255);  // white→black
@@ -56,7 +59,7 @@ export default {
                 return `#${hex}${hex}${hex}`;
             });
             const cmaps = new apgl.ColorMap(levels, colors.slice().reverse());
-            const raster = new apgl.Raster(field, { cmap: cmaps });
+            const raster = new apgl.Raster(field, { cmap: cmaps, release_cpu_after_upload: true });
             return {
                 layers: [new apgl.PlotLayer('goes_conus_vis', raster)],
                 colorbar: []
@@ -73,7 +76,7 @@ export default {
         make_layers(data, grid) {
             const field = data.CMI;
             const cmaps = COLORMAPS['wv_tpc'];
-            const raster = new apgl.Raster(field, { cmap: cmaps });
+            const raster = new apgl.Raster(field, { cmap: cmaps, release_cpu_after_upload: true });
             return {
                 layers: [new apgl.PlotLayer('goes_conus_wv', raster)],
                 colorbar: []
@@ -88,13 +91,16 @@ export default {
         available_for: ['GOES-E_CONUS_C13'],
         data_keys: ['CMI'],
         make_layers(data, grid) {
-            const field = data.CMI.subtract(273.15).renderCPU();  // convert K → °C for more intuitive colormap
+            // Keep K → °C as a shader expression. Raster understands computed
+            // fields and uploads the original CMI texture, avoiding a derived
+            // full-grid CPU array for every frame.
+            const field = data.CMI.subtract(273.15);
             const cmaps = COLORMAPS['satellite_ir_winter'];
-            const raster = new apgl.Raster(field, { cmap: cmaps });
+            const raster = new apgl.Raster(field, { cmap: cmaps, release_cpu_after_upload: true });
             const svg = apgl.makeColorBar(cmaps, {
                 label: 'Brightness Temperature (°C)',
                 orientation: 'horizontal', tick_direction: 'bottom',
-                fontface: 'Trebuchet MS', ticks: [0,50],
+                fontface: 'Trebuchet MS', ticks: IR_COLORBAR_TICKS_C,
             });
             return {
                 layers: [new apgl.PlotLayer('goes_conus_ir', raster)],
@@ -113,11 +119,12 @@ export default {
         make_layers(data, grid) {
             const field = data.CMI;
 
-            // CMI is uint16 (0–65535). Matplotlib shows clouds at low values and
-            // ground at high values, so map low → white and high → dark (linear).
+            // CMI is dequantized on the GPU to physical TOA reflectance. The
+            // ingest range is [0, 1.5], regardless of whether the backing Zarr
+            // frame is legacy uint16 or current uint8 packed data.
             const N = 257;  // 257 levels → 256 color bins
             const levels = Array.from({ length: N }, (_, i) =>
-                Math.round(i * (65535) / (N - 1))
+                i * 1.5 / (N - 1)
             );
             const colors = Array.from({ length: N - 1 }, (_, i) => {
                 const gray = Math.round((1 - i / (N - 2)) * 255);  // white→black
@@ -125,7 +132,7 @@ export default {
                 return `#${hex}${hex}${hex}`;
             });
             const cmaps = new apgl.ColorMap(levels, colors.slice().reverse());
-            const raster = new apgl.Raster(field, { cmap: cmaps });
+            const raster = new apgl.Raster(field, { cmap: cmaps, release_cpu_after_upload: true });
             return {
                 layers: [new apgl.PlotLayer('goes_conus_vis', raster)],
                 colorbar: []
@@ -142,7 +149,7 @@ export default {
         make_layers(data, grid) {
             const field = data.CMI;
             const cmaps = COLORMAPS['wv_tpc'];
-            const raster = new apgl.Raster(field, { cmap: cmaps });
+            const raster = new apgl.Raster(field, { cmap: cmaps, release_cpu_after_upload: true });
             return {
                 layers: [new apgl.PlotLayer('goes_conus_wv', raster)],
                 colorbar: []
@@ -157,13 +164,13 @@ export default {
         available_for: ['GOES-W_CONUS_C13'],
         data_keys: ['CMI'],
         make_layers(data, grid) {
-            const field = data.CMI.subtract(273.15).renderCPU();  // convert K → °C for more intuitive colormap
+            const field = data.CMI.subtract(273.15);
             const cmaps = COLORMAPS['satellite_ir_winter'];
-            const raster = new apgl.Raster(field, { cmap: cmaps });
+            const raster = new apgl.Raster(field, { cmap: cmaps, release_cpu_after_upload: true });
             const svg = apgl.makeColorBar(cmaps, {
                 label: 'Brightness Temperature (°C)',
                 orientation: 'horizontal', tick_direction: 'bottom',
-                fontface: 'Trebuchet MS', ticks: [0,50],
+                fontface: 'Trebuchet MS', ticks: IR_COLORBAR_TICKS_C,
             });
             return {
                 layers: [new apgl.PlotLayer('goes_conus_ir', raster)],
@@ -207,7 +214,10 @@ export default {
             const levels = [-20,-15,-10, -5, 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70];
             const colors = ['#0a0a0a', '#141414', '#1f1f1f', '#2b2b2b', '#373737', '#444444', '#515151', '#5f5f5f', '#6d6d6d', '#7c7c7c', '#8b8b8b', '#9b9b9b', '#ababab', '#bcbcbc', '#cecece', '#e0e0e0', '#f0f0f0', '#fafafa'];
             const cb = new apgl.ColorMap(levels, colors);
-            const raster = new apgl.Raster(field, { cmap: cb });
+            const raster = new apgl.Raster(field, {
+                cmap: cb,
+                release_cpu_after_upload: true,
+            });
 
             const colorbar = apgl.makeColorBar(cb, {
                 label: 'Base Reflectivity dBZ',

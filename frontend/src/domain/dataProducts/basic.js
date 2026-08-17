@@ -3,7 +3,46 @@
 // Covers: temperature, dewpoint, heights, winds
 
 import COLORMAPS from '../../config/colormaps.js';
-import { smooth2D } from './utils.js';
+import { hasFiniteValues, smooth2D } from './utils.js';
+import { recordDiagnostic } from '../../services/mapDiagnostics.js';
+
+function makeOptionalMslpLayers(data, grid, product) {
+    const sourceField = data?.mean_MSLMA;
+    if (!sourceField || typeof sourceField.renderCPU !== 'function') {
+        recordDiagnostic('field-overlay-skipped', {
+            product,
+            field: 'mean_MSLMA',
+            reason: 'missing-data-key',
+            message: 'MSLP contours skipped: mean_MSLMA was not returned',
+        });
+        return [];
+    }
+
+    const raw = sourceField.renderCPU();
+    if (!hasFiniteValues(raw?.data)) {
+        recordDiagnostic('field-overlay-skipped', {
+            product,
+            field: 'mean_MSLMA',
+            reason: 'no-finite-values',
+            valueCount: raw?.data?.length ?? 0,
+            message: 'MSLP contours skipped: mean_MSLMA contains no finite values',
+        });
+        return [];
+    }
+
+    const smoothed = new apgl.RawScalarField(grid, smooth2D(raw.data, grid.ni, grid.nj));
+    const contour = new apgl.Contour(smoothed, {
+        interval: 4, color: '#000000', line_width: 3,
+    });
+    const labels = new apgl.ContourLabels(contour, {
+        text_color: '#ffffff', halo: true, font_size: 16, halo_color: '#000000',
+        font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
+    });
+    return [
+        new apgl.PlotLayer('mslp_cntr', contour),
+        new apgl.PlotLayer('mslp_lbls', labels),
+    ];
+}
 
 export default {
 
@@ -74,18 +113,9 @@ export default {
                 fontface: 'Trebuchet MS',
                 ticks: [-40, -20, 0, 20, 40, 60, 80, 100, 120],
             });
-            const mslmaRaw  = data.mean_MSLMA.renderCPU();
-            const mslmaSmth = new apgl.RawScalarField(grid, smooth2D(mslmaRaw.data, grid.ni, grid.nj));
-            const cntr = new apgl.Contour(
-                mslmaSmth,
-                { interval: 4, color: '#000000', line_width: 3 }
-            );
-            const lbls  = new apgl.ContourLabels(cntr, {
-                text_color: '#ffffff', halo: true, font_size: 16, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
-            });
+            const mslpLayers = makeOptionalMslpLayers(data, grid, 'sfc_temp_fill_mean');
             return {
-                layers: [new apgl.PlotLayer('2m_fill', fill), new apgl.PlotLayer('mslp_cntr', cntr), new apgl.PlotLayer('mslp_lbls', lbls)],
+                layers: [new apgl.PlotLayer('2m_fill', fill), ...mslpLayers],
                 colorbar: [svg],
                 sampler: (lon, lat) => ({ mean_TMP_hght_2: field.sampleField(lon, lat) }),
             };
@@ -107,18 +137,9 @@ export default {
                 fontface: 'Trebuchet MS',
                 ticks: [-40, -30, -20, -10, 0, 10, 20, 30, 40, 50, 60, 70, 80]
             });
-            const mslmaRaw  = data.mean_MSLMA.renderCPU();
-            const mslmaSmth = new apgl.RawScalarField(grid, smooth2D(mslmaRaw.data, grid.ni, grid.nj));
-            const cntr = new apgl.Contour(
-                mslmaSmth,
-                { interval: 4, color: '#000000', line_width: 3 }
-            );
-            const lbls  = new apgl.ContourLabels(cntr, {
-                text_color: '#ffffff', halo: true, font_size: 16, halo_color: '#000000',
-                font_url_template: 'https://autumnsky.us/glyphs/{fontstack}/{range}.pbf',
-            });
+            const mslpLayers = makeOptionalMslpLayers(data, grid, 'sfc_dwpt_fill_mean');
             return {
-                layers: [new apgl.PlotLayer('2m_fill', fill), new apgl.PlotLayer('mslp_cntr', cntr), new apgl.PlotLayer('mslp_lbls', lbls)],
+                layers: [new apgl.PlotLayer('2m_fill', fill), ...mslpLayers],
                 colorbar: [svg],
                 sampler: (lon, lat) => ({ mean_DPT_hght_2: field.sampleField(lon, lat) }),
             };
@@ -390,13 +411,14 @@ export default {
         make_layers(data, grid) {
 
             const pmslRaw  = data.mean_MSLMA.renderCPU();
-            const pmslSmth = new apgl.RawScalarField(grid, smooth2D(pmslRaw.data, grid.ni, grid.nj));
+            const pmslSmth = pmslRaw;
+            //const pmslSmth = new apgl.RawScalarField(grid, smooth2D(pmslRaw.data, grid.ni, grid.nj));
             const dpt = data.mean_DPT_hght_2.subtract(273.15).multiply(9/5).add(32).renderCPU();
 
             const fill  = new apgl.ContourFill(dpt,  { cmap: COLORMAPS['pw_td2m'], opacity: 0.8 });
             const pmsl_cntr  = new apgl.Contour(pmslSmth, {
                 interval: 4, color: '#000000',
-                line_width: lev => (lev % 4 === 0) ? 3 : 1.5,
+                line_width: 2,
             });
 
             const pmsl_lbls  = new apgl.ContourLabels(pmsl_cntr, {
@@ -435,7 +457,7 @@ export default {
             const fill  = new apgl.ContourFill(tmp,  { cmap: COLORMAPS['pw_t2m'], opacity: 0.8 });
             const pmsl_cntr  = new apgl.Contour(pmslSmth, {
                 interval: 4, color: '#000000',
-                line_width: lev => (lev % 4 === 0) ? 3 : 1.5,
+                line_width: 2,
             });
 
             const pmsl_lbls  = new apgl.ContourLabels(pmsl_cntr, {

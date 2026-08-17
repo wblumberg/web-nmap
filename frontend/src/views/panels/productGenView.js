@@ -5,6 +5,7 @@ import {
     getForecastLevel,
 } from '../../config/forecastSuites.js';
 import {validateForecastProducts} from '../../domain/forecastValidation.js';
+import {GEMPAK_SYMBOLS} from '../../config/gempakSymbols.generated.js';
 
 /* productgen.js — Product Generation module for web-nmap
  *
@@ -46,11 +47,33 @@ export const ProductGen = (() => {
     // ── Front source / layer IDs ───────────────────────────────────────
     const SRC_FRONTS     = 'pg-fronts';
     const LYR_FRONT_PIP  = 'pg-front-pip';
+    const LYR_FRONT_PIP_OUTLINE = 'pg-front-pip-outline';
+    const LYR_FRONT_DECOR_LINE = 'pg-front-decoration-line';
+    const LYR_FRONT_DECOR_DOT = 'pg-front-decoration-dot';
+    const LYR_ITCZ_LINE = 'pg-itcz-line';
+    const LYR_ITCZ_LINK = 'pg-itcz-cross-link';
     const LYR_FRONT_LINE = 'pg-front-line';
+    const LYR_FRONT_DASHED_LINE = 'pg-front-dashed-line';
+    const LYR_ISOCHRONE_LABEL = 'pg-isochrone-label';
+    const LYR_VECTOR_LABEL = 'pg-vector-label';
 
     // ── Text / symbol source / layer IDs ──────────────────────────────
     const SRC_SYMBOLS    = 'pg-symbols';
     const LYR_SYMBOL     = 'pg-symbol-text';
+    const LYR_BOXED_TEXT = 'pg-symbol-boxed-text';
+    const LYR_PRESSURE_LABEL = 'pg-symbol-pressure-label';
+    const LYR_HURRICANE_SYMBOL = 'pg-symbol-hurricane';
+    const LYR_GEMPAK_SYMBOL = 'pg-symbol-gempak';
+    const HURRICANE_SYMBOL_ID = 'gempak-spsym26';
+    const GEMPAK_SDF_PIXEL_RATIO = 4;
+    const GEMPAK_SDF_VERSION = 6;
+
+    // ── Measurement / extrapolation source and layers ────────────────
+    const SRC_GUIDES = 'pg-guides';
+    const LYR_GUIDE_LINE = 'pg-guide-line';
+    const LYR_GUIDE_PROJECTION = 'pg-guide-projection';
+    const LYR_GUIDE_POINT = 'pg-guide-point';
+    const LYR_GUIDE_LABEL = 'pg-guide-label';
 
     // ── Draft source / layer IDs ───────────────────────────────────────
     const SRC_DRAFT      = 'pg-draft';
@@ -70,6 +93,24 @@ export const ProductGen = (() => {
     const PIP_COLD_BASE_KM = 28;    // half-base of cold front triangle
     const PIP_COLD_HT_KM   = 48;    // height of cold front triangle
     const PIP_WARM_R_KM    = 38;    // radius of warm front semicircle
+    const PIP_DRY_R_KM     = 30;
+    // NCEP dryline scallops are effectively contiguous: centre spacing equals
+    // the semicircle diameter so adjacent arc endpoints meet.
+    const PIP_DRY_SPACING_KM = PIP_DRY_R_KM * 2;
+    // Squall cycle at baseline zoom:
+    // 66 km dash, 24 km gap, dot, 30 km gap, dot, 24 km gap, repeat.
+    // A small placement unit lets the dash grow without consuming either gap.
+    const SQUALL_PATTERN_UNIT_KM = 3;
+    const SQUALL_DASH_HALF_KM = 33;
+    const STREAMLINE_ARROW_SPACING_KM = 280;
+    const STREAMLINE_ARROW_LENGTH_KM = 32;
+    const VECTOR_ARROW_LENGTH_KM = 44;
+    const RIDGE_ZIG_SPACING_KM = 34;
+    const RIDGE_ZIG_AMPLITUDE_KM = 16;
+    const ITCZ_HALF_WIDTH_KM = 18;
+    const ITCZ_HATCH_SPACING_KM = 70;
+    const ITCZ_HATCH_SKEW_KM = 14;
+    const KM_PER_DEGREE_LAT = 111.2;
     const FRONT_SMOOTHING_PASSES = 3;
 
     // ── Per-front-type defaults ────────────────────────────────────────
@@ -78,22 +119,31 @@ export const ProductGen = (() => {
         'warm':       { color: '#ff3333', pipMode: 'warm'  },
         'stationary': { color: '#884488', pipMode: 'stat'  },
         'occluded':   { color: '#9922cc', pipMode: 'occ'   },
-        'dryline':    { color: '#b05000', pipMode: 'warm'  },  // bumps
+        'dryline':    { color: '#b05000', pipMode: 'dry'   },
+        'squall':     { color: '#ff3333', pipMode: 'squall'},
         'trough':     { color: '#cc8800', pipMode: 'none'  },
+        'streamline': { color: '#55bbff', pipMode: 'streamline', label: 'Streamline' },
+        'ridge':      { color: '#ff9900', pipMode: 'ridge', label: 'Zigzag Ridge' },
+        'isochrone':  { color: '#cc66ff', pipMode: 'isochrone', label: 'Isochrone' },
+        'vector':     { color: '#ffffff', pipMode: 'vector', label: 'Vector' },
+        'itcz':       { color: '#ff3333', pipMode: 'itcz', label: 'ITCZ' },
     };
 
     let _map     = null;
     let _panel   = null;
     let _isOpen  = false;
-    let _getDataLayers = () => [];
-    let _dataLayerOpacity = 1;
-    let _appliedDataLayerOpacity = new WeakMap();
+    let _getCurrentFrameTime = () => null;
+    let _lastFrontGeometryScale = null;
+    const _gempakImagePromises = new Map();
 
     // Drawing tool state
     let _activeTool  = null;   // 'contour'|'front-cold'|…|'H'|'L'|'text'|null
     let _drawing     = false;
     let _draftCoords = [];     // [[lng,lat], …]
     let _mouseCoord  = null;
+    let _draftObservations = [];
+    let _curExtrapInterval = 30;
+    let _curExtrapSteps = 6;
 
     // Products store — each element has: id, kind, name, visible, …kind-specific fields
     let _products = [];
@@ -109,6 +159,7 @@ export const ProductGen = (() => {
     let _editCoords  = [];
     let _dragVertIdx = -1;
     let _overEditVertex = false;
+    let _draggingText = false;
     let _draggedProductId = null;
 
     // Named map-layer event handlers (needed for .off() cleanup)
@@ -132,6 +183,10 @@ export const ProductGen = (() => {
     let _curPatternWidth = 1.5;
     let _curText     = 'Label';
     let _curFontSize = 20;
+    let _curPressure = '';
+    let _curTextBoxed = false;
+    let _curTextBackground = '#101020';
+    let _curGempakSymbolId = GEMPAK_SYMBOLS[0]?.id || '';
     let _curAlertSignificance = 'Warning';
     let _curAlertHazard = 'Severe Thunderstorm';
     let _curAlertNumber = '';
@@ -158,12 +213,18 @@ export const ProductGen = (() => {
     // ------------------------------------------------------------------
     function init(map, options = {}) {
         _map = map;
-        _getDataLayers = typeof options.getDataLayers === 'function'
-            ? options.getDataLayers : () => [];
+        _getCurrentFrameTime = typeof options.getCurrentFrameTime === 'function'
+            ? options.getCurrentFrameTime : () => null;
         _buildDOM();
         _addMapLayers();
         _loadCountyReference();
-        _map.on('idle', _applyDataLayerOpacity);
+        _lastFrontGeometryScale = `${_frontGeometryScale()}:${_itczGeometryScale()}`;
+        _map.on('zoomend', () => {
+            const scale = `${_frontGeometryScale()}:${_itczGeometryScale()}`;
+            if (scale === _lastFrontGeometryScale) return;
+            _lastFrontGeometryScale = scale;
+            _updateFrontLayer();
+        });
         PG.info('ProductGen initialised');
 
         // Keyboard shortcuts for undo/redo, cancel, delete last vertex
@@ -181,6 +242,7 @@ export const ProductGen = (() => {
             if (e.key === 'Backspace' || e.key === 'Delete') {
                 if (_draftCoords.length) {
                     _draftCoords.pop();
+                    if (_draftObservations.length > _draftCoords.length) _draftObservations.pop();
                     _updateDraftLayer();
                 }
             }
@@ -223,19 +285,16 @@ export const ProductGen = (() => {
     <button class="pg-hdr-btn" id="pg-undo" title="Undo (Ctrl+Z)" disabled>&#8617;</button>
     <button class="pg-hdr-btn" id="pg-redo" title="Redo (Ctrl+Y)" disabled>&#8618;</button>
     <button class="pg-hdr-btn" id="pg-validate-btn" title="Validate forecast suite geometry">&#10003;</button>
+    <button class="pg-hdr-btn" id="pg-import-btn" title="Import Product Generation GeoJSON">&#8679;</button>
     <button class="pg-hdr-btn" id="pg-export-btn" title="Export products as GeoJSON">&#8681;</button>
+    <input id="pg-import-file" type="file" accept=".geojson,.json,application/geo+json,application/json" hidden />
     <button id="pg-close" title="Close">&#10005;</button>
   </div>
 </div>
 
-<div class="pg-section-lbl">DISPLAY</div>
-<div class="pg-style-row" id="pg-data-opacity-row">
-  <label class="pg-lbl" for="pg-data-opacity">Data opacity</label>
-  <input type="range" id="pg-data-opacity" min="0" max="100" step="5" value="100" />
-  <output id="pg-data-opacity-value" for="pg-data-opacity">100%</output>
-</div>
-
-<div class="pg-section-lbl">FORECAST SUITE <span class="pg-sect-note">prototype</span></div>
+<div id="pg-controls-scroll">
+<details class="pg-tool-section">
+<summary>FORECAST SUITE <span class="pg-sect-note">prototype</span></summary>
 <div id="pg-forecast-suite-controls">
   <div class="pg-style-row">
     <label class="pg-lbl" for="pg-forecast-suite">Suite</label>
@@ -255,27 +314,27 @@ export const ProductGen = (() => {
     Validity: draw a suite contour to check
   </div>
 </div>
+</details>
 
-<div class="pg-section-lbl">CONTOURS</div>
-<div class="pg-tool-group">
+<details class="pg-tool-section" open>
+<summary>AREAS &amp; ALERTS <span class="pg-sect-note">spatial forecast products</span></summary>
+<div class="pg-tool-group pg-tool-group-areas">
   <button class="pg-tool-btn" id="pg-tool-contour" data-tool="contour" title="Closed Contour — click vertices, dbl-click to close">
     <svg width="40" height="18" viewBox="0 0 40 18" fill="none" stroke="currentColor" stroke-width="1.6">
       <ellipse cx="20" cy="9" rx="16" ry="6"/>
       <ellipse cx="20" cy="9" rx="8" ry="3"/>
     </svg>
-    <span>Closed</span>
+    <span>Contour</span>
   </button>
-</div>
-
-<div class="pg-section-lbl">COUNTY ALERTS</div>
-<div class="pg-tool-group">
   <button class="pg-tool-btn" id="pg-tool-county-alert" data-tool="county-alert" title="County Alert — click counties to add or remove them">
     <span style="font-size:16px;line-height:1.1">▦</span>
     <span>County Alert</span>
   </button>
 </div>
+</details>
 
-<div class="pg-section-lbl">FRONTS <span class="pg-sect-note">pips on right of draw direction</span></div>
+<details class="pg-tool-section" open>
+<summary>FRONTS &amp; LINES <span class="pg-sect-note">symbols follow draw direction</span></summary>
 <div class="pg-tool-group pg-tool-group-fronts">
   <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-cold" data-tool="front-cold" title="Cold Front">
     <svg width="44" height="18" viewBox="0 0 44 18">
@@ -296,10 +355,8 @@ export const ProductGen = (() => {
   <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-stationary" data-tool="front-stationary" title="Stationary Front — cold triangles right, warm bumps left">
     <svg width="44" height="18" viewBox="0 0 44 18">
       <line x1="0" y1="9" x2="44" y2="9" stroke="#884488" stroke-width="2"/>
-      <polygon points="8,9 17,9 12.5,2" fill="#3388ff"/>
-      <polygon points="25,9 34,9 29.5,2" fill="#3388ff"/>
-      <path d="M 3,9 A 8,8 0 0 0 19,9" fill="#ff3333"/>
-      <path d="M 23,9 A 8,8 0 0 0 39,9" fill="#ff3333"/>
+      <polygon points="5,9 17,9 11,2" fill="#3388ff"/>
+      <path d="M 25,9 Q 32,17 39,9 Z" fill="#ff3333"/>
     </svg>
     <span style="color:#884488">Stat</span>
   </button>
@@ -314,8 +371,8 @@ export const ProductGen = (() => {
   <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-dryline" data-tool="front-dryline" title="Dry Line">
     <svg width="44" height="18" viewBox="0 0 44 18">
       <line x1="0" y1="9" x2="44" y2="9" stroke="#b05000" stroke-width="2"/>
-      <path d="M 3,9 A 8,8 0 0 1 19,9" fill="#b05000"/>
-      <path d="M 23,9 A 8,8 0 0 1 39,9" fill="#b05000"/>
+      <path d="M 3,9 A 8,8 0 0 1 19,9" fill="none" stroke="#b05000" stroke-width="2"/>
+      <path d="M 23,9 A 8,8 0 0 1 39,9" fill="none" stroke="#b05000" stroke-width="2"/>
     </svg>
     <span style="color:#b05000">Dry</span>
   </button>
@@ -325,9 +382,72 @@ export const ProductGen = (() => {
     </svg>
     <span style="color:#cc8800">Trgh</span>
   </button>
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-squall" data-tool="front-squall" title="Squall Line — repeating short line, dot, dot pattern">
+    <svg width="44" height="18" viewBox="0 0 44 18">
+      <line x1="1" y1="9" x2="14" y2="9" stroke="#ff3333" stroke-width="2"/>
+      <circle cx="22" cy="9" r="1.7" fill="#ff3333"/><circle cx="29" cy="9" r="1.7" fill="#ff3333"/>
+      <line x1="37" y1="9" x2="44" y2="9" stroke="#ff3333" stroke-width="2"/>
+    </svg>
+    <span style="color:#ff3333">Squall</span>
+  </button>
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-streamline" data-tool="front-streamline" title="Streamline — arrows point in drawing direction">
+    <svg width="44" height="18" viewBox="0 0 44 18" fill="none" stroke="#55bbff" stroke-width="2">
+      <path d="M1 12 C12 2 28 16 43 6"/>
+      <path d="M30 9 L38 8 L35 15"/>
+    </svg>
+    <span style="color:#55bbff">Stream</span>
+  </button>
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-ridge" data-tool="front-ridge" title="Zigzag Ridge Line">
+    <svg width="44" height="18" viewBox="0 0 44 18" fill="none" stroke="#ff9900" stroke-width="2">
+      <path d="M1 13 L7 5 L13 13 L19 5 L25 13 L31 5 L37 13 L43 5"/>
+    </svg>
+    <span style="color:#ff9900">Ridge</span>
+  </button>
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-isochrone" data-tool="front-isochrone" title="Isochrone — line connecting equal forecast arrival times">
+    <svg width="44" height="18" viewBox="0 0 44 18" fill="none" stroke="#cc66ff" stroke-width="2">
+      <path d="M1 11 C11 3 29 3 43 11" stroke-dasharray="5 3"/>
+      <text x="17" y="17" fill="#cc66ff" stroke="none" font-size="7">T+</text>
+    </svg>
+    <span style="color:#cc66ff">Isochrone</span>
+  </button>
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-vector" data-tool="front-vector" title="Curved vector — place control points and double-click the arrow tip">
+    <svg width="44" height="18" viewBox="0 0 44 18" fill="none" stroke="#dddddd" stroke-width="2">
+      <path d="M2 14 L39 4 M39 4 L31 3 M39 4 L34 11"/>
+    </svg>
+    <span>Vector</span>
+  </button>
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-front-itcz" data-tool="front-itcz" title="Intertropical Convergence Zone boundary">
+    <svg width="44" height="18" viewBox="0 0 44 18" fill="none" stroke="#ff3333" stroke-width="1.6">
+      <path d="M1 7 C12 1 31 13 43 7"/>
+      <path d="M1 11 C12 5 31 17 43 11"/>
+      <path d="M5 6 L10 11 M13 5 L18 12 M22 7 L27 14 M31 8 L36 13"/>
+    </svg>
+    <span style="color:#ff3333">ITCZ</span>
+  </button>
 </div>
+</details>
 
-<div class="pg-section-lbl">SYMBOLS &amp; TEXT</div>
+<details class="pg-tool-section">
+<summary>MEASURE &amp; EXTRAPOLATE</summary>
+<div class="pg-tool-group">
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-distance" data-tool="distance" title="Measure geodesic distance and bearing between two points">
+    <svg width="44" height="18" viewBox="0 0 44 18" fill="none" stroke="#66e0ff" stroke-width="2">
+      <path d="M4 14 L40 4"/><circle cx="4" cy="14" r="2" fill="#66e0ff"/><circle cx="40" cy="4" r="2" fill="#66e0ff"/>
+    </svg>
+    <span style="color:#66e0ff">Distance</span>
+  </button>
+  <button class="pg-tool-btn pg-front-btn" id="pg-tool-extrapolate" data-tool="extrapolate" title="Track two positions on different dominant frames and extrapolate their motion">
+    <svg width="44" height="18" viewBox="0 0 44 18" fill="none" stroke="#66ff99" stroke-width="2">
+      <circle cx="5" cy="14" r="2" fill="#66ff99"/><circle cx="17" cy="10" r="2" fill="#66ff99"/>
+      <path d="M5 14 L17 10 L39 3" stroke-dasharray="4 3"/><path d="M39 3 L32 2 M39 3 L35 9"/>
+    </svg>
+    <span style="color:#66ff99">Extrap</span>
+  </button>
+</div>
+</details>
+
+<details class="pg-tool-section">
+<summary>SYMBOLS &amp; TEXT</summary>
 <div class="pg-tool-group">
   <button class="pg-tool-btn pg-sym-btn" id="pg-tool-H" data-tool="H" title="High Pressure Center — single click to place">
     <span style="font-size:17px;font-weight:bold;color:#4488ff;line-height:1.1">H</span>
@@ -341,8 +461,20 @@ export const ProductGen = (() => {
     <span style="font-size:13px;font-weight:bold;line-height:1.1">ABC</span>
     <span>Text</span>
   </button>
+  <button class="pg-tool-btn pg-sym-btn" id="pg-tool-hurricane" data-tool="hurricane" title="Hurricane / tropical cyclone center — single click to place">
+    <span style="font-size:19px;line-height:1.1;color:#ff55aa">🌀</span>
+    <span>Hurricane</span>
+  </button>
 </div>
+<details class="pg-symbol-library">
+  <summary>NAWIPS symbol library</summary>
+  <div class="pg-symbol-picker">
+    <div id="pg-gempak-palette"></div>
+  </div>
+</details>
+</details>
 
+<section class="pg-style-section-static">
 <div class="pg-section-lbl">STYLE</div>
 <div id="pg-style-section">
   <div class="pg-style-row" id="pg-row-ctype">
@@ -382,6 +514,28 @@ export const ProductGen = (() => {
     <label class="pg-lbl">Text</label>
     <input type="text" id="pg-text-content" value="Label" placeholder="Annotation\u2026" />
   </div>
+  <div class="pg-style-row" id="pg-row-pressure">
+    <label class="pg-lbl">Pressure</label>
+    <input type="number" id="pg-pressure-value" min="850" max="1100" step="1" placeholder="Optional" title="Optional center pressure in hPa (mb)" />
+    <span class="pg-unit">hPa</span>
+  </div>
+  <div class="pg-style-row" id="pg-row-text-box">
+    <label class="pg-lbl" for="pg-text-boxed">Text Box</label>
+    <input type="checkbox" id="pg-text-boxed" />
+  </div>
+  <div class="pg-style-row" id="pg-row-text-background">
+    <label class="pg-lbl" for="pg-text-background">Background</label>
+    <input type="color" id="pg-text-background" value="#101020" />
+  </div>
+  <div class="pg-style-row" id="pg-row-extrap-interval">
+    <label class="pg-lbl">Interval</label>
+    <input type="number" id="pg-extrap-interval" min="1" max="360" step="1" value="30" />
+    <span class="pg-unit">min</span>
+  </div>
+  <div class="pg-style-row" id="pg-row-extrap-steps">
+    <label class="pg-lbl">Steps</label>
+    <input type="number" id="pg-extrap-steps" min="1" max="24" step="1" value="6" />
+  </div>
   <div class="pg-style-row" id="pg-row-alert-significance">
     <label class="pg-lbl">Alert</label>
     <select id="pg-alert-significance">
@@ -414,6 +568,8 @@ export const ProductGen = (() => {
     <input type="number" id="pg-width" min="1" max="40" value="2" />
   </div>
 </div>
+</section>
+</div>
 
 <div id="pg-products-hdr">
   <span>PRODUCTS <span class="pg-stack-note">drag to reorder</span></span>
@@ -427,6 +583,7 @@ export const ProductGen = (() => {
         document.body.appendChild(_panel);
 
         _initializeForecastSuiteControls();
+        _initializeGempakSymbolPicker();
 
         // Close
         _panel.querySelector('#pg-close').addEventListener('click', close);
@@ -437,12 +594,6 @@ export const ProductGen = (() => {
                 const tool = btn.dataset.tool;
                 _enterTool(_activeTool === tool ? null : tool);
             });
-        });
-
-        _panel.querySelector('#pg-data-opacity').addEventListener('input', (event) => {
-            _dataLayerOpacity = Number(event.target.value) / 100;
-            _panel.querySelector('#pg-data-opacity-value').value = `${event.target.value}%`;
-            _applyDataLayerOpacity();
         });
 
         // Color picker for contour, front, and text
@@ -536,6 +687,44 @@ export const ProductGen = (() => {
             if (_editProduct && _editProduct.kind === 'text') {
                 _editProduct.text = _curText;
                 _updateSymbolLayer();
+            } else if (_editProduct?.kind === 'front' &&
+                (_editProduct.frontType === 'isochrone' || _editProduct.frontType === 'vector')) {
+                _editProduct.label = _curText;
+                _updateFrontLayer();
+            }
+        });
+
+        _panel.querySelector('#pg-text-boxed').addEventListener('change', (e) => {
+            _curTextBoxed = e.target.checked;
+            if (_editProduct?.kind === 'text' && _editProduct.subKind === 'text') {
+                _editProduct.boxed = _curTextBoxed;
+                _updateSymbolLayer();
+            }
+            _updateStylePanel();
+        });
+        _panel.querySelector('#pg-text-background').addEventListener('input', (e) => {
+            _curTextBackground = e.target.value;
+            if (_editProduct?.kind === 'text' && _editProduct.subKind === 'text') {
+                _editProduct.backgroundColor = _curTextBackground;
+                _updateSymbolLayer();
+            }
+        });
+        _panel.querySelector('#pg-extrap-interval').addEventListener('input', (e) => {
+            _curExtrapInterval = Math.max(1, Math.min(360, Math.round(+e.target.value || 30)));
+            e.target.value = _curExtrapInterval;
+        });
+        _panel.querySelector('#pg-extrap-steps').addEventListener('input', (e) => {
+            _curExtrapSteps = Math.max(1, Math.min(24, Math.round(+e.target.value || 6)));
+            e.target.value = _curExtrapSteps;
+        });
+
+        // Optional pressure value for high/low centers.
+        _panel.querySelector('#pg-pressure-value').addEventListener('input', (e) => {
+            _curPressure = _normalizedPressure(e.target.value);
+            if (_editProduct?.kind === 'text' && (_editProduct.subKind === 'H' || _editProduct.subKind === 'L')) {
+                _editProduct.pressure = _curPressure;
+                _updateSymbolLayer();
+                _renderProductList();
             }
         });
 
@@ -551,6 +740,18 @@ export const ProductGen = (() => {
 
         // Export to GeoJSON
         _panel.querySelector('#pg-export-btn').addEventListener('click', _exportGeoJSON);
+        const importFile = _panel.querySelector('#pg-import-file');
+        _panel.querySelector('#pg-import-btn').addEventListener('click', () => importFile.click());
+        importFile.addEventListener('change', async () => {
+            const file = importFile.files?.[0];
+            importFile.value = '';
+            if (!file) return;
+            try {
+                await _importGeoJSON(file);
+            } catch (error) {
+                window.alert(`Unable to import products: ${error.message}`);
+            }
+        });
 
         // Clear all
         _panel.querySelector('#pg-clear-all').addEventListener('click', () => {
@@ -563,16 +764,6 @@ export const ProductGen = (() => {
         });
 
         _updateStylePanel();
-    }
-
-    function _applyDataLayerOpacity() {
-        const layers = _getDataLayers() || [];
-        layers.forEach(layer => {
-            if (!layer || typeof layer.setOpacity !== 'function') return;
-            if (_appliedDataLayerOpacity.get(layer) === _dataLayerOpacity) return;
-            layer.setOpacity(_dataLayerOpacity);
-            _appliedDataLayerOpacity.set(layer, _dataLayerOpacity);
-        });
     }
 
     function _initializeForecastSuiteControls() {
@@ -693,9 +884,15 @@ export const ProductGen = (() => {
         const isFront   = _activeTool && _activeTool.startsWith('front-');
         const isContour = _activeTool === 'contour';
         const isText    = _activeTool === 'text';
-        const isHL      = _activeTool === 'H' || _activeTool === 'L';
-        const isCountyAlert = _activeTool === 'county-alert';
         const noTool    = !_activeTool;
+        const isPressureTool = _activeTool === 'H' || _activeTool === 'L';
+        const editingPressureCenter = noTool && _editProduct?.kind === 'text' &&
+            (_editProduct.subKind === 'H' || _editProduct.subKind === 'L');
+        const editingFreeText = noTool && _editProduct?.kind === 'text' && _editProduct.subKind === 'text';
+        const isGempak  = _activeTool === 'gempak-symbol';
+        const isHL      = isPressureTool || editingPressureCenter || _activeTool === 'hurricane';
+        const isCountyAlert = _activeTool === 'county-alert';
+        const isExtrapolate = _activeTool === 'extrapolate';
 
         // "Type" row only for contour tool
         const showContourStyle = isContour || (noTool && _editProduct?.kind === 'contour');
@@ -708,12 +905,165 @@ export const ProductGen = (() => {
         _panel.querySelector('#pg-row-alert-hazard').style.display = isCountyAlert ? '' : 'none';
         _panel.querySelector('#pg-row-alert-number').style.display = isCountyAlert ? '' : 'none';
         // "Text" row only for text tool (or editing a text product)
-        _panel.querySelector('#pg-row-text').style.display  = (isText || (noTool && _editProduct?.kind === 'text')) ? '' : 'none';
+        const isLabeledLine = _activeTool === 'front-isochrone' || _activeTool === 'front-vector' ||
+            (noTool && _editProduct?.kind === 'front' &&
+                (_editProduct.frontType === 'isochrone' || _editProduct.frontType === 'vector'));
+        _panel.querySelector('#pg-row-text').style.display = (isText || editingFreeText || isLabeledLine) ? '' : 'none';
+        _panel.querySelector('#pg-row-text-box').style.display = (isText || editingFreeText) ? '' : 'none';
+        _panel.querySelector('#pg-row-text-background').style.display =
+            (isText || editingFreeText) && _curTextBoxed ? '' : 'none';
+        _panel.querySelector('#pg-row-extrap-interval').style.display = isExtrapolate ? '' : 'none';
+        _panel.querySelector('#pg-row-extrap-steps').style.display = isExtrapolate ? '' : 'none';
+        _panel.querySelector('#pg-row-pressure').style.display = (isPressureTool || editingPressureCenter) ? '' : 'none';
         // "Color+Width" row always, but hidden for H/L (auto-coloured)
         _panel.querySelector('#pg-row-color').style.display = (isHL || isCountyAlert) ? 'none' : '';
         // Label for width vs. size
         const sizeLabel = _panel.querySelector('#pg-lbl-size');
-        if (sizeLabel) sizeLabel.textContent = isText ? 'Size' : 'Width';
+        if (sizeLabel) sizeLabel.textContent = (isText || isGempak || (noTool && _editProduct?.kind === 'text')) ? 'Size' : 'Width';
+    }
+
+    function _gempakSymbol(symbolId) {
+        return GEMPAK_SYMBOLS.find(symbol => symbol.id === symbolId) || null;
+    }
+
+    function _decodeGempakMask(symbol, scale = 1) {
+        const bytes = Uint8Array.from(atob(symbol.bits), char => char.charCodeAt(0));
+        const width = symbol.width * scale;
+        const height = symbol.height * scale;
+        const pixels = new Uint8ClampedArray(width * height * 4);
+        const rowBytes = Math.ceil(symbol.width / 8);
+        for (let y = 0; y < symbol.height; y++) {
+            for (let x = 0; x < symbol.width; x++) {
+                if (!(bytes[y * rowBytes + Math.floor(x / 8)] & (1 << (x % 8)))) continue;
+                for (let sy = 0; sy < scale; sy++) for (let sx = 0; sx < scale; sx++) {
+                    const offset = ((y * scale + sy) * width + x * scale + sx) * 4;
+                    pixels[offset] = pixels[offset + 1] = pixels[offset + 2] = pixels[offset + 3] = 255;
+                }
+            }
+        }
+        return {width, height, data: pixels};
+    }
+
+    // Convert the one-bit legacy mask to a signed-distance field. MapLibre can
+    // then interpolate the edge smoothly at any icon-size and apply color/halo.
+    function _decodeGempakSdf(symbol, scale = 4) {
+        const source = _decodeGempakMask(symbol, 1);
+        const inside = (x, y) => x >= 0 && y >= 0 && x < symbol.width && y < symbol.height &&
+            source.data[(y * symbol.width + x) * 4 + 3] > 0;
+        const boundaries = [];
+        for (let y = 0; y < symbol.height; y++) for (let x = 0; x < symbol.width; x++) {
+            const value = inside(x, y);
+            if (inside(x - 1, y) !== value || inside(x + 1, y) !== value ||
+                inside(x, y - 1) !== value || inside(x, y + 1) !== value) boundaries.push([x + 0.5, y + 0.5]);
+        }
+        const width = symbol.width * scale;
+        const height = symbol.height * scale;
+        const pixels = new Uint8ClampedArray(width * height * 4);
+        for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+            const sx = (x + 0.5) / scale;
+            const sy = (y + 0.5) / scale;
+            let distance2 = 64;
+            boundaries.forEach(([bx, by]) => { distance2 = Math.min(distance2, (sx - bx) ** 2 + (sy - by) ** 2); });
+            const signedDistance = Math.sqrt(distance2) * (inside(Math.floor(sx), Math.floor(sy)) ? 1 : -1);
+            const alpha = Math.max(0, Math.min(255, Math.round(128 + signedDistance * 32)));
+            const offset = (y * width + x) * 4;
+            pixels[offset] = pixels[offset + 1] = pixels[offset + 2] = 255;
+            pixels[offset + 3] = alpha;
+        }
+        return {width, height, data: pixels};
+    }
+
+    function _drawGempakPreview(canvas, symbol) {
+        const ctx = canvas.getContext('2d');
+        const image = _decodeGempakMask(symbol, 3);
+        const scratch = document.createElement('canvas');
+        scratch.width = image.width; scratch.height = image.height;
+        scratch.getContext('2d').putImageData(new ImageData(image.data, image.width, image.height), 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.filter = 'blur(0.55px)';
+        ctx.drawImage(scratch, 3, 3, canvas.width - 6, canvas.height - 6);
+        ctx.filter = 'none';
+    }
+
+    function _gempakImageId(symbolId) {
+        return `${symbolId}-sdf-v${GEMPAK_SDF_VERSION}`;
+    }
+
+    function _ensureGempakImage(symbolId) {
+        const symbol = _gempakSymbol(symbolId);
+        if (!_map || !symbol) return '';
+        const imageId = _gempakImageId(symbol.id);
+        if (_map.hasImage(imageId) || _gempakImagePromises.has(imageId)) return imageId;
+
+        const sdfUrl = `/assets/gempak-symbols/sdf/${symbol.code}.png?v=${GEMPAK_SDF_VERSION}`;
+        const load = _map.loadImage(sdfUrl)
+            .then(result => result.data || result)
+            .catch(error => {
+                console.warn(`[PG] SDF symbol fallback for ${symbol.code}:`, error);
+                return _decodeGempakSdf(symbol, GEMPAK_SDF_PIXEL_RATIO);
+            })
+            .then(image => {
+                if (_map && !_map.hasImage(imageId)) {
+                    _map.addImage(imageId, image, {
+                        pixelRatio: GEMPAK_SDF_PIXEL_RATIO,
+                        sdf: true,
+                    });
+                }
+            })
+            .finally(() => {
+                _gempakImagePromises.delete(imageId);
+                _updateSymbolLayer();
+            });
+        _gempakImagePromises.set(imageId, load);
+        return imageId;
+    }
+
+    function _initializeGempakSymbolPicker() {
+        const palette = _panel.querySelector('#pg-gempak-palette');
+        const groups = new Map();
+        GEMPAK_SYMBOLS.forEach(symbol => {
+            if (!groups.has(symbol.group)) groups.set(symbol.group, []);
+            groups.get(symbol.group).push(symbol);
+        });
+        groups.forEach((symbols, label) => {
+            const section = document.createElement('details');
+            section.className = 'pg-symbol-family';
+            if (label === 'Special Symbols' || label === 'Combination Weather') section.open = true;
+            const summary = document.createElement('summary');
+            summary.textContent = `${label} (${symbols.length})`;
+            const grid = document.createElement('div');
+            grid.className = 'pg-symbol-grid';
+            symbols.forEach(symbol => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'pg-symbol-tile';
+                button.dataset.symbolId = symbol.id;
+                button.title = `${symbol.label} · ${symbol.code}`;
+                button.setAttribute('aria-label', `Place ${symbol.label}`);
+                const preview = document.createElement('img');
+                preview.src = symbol.svg;
+                preview.alt = '';
+                preview.loading = 'lazy';
+                preview.decoding = 'async';
+                preview.addEventListener('error', () => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = canvas.height = 38;
+                    _drawGempakPreview(canvas, symbol);
+                    preview.replaceWith(canvas);
+                }, {once: true});
+                button.appendChild(preview);
+                button.addEventListener('click', () => {
+                    _curGempakSymbolId = symbol.id;
+                    _panel.querySelectorAll('.pg-symbol-tile.active').forEach(tile => tile.classList.remove('active'));
+                    button.classList.add('active');
+                    _enterTool('gempak-symbol');
+                });
+                grid.appendChild(button);
+            });
+            section.append(summary, grid);
+            palette.appendChild(section);
+        });
     }
 
     // ------------------------------------------------------------------
@@ -770,6 +1120,9 @@ export const ProductGen = (() => {
             _map.doubleClickZoom.enable();
             _map.getCanvas().style.cursor = '';
             _panel.querySelector(`#pg-tool-${_activeTool}`)?.classList.remove('active');
+            if (_activeTool === 'gempak-symbol') {
+                _panel.querySelectorAll('.pg-symbol-tile.active').forEach(tile => tile.classList.remove('active'));
+            }
         }
 
         if (toolName !== 'county-alert') {
@@ -787,6 +1140,9 @@ export const ProductGen = (() => {
             _map.doubleClickZoom.disable();
             _map.getCanvas().style.cursor = 'crosshair';
             _panel.querySelector(`#pg-tool-${toolName}`)?.classList.add('active');
+            if (toolName === 'gempak-symbol') {
+                _panel.querySelector(`.pg-symbol-tile[data-symbol-id="${_curGempakSymbolId}"]`)?.classList.add('active');
+            }
 
             // Set sensible style defaults per tool
             if (toolName === 'front-cold')       { _curColor = '#3388ff'; _curWidth = 2.5; }
@@ -795,8 +1151,29 @@ export const ProductGen = (() => {
             else if (toolName === 'front-occluded')   { _curColor = '#9922cc'; _curWidth = 2.5; }
             else if (toolName === 'front-dryline')    { _curColor = '#b05000'; _curWidth = 2.5; }
             else if (toolName === 'front-trough')     { _curColor = '#cc8800'; _curWidth = 2.5; }
+            else if (toolName === 'front-squall')     { _curColor = '#ff3333'; _curWidth = 2.5; }
+            else if (toolName === 'front-streamline') { _curColor = '#55bbff'; _curWidth = 2.5; }
+            else if (toolName === 'front-ridge')      { _curColor = '#ff9900'; _curWidth = 2.5; }
+            else if (toolName === 'front-isochrone')  {
+                _curColor = '#cc66ff'; _curWidth = 2.5;
+                if (!_curText.trim()) _curText = 'T+1h';
+                _panel.querySelector('#pg-text-content').value = _curText;
+            }
+            else if (toolName === 'front-vector')     {
+                _curColor = '#ffffff'; _curWidth = 2.5; _curText = '';
+                _panel.querySelector('#pg-text-content').value = '';
+            }
+            else if (toolName === 'front-itcz')       { _curColor = '#ff3333'; _curWidth = 2.5; }
+            else if (toolName === 'distance')         { _curColor = '#66e0ff'; _curWidth = 2; }
+            else if (toolName === 'extrapolate') {
+                _curColor = '#66ff99'; _curWidth = 2;
+                _panel.querySelector('#pg-extrap-interval').value = _curExtrapInterval;
+                _panel.querySelector('#pg-extrap-steps').value = _curExtrapSteps;
+            }
             else if (toolName === 'H') { _curColor = '#4488ff'; _curWidth = 20; }
             else if (toolName === 'L') { _curColor = '#ff4444'; _curWidth = 20; }
+            else if (toolName === 'hurricane') { _curColor = '#ff55aa'; _curWidth = 28; }
+            else if (toolName === 'gempak-symbol') { _curColor = '#ffffff'; _curWidth = 28; }
             else if (toolName === 'text') { _curWidth = 18; }
             else if (toolName === 'county-alert') {
                 _curColor = _countyAlertColor(_curAlertSignificance);
@@ -816,7 +1193,13 @@ export const ProductGen = (() => {
 
             const isFront = toolName.startsWith('front-');
             // Set the hint text for the active tool to help the user understand how to draw it
-            if (toolName === 'contour' || isFront) {
+            if (toolName === 'distance') {
+                _setHint('Click the start and end points to measure distance and bearing');
+            } else if (toolName === 'extrapolate') {
+                _setHint('Click the tracked feature on the current frame\nStep forward one or more dominant frames\nClick its new position');
+            } else if (toolName === 'front-vector') {
+                _setHint('Click to shape the curved vector\nDbl-click to place the arrow tip\nBackspace to undo  Esc to cancel');
+            } else if (toolName === 'contour' || isFront) {
                 _setHint('Click to place vertices\nDbl-click to finish\nBackspace to undo\xa0\xa0Esc to cancel');
             } else if (toolName === 'county-alert') {
                 _setHint('Left-click counties to add or toggle them\nRight-click removes a county\nClick the tool again when finished');
@@ -840,7 +1223,29 @@ export const ProductGen = (() => {
         if (_editProduct) return; // ignore clicks while editing a product
 
         // Handle drawing tools: contour and fronts are multi-vertex
-        if (tool === 'contour' || tool.startsWith('front-')) {
+        if (tool === 'distance') {
+            _drawing = true;
+            _draftCoords.push([e.lngLat.lng, e.lngLat.lat]);
+            _updateDraftLayer();
+            if (_draftCoords.length === 2) _finishDistance();
+        } else if (tool === 'extrapolate') {
+            const frameTime = _getCurrentFrameTime();
+            if (!(frameTime instanceof Date) || !Number.isFinite(frameTime.getTime())) {
+                _setHint('Load a dominant timeline before recording extrapolation positions');
+                return;
+            }
+            if (_draftObservations.length && frameTime.getTime() === _draftObservations[0].timeMs) {
+                _setHint('Step to a different dominant frame, then click the tracked feature again');
+                return;
+            }
+            _drawing = true;
+            const coord = [e.lngLat.lng, e.lngLat.lat];
+            _draftCoords.push(coord);
+            _draftObservations.push({coord, timeMs: frameTime.getTime()});
+            _updateDraftLayer();
+            if (_draftObservations.length === 2) _finishExtrapolation();
+            else _setHint(`First position: ${_formatUtc(frameTime)}\nStep frames, then click the new position`);
+        } else if (tool === 'contour' || tool.startsWith('front-')) {
             _drawing = true;
             _draftCoords.push([e.lngLat.lng, e.lngLat.lat]);
             _updateDraftLayer();
@@ -848,7 +1253,15 @@ export const ProductGen = (() => {
             _toggleCountyAtPoint(e.lngLat);
         // Handle single click of the  H/L/text
         } else if (tool === 'H' || tool === 'L') {
-            _placeText(e.lngLat.lng, e.lngLat.lat, tool, tool, tool === 'H' ? '#4488ff' : '#ff4444', 22);
+            _placeText(
+                e.lngLat.lng, e.lngLat.lat, tool, tool,
+                tool === 'H' ? '#4488ff' : '#ff4444', 22, _curPressure
+            );
+        } else if (tool === 'hurricane') {
+            _placeText(e.lngLat.lng, e.lngLat.lat, 'hurricane', '🌀', '#ff55aa', 28);
+        } else if (tool === 'gempak-symbol') {
+            const symbol = _gempakSymbol(_curGempakSymbolId);
+            if (symbol) _placeText(e.lngLat.lng, e.lngLat.lat, 'gempak', '', _curColor, _curWidth || 28, '', symbol.id);
         } else if (tool === 'text') {
             const txt = _panel.querySelector('#pg-text-content').value.trim() || 'Label';
             _placeText(e.lngLat.lng, e.lngLat.lat, 'text', txt, _curColor, _curWidth || 18);
@@ -961,6 +1374,7 @@ export const ProductGen = (() => {
         _drawing     = false;
         _draftCoords = [];
         _mouseCoord  = null;
+        _draftObservations = [];
         _updateDraftLayer();
         if (_activeTool) {
             const isFront = _activeTool.startsWith('front-');
@@ -1034,8 +1448,13 @@ export const ProductGen = (() => {
             color:     cfg.color || _curColor,
             width:     _curWidth,
             pipSide:   'right',
+            label:     frontType === 'isochrone'
+                ? (_panel.querySelector('#pg-text-content').value.trim() || 'T+1h')
+                : frontType === 'vector' ? _panel.querySelector('#pg-text-content').value.trim() : '',
         };
-        p.name = `${frontType.charAt(0).toUpperCase() + frontType.slice(1)} Front #${p.id}`;
+        p.name = frontType === 'isochrone'
+            ? `${cfg.label} — ${p.label} #${p.id}`
+            : `${cfg.label || `${frontType.charAt(0).toUpperCase() + frontType.slice(1)} Front`} #${p.id}`;
         _products.unshift(p);
         PG.info(`Front created → id=${p.id} "${p.name}" type=${frontType} vertices=${p.coords.length} | total: ${_products.length}`);
         _drawing = false; _draftCoords = []; _mouseCoord = null;
@@ -1045,19 +1464,122 @@ export const ProductGen = (() => {
         _setHint('Click to place vertices\nDbl-click to finish\nBackspace to undo\xa0\xa0Esc to cancel');
     }
 
+    const EARTH_RADIUS_KM = 6371.0088;
+    const KM_PER_NAUTICAL_MILE = 1.852;
+    const _radians = degrees => degrees * Math.PI / 180;
+    const _degrees = radians => radians * 180 / Math.PI;
+
+    function _geodesicMotion(from, to) {
+        const lat1 = _radians(from[1]);
+        const lat2 = _radians(to[1]);
+        const deltaLat = lat2 - lat1;
+        const deltaLng = _radians(to[0] - from[0]);
+        const a = Math.sin(deltaLat / 2) ** 2 +
+            Math.cos(lat1) * Math.cos(lat2) * Math.sin(deltaLng / 2) ** 2;
+        const distanceKm = EARTH_RADIUS_KM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        const y = Math.sin(deltaLng) * Math.cos(lat2);
+        const x = Math.cos(lat1) * Math.sin(lat2) -
+            Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+        const bearing = (_degrees(Math.atan2(y, x)) + 360) % 360;
+        return {distanceKm, distanceNm: distanceKm / KM_PER_NAUTICAL_MILE, bearing};
+    }
+
+    function _destinationPoint(origin, bearingDegrees, distanceKm) {
+        const angular = distanceKm / EARTH_RADIUS_KM;
+        const bearing = _radians(bearingDegrees);
+        const lat1 = _radians(origin[1]);
+        const lng1 = _radians(origin[0]);
+        const lat2 = Math.asin(Math.sin(lat1) * Math.cos(angular) +
+            Math.cos(lat1) * Math.sin(angular) * Math.cos(bearing));
+        const lng2 = lng1 + Math.atan2(
+            Math.sin(bearing) * Math.sin(angular) * Math.cos(lat1),
+            Math.cos(angular) - Math.sin(lat1) * Math.sin(lat2));
+        return [((_degrees(lng2) + 540) % 360) - 180, _degrees(lat2)];
+    }
+
+    function _formatUtc(value) {
+        const date = value instanceof Date ? value : new Date(value);
+        return Number.isFinite(date.getTime())
+            ? date.toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : 'unknown time';
+    }
+
+    function _finishDistance() {
+        if (_draftCoords.length !== 2) return;
+        _saveUndo();
+        const motion = _geodesicMotion(_draftCoords[0], _draftCoords[1]);
+        const p = {
+            id: _nextId++, kind: 'measurement', measureType: 'distance', name: '', visible: true,
+            coords: _draftCoords.map(coord => [...coord]), color: _curColor, width: _curWidth,
+            distanceKm: motion.distanceKm, distanceNm: motion.distanceNm, bearing: motion.bearing,
+        };
+        p.name = `Distance ${motion.distanceNm.toFixed(1)} nmi · ${Math.round(motion.bearing).toString().padStart(3, '0')}°`;
+        _products.unshift(p);
+        _drawing = false; _draftCoords = []; _draftObservations = []; _mouseCoord = null;
+        _updateDraftLayer(); _updateGuideLayer(); _renderProductList();
+        _setHint('Click the start and end points to measure distance and bearing');
+    }
+
+    function _finishExtrapolation() {
+        if (_draftObservations.length !== 2) return;
+        const [first, second] = _draftObservations;
+        const elapsedHours = (second.timeMs - first.timeMs) / 3_600_000;
+        if (!(elapsedHours > 0)) {
+            _draftObservations.pop();
+            _draftCoords.pop();
+            _updateDraftLayer();
+            _setHint('The second observation must be on a later dominant frame');
+            return;
+        }
+        _saveUndo();
+        const motion = _geodesicMotion(first.coord, second.coord);
+        const speedKt = motion.distanceNm / elapsedHours;
+        const projected = Array.from({length: _curExtrapSteps}, (_, index) => {
+            const minutes = (index + 1) * _curExtrapInterval;
+            return {
+                coord: _destinationPoint(second.coord, motion.bearing,
+                    speedKt * (minutes / 60) * KM_PER_NAUTICAL_MILE),
+                minutes, timeMs: second.timeMs + minutes * 60_000,
+            };
+        });
+        const p = {
+            id: _nextId++, kind: 'measurement', measureType: 'extrapolation', name: '', visible: true,
+            coords: [first.coord, second.coord], observations: [first, second], projected,
+            intervalMinutes: _curExtrapInterval, steps: _curExtrapSteps,
+            distanceKm: motion.distanceKm, distanceNm: motion.distanceNm,
+            bearing: motion.bearing, speedKt, elapsedMinutes: elapsedHours * 60,
+            color: _curColor, width: _curWidth,
+        };
+        p.name = `Motion ${speedKt.toFixed(1)} kt · ${Math.round(motion.bearing).toString().padStart(3, '0')}°`;
+        _products.unshift(p);
+        _drawing = false; _draftCoords = []; _draftObservations = []; _mouseCoord = null;
+        _updateDraftLayer(); _updateGuideLayer(); _renderProductList();
+        _setHint('Click a feature on one frame, step forward, then click its new position');
+    }
+
     // Place a text product (H, L, or free text) at the given coordinates with the specified color and font size. This is called when the user clicks on the map while the H/L/text tool is active.
-    function _placeText(lng, lat, kind, text, color, fontSize) {
+    function _normalizedPressure(value) {
+        if (value === '' || value == null) return '';
+        const pressure = Number(value);
+        if (!Number.isFinite(pressure)) return '';
+        return Math.max(850, Math.min(1100, Math.round(pressure))).toString();
+    }
+
+    function _placeText(lng, lat, kind, text, color, fontSize, pressure = '', symbolId = '') {
         _saveUndo();
         const p = {
             id:       _nextId++,
             kind:     'text',
-            subKind:  kind,    // 'H' | 'L' | 'text'
-            name:     `${kind === 'H' || kind === 'L' ? kind + ' center' : 'Text'} #${_nextId - 1}`,
+            subKind:  kind,
+            name:     `${kind === 'H' || kind === 'L' ? kind + ' center' : kind === 'hurricane' ? 'Hurricane center' : kind === 'gempak' ? (_gempakSymbol(symbolId)?.label || 'NAWIPS symbol') : 'Text'} #${_nextId - 1}`,
             visible:  true,
             lng, lat,
             text,
             color,
             fontSize: fontSize || 18,
+            pressure: kind === 'H' || kind === 'L' ? _normalizedPressure(pressure) : '',
+            symbolId: kind === 'gempak' ? symbolId : '',
+            boxed: kind === 'text' && _curTextBoxed,
+            backgroundColor: kind === 'text' ? _curTextBackground : '',
         };
         _products.unshift(p);
         PG.info(`Text placed → id=${p.id} text="${text}" at [${lng.toFixed(3)}, ${lat.toFixed(3)}] | total: ${_products.length}`);
@@ -1072,7 +1594,7 @@ export const ProductGen = (() => {
         _exitEditMode();
         _editProduct = product;
         const isOpen = product.kind === 'front';  // fronts are open polylines, contours are closed
-        const raw = product.coords;
+        const raw = product.coords || [];
         // Deep copy for editing; do NOT update product.coords during edit
         if (isOpen) {
             _editCoords = raw.map(c => [...c]);
@@ -1105,9 +1627,35 @@ export const ProductGen = (() => {
             _curText = product.text || '';
             _curFontSize = product.fontSize || 18;
             _panel.querySelector('#pg-color').value = product.color;
+            _curColor = product.color;
             _panel.querySelector('#pg-width').value = product.fontSize || 18;
+            _curPressure = _normalizedPressure(product.pressure);
+            _panel.querySelector('#pg-pressure-value').value = _curPressure;
+            _curTextBoxed = Boolean(product.boxed);
+            _curTextBackground = product.backgroundColor || '#101020';
+            _panel.querySelector('#pg-text-boxed').checked = _curTextBoxed;
+            _panel.querySelector('#pg-text-background').value = _curTextBackground;
+        } else if (product.kind === 'front' &&
+            (product.frontType === 'isochrone' || product.frontType === 'vector')) {
+            _curText = product.label || (product.frontType === 'isochrone' ? 'T+1h' : '');
+            _panel.querySelector('#pg-text-content').value = _curText;
         }
         _updateStylePanel();
+        if (product.kind === 'text') {
+            _renderProductList();
+            _setHint(product.subKind === 'H' || product.subKind === 'L'
+                ? 'Drag the symbol to relocate it\nEdit the optional pressure value below'
+                : 'Drag the annotation to relocate it\nEdit text and style below');
+            [LYR_SYMBOL, LYR_BOXED_TEXT, LYR_PRESSURE_LABEL, LYR_HURRICANE_SYMBOL, LYR_GEMPAK_SYMBOL]
+                .forEach(layerId => {
+                    _map.on('mousedown', layerId, _onEditTextMouseDown);
+                    _map.on('mouseenter', layerId, _onEditTextEnter);
+                    _map.on('mouseleave', layerId, _onEditTextLeave);
+                });
+            _map.on('mousemove', _onEditTextDrag);
+            _map.on('mouseup', _onEditTextMouseUp);
+            return;
+        }
         _map.doubleClickZoom.disable();
         _updateEditLayer();
         _renderProductList();
@@ -1149,6 +1697,15 @@ export const ProductGen = (() => {
         _map.off('mouseleave', LYR_EDIT_MID,   _onEditMidLeave);
         _map.off('mousemove',  _onEditVertDrag);
         _map.off('mouseup',    _onEditVertMouseUp);
+        [LYR_SYMBOL, LYR_BOXED_TEXT, LYR_PRESSURE_LABEL, LYR_HURRICANE_SYMBOL, LYR_GEMPAK_SYMBOL]
+            .forEach(layerId => {
+                _map.off('mousedown', layerId, _onEditTextMouseDown);
+                _map.off('mouseenter', layerId, _onEditTextEnter);
+                _map.off('mouseleave', layerId, _onEditTextLeave);
+            });
+        _map.off('mousemove', _onEditTextDrag);
+        _map.off('mouseup', _onEditTextMouseUp);
+        _draggingText = false;
         _map.dragPan.enable();
         _map.doubleClickZoom.enable();
         _map.getCanvas().style.cursor = '';
@@ -1161,6 +1718,43 @@ export const ProductGen = (() => {
         _updateStylePanel();
         _renderProductList();
         _setHint('');
+    }
+
+    function _eventTargetsEditedText(e) {
+        return _editProduct?.kind === 'text' && e.features?.some(feature =>
+            String(feature.properties?.id) === String(_editProduct.id));
+    }
+
+    function _onEditTextMouseDown(e) {
+        if (_draggingText || e.originalEvent?.button !== 0 || !_eventTargetsEditedText(e)) return;
+        e.preventDefault();
+        _saveUndo();
+        _draggingText = true;
+        _map.dragPan.disable();
+        _map.getCanvas().style.cursor = 'grabbing';
+    }
+
+    function _onEditTextDrag(e) {
+        if (!_draggingText || _editProduct?.kind !== 'text') return;
+        _editProduct.lng = e.lngLat.lng;
+        _editProduct.lat = e.lngLat.lat;
+        _updateSymbolLayer();
+    }
+
+    function _onEditTextMouseUp() {
+        if (!_draggingText) return;
+        _draggingText = false;
+        _map.dragPan.enable();
+        _map.getCanvas().style.cursor = 'move';
+        _renderProductList();
+    }
+
+    function _onEditTextEnter(e) {
+        if (!_draggingText && _eventTargetsEditedText(e)) _map.getCanvas().style.cursor = 'move';
+    }
+
+    function _onEditTextLeave() {
+        if (!_draggingText) _map.getCanvas().style.cursor = '';
     }
 
     // ------------------------------------------------------------------
@@ -1326,17 +1920,43 @@ export const ProductGen = (() => {
         return result;
     }
 
+    // Geographic pip geometry is regenerated by zoom band. This keeps fronts
+    // legible at regional scale without making close-up symbols oversized.
+    function _frontGeometryScale() {
+        const zoom = _map?.getZoom?.() ?? 5;
+        // Web Mercator ground resolution changes by 2× per zoom level. Scale
+        // geographic geometry by the inverse amount so pip dimensions and
+        // gaps remain approximately stable in screen pixels.
+        const quantizedZoom = Math.round(zoom * 2) / 2;
+        // Outward zoom needs full compensation to keep neighboring symbols
+        // separated. Inward zoom uses a gentler half-rate so fronts remain
+        // comfortably readable instead of becoming tiny at street scale.
+        const exponent = quantizedZoom <= 5
+            ? 5 - quantizedZoom
+            : (5 - quantizedZoom) * 0.5;
+        return Math.max(0.2, Math.min(8, 2 ** exponent));
+    }
+
+    // ITCZ is a continuous band rather than discrete front pips. Fully
+    // compensate for map zoom so its band width and cross-link cadence remain
+    // stable in screen space at both regional and close-up scales.
+    function _itczGeometryScale() {
+        const zoom = _map?.getZoom?.() ?? 5;
+        const quantizedZoom = Math.round(zoom * 2) / 2;
+        return Math.max(0.015625, Math.min(16, 2 ** (5 - quantizedZoom)));
+    }
+
     // Walk a polyline and collect pip positions with local coordinate frames
-    function _pipPositions(coords, side) {
+    function _pipPositions(coords, side, spacingKm = PIP_SPACING_KM, kmPerDegree = 400.3) {
         const pips = [];
-        let distSinceLast = PIP_SPACING_KM * 0.4;  // offset first pip from very start
+        let distSinceLast = spacingKm * 0.4;  // offset first pip from very start
         for (let i = 0; i < coords.length - 1; i++) {
             const [lng0, lat0] = coords[i];
             const [lng1, lat1] = coords[i + 1];
             const midLat = (lat0 + lat1) / 2;
             const cosLat = Math.cos(midLat * Math.PI / 180);
-            const dxKm = (lng1 - lng0) * 400.3 * cosLat;
-            const dyKm = (lat1 - lat0) * 400.3;
+            const dxKm = (lng1 - lng0) * kmPerDegree * cosLat;
+            const dyKm = (lat1 - lat0) * kmPerDegree;
             const segLen = Math.sqrt(dxKm * dxKm + dyKm * dyKm);
             if (segLen < 1) continue;
             // Unit tangent in km space
@@ -1349,11 +1969,11 @@ export const ProductGen = (() => {
             let t = distSinceLast;
             while (t <= segLen) {
                 pips.push({
-                    lng:   lng0 + (t * txKm) / (400.3 * cosLat),
-                    lat:   lat0 + (t * tyKm) / 400.3,
+                    lng:   lng0 + (t * txKm) / (kmPerDegree * cosLat),
+                    lat:   lat0 + (t * tyKm) / kmPerDegree,
                     txKm, tyKm, nxKm, nyKm, cosLat,
                 });
-                t += PIP_SPACING_KM;
+                t += spacingKm;
             }
             distSinceLast = t - segLen;
         }
@@ -1365,16 +1985,20 @@ export const ProductGen = (() => {
         return [lng + dxKm / (400.3 * cosLat), lat + dyKm / 400.3];
     }
 
-    function _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat) {
-        const h = PIP_COLD_HT_KM, b = PIP_COLD_BASE_KM;
+    function _toItczCoord(lng, lat, cosLat, dxKm, dyKm) {
+        return [lng + dxKm / (KM_PER_DEGREE_LAT * cosLat), lat + dyKm / KM_PER_DEGREE_LAT];
+    }
+
+    function _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat, scale = 1) {
+        const h = PIP_COLD_HT_KM * scale, b = PIP_COLD_BASE_KM * scale;
         const p1 = _toCoord(lng, lat, cosLat, -b * txKm, -b * tyKm);   // base-left
         const p2 = _toCoord(lng, lat, cosLat,  b * txKm,  b * tyKm);   // base-right
         const p3 = _toCoord(lng, lat, cosLat,  h * nxKm,  h * nyKm);   // apex
         return [p1, p2, p3, p1];
     }
 
-    function _makeSemicircle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat) {
-        const r = PIP_WARM_R_KM;
+    function _makeSemicircle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat, radiusKm = PIP_WARM_R_KM, close = true) {
+        const r = radiusKm;
         const N = 8;  // arc segments
         const pts = [];
         for (let i = 0; i <= N; i++) {
@@ -1385,8 +2009,23 @@ export const ProductGen = (() => {
                 r * (-cosA * txKm + sinA * nxKm),
                 r * (-cosA * tyKm + sinA * nyKm)));
         }
-        pts.push(pts[0]);
+        if (close) pts.push(pts[0]);
         return pts;
+    }
+
+    function _offsetFrontPolyline(coords, offsetKm) {
+        return coords.map((coord, index) => {
+            const previous = coords[Math.max(0, index - 1)];
+            const following = coords[Math.min(coords.length - 1, index + 1)];
+            const midLat = (previous[1] + following[1]) / 2;
+            const cosLat = Math.max(0.01, Math.cos(midLat * Math.PI / 180));
+            const dx = (following[0] - previous[0]) * KM_PER_DEGREE_LAT * cosLat;
+            const dy = (following[1] - previous[1]) * KM_PER_DEGREE_LAT;
+            const length = Math.hypot(dx, dy) || 1;
+            const nx = dy / length;
+            const ny = -dx / length;
+            return _toItczCoord(coord[0], coord[1], cosLat, offsetKm * nx, offsetKm * ny);
+        });
     }
 
     // Build the complete set of GeoJSON features for one front product
@@ -1395,31 +2034,217 @@ export const ProductGen = (() => {
         const color = cfg.color || p.color;
         const feats = [];
         const frontCoords = _smoothFront(p.coords);
+        const geometryScale = _frontGeometryScale();
 
-        feats.push({
-            type: 'Feature',
-            geometry: { type: 'LineString', coordinates: frontCoords },
-            properties: { id: p.id, prodKind: 'front-line', color, width: p.width || 2 },
-        });
+        if (cfg.pipMode === 'ridge') {
+            const teeth = _pipPositions(frontCoords, 'right', RIDGE_ZIG_SPACING_KM * geometryScale);
+            const coordinates = [frontCoords[0]];
+            teeth.forEach((position, index) => {
+                const direction = index % 2 === 0 ? 1 : -1;
+                coordinates.push(_toCoord(
+                    position.lng, position.lat, position.cosLat,
+                    direction * RIDGE_ZIG_AMPLITUDE_KM * geometryScale * position.nxKm,
+                    direction * RIDGE_ZIG_AMPLITUDE_KM * geometryScale * position.nyKm,
+                ));
+            });
+            coordinates.push(frontCoords[frontCoords.length - 1]);
+            return [{
+                type: 'Feature',
+                geometry: {type: 'LineString', coordinates},
+                properties: {id: p.id, prodKind: 'front-line', color, width: p.width || 2.5},
+            }];
+        }
+
+        if (cfg.pipMode === 'itcz') {
+            const itczScale = _itczGeometryScale();
+            const halfWidth = ITCZ_HALF_WIDTH_KM * itczScale;
+            const lineProperties = {
+                id: p.id, prodKind: 'front-itcz-line', color,
+                width: p.width || 2.5, frontType: p.frontType,
+            };
+            feats.push(
+                {
+                    type: 'Feature',
+                    geometry: {type: 'LineString', coordinates: _offsetFrontPolyline(frontCoords, halfWidth)},
+                    properties: lineProperties,
+                },
+                {
+                    type: 'Feature',
+                    geometry: {type: 'LineString', coordinates: _offsetFrontPolyline(frontCoords, -halfWidth)},
+                    properties: lineProperties,
+                },
+            );
+            _pipPositions(frontCoords, 'right', ITCZ_HATCH_SPACING_KM * itczScale, KM_PER_DEGREE_LAT)
+                .forEach(({lng, lat, txKm, tyKm, nxKm, nyKm, cosLat}) => {
+                    const skew = ITCZ_HATCH_SKEW_KM * itczScale;
+                    feats.push({
+                        type: 'Feature',
+                        geometry: {type: 'LineString', coordinates: [
+                            _toItczCoord(lng, lat, cosLat,
+                                -halfWidth * nxKm - skew * txKm,
+                                -halfWidth * nyKm - skew * tyKm),
+                            _toItczCoord(lng, lat, cosLat,
+                                halfWidth * nxKm + skew * txKm,
+                                halfWidth * nyKm + skew * tyKm),
+                        ]},
+                        properties: {
+                            ...lineProperties, prodKind: 'front-itcz-link',
+                            width: Math.max(2, (p.width || 2.5) * 0.9),
+                        },
+                    });
+                });
+            return feats;
+        }
+
+        // The squall motif itself is the line. Drawing the ordinary backbone
+        // as well produces an incorrect parallel/double-line appearance.
+        if (cfg.pipMode !== 'squall') {
+            feats.push({
+                type: 'Feature',
+                geometry: { type: 'LineString', coordinates: frontCoords },
+                properties: {
+                    id: p.id,
+                    prodKind: p.frontType === 'trough' || p.frontType === 'isochrone'
+                        ? 'front-dashed-line' : 'front-line',
+                    color,
+                    width: p.width || 2,
+                    frontType: p.frontType,
+                    label: p.label || '',
+                },
+            });
+        }
+
+        if (cfg.pipMode === 'isochrone') {
+            const endpoint = frontCoords[frontCoords.length - 1];
+            feats.push({
+                type: 'Feature', geometry: {type: 'Point', coordinates: endpoint},
+                properties: {
+                    id: p.id, prodKind: 'isochrone-label', frontType: p.frontType,
+                    label: p.label || 'T+1h', color, boxImage: _ensureTextBoxImage('#101020'),
+                },
+            });
+            return feats;
+        }
 
         if (cfg.pipMode === 'none' || !p.coords || p.coords.length < 2) return feats;
 
+        if (cfg.pipMode === 'vector') {
+            const tip = frontCoords[frontCoords.length - 1];
+            const previous = frontCoords[frontCoords.length - 2];
+            const midLat = (tip[1] + previous[1]) / 2;
+            const cosLat = Math.max(0.01, Math.cos(midLat * Math.PI / 180));
+            const dx = (tip[0] - previous[0]) * 400.3 * cosLat;
+            const dy = (tip[1] - previous[1]) * 400.3;
+            const length = Math.hypot(dx, dy);
+            if (length > 0) {
+                const tx = dx / length;
+                const ty = dy / length;
+                const nx = -ty;
+                const ny = tx;
+                const widthScale = Math.max(0.6, (p.width || 2.5) / 2.5);
+                const arrowLength = VECTOR_ARROW_LENGTH_KM * geometryScale * widthScale;
+                const halfWidth = arrowLength * 0.48;
+                feats.push({
+                    type: 'Feature',
+                    geometry: {type: 'LineString', coordinates: [
+                        _toCoord(tip[0], tip[1], cosLat, -arrowLength * tx + halfWidth * nx, -arrowLength * ty + halfWidth * ny),
+                        tip,
+                        _toCoord(tip[0], tip[1], cosLat, -arrowLength * tx - halfWidth * nx, -arrowLength * ty - halfWidth * ny),
+                    ]},
+                    properties: {id: p.id, prodKind: 'front-decoration-line', color, width: p.width || 2.5},
+                });
+            }
+            if (p.label) {
+                const labelCoord = frontCoords[Math.floor((frontCoords.length - 1) / 2)];
+                feats.push({
+                    type: 'Feature', geometry: {type: 'Point', coordinates: labelCoord},
+                    properties: {
+                        id: p.id, prodKind: 'vector-label', frontType: p.frontType,
+                        label: p.label, color, boxImage: _ensureTextBoxImage('#101020'),
+                    },
+                });
+            }
+            return feats;
+        }
+
         const side  = p.pipSide || 'right';
+
+        if (cfg.pipMode === 'dry') {
+            _pipPositions(frontCoords, side, PIP_DRY_SPACING_KM * geometryScale).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
+                feats.push({
+                    type: 'Feature',
+                    geometry: {type: 'LineString', coordinates: _makeSemicircle(
+                        lng, lat, txKm, tyKm, nxKm, nyKm, cosLat, PIP_DRY_R_KM * geometryScale, false,
+                    )},
+                    properties: {id: p.id, prodKind: 'front-pip-outline', color},
+                });
+            });
+            return feats;
+        }
+
+        if (cfg.pipMode === 'squall') {
+            _pipPositions(frontCoords, side, SQUALL_PATTERN_UNIT_KM * geometryScale).forEach((position, index) => {
+                const {lng, lat, txKm, tyKm, nxKm, nyKm, cosLat} = position;
+                const center = [lng, lat];
+                const patternIndex = index % 48;
+                if (patternIndex === 0) {
+                    feats.push({
+                        type: 'Feature',
+                        geometry: {type: 'LineString', coordinates: [
+                            _toCoord(center[0], center[1], cosLat, -SQUALL_DASH_HALF_KM * geometryScale * txKm, -SQUALL_DASH_HALF_KM * geometryScale * tyKm),
+                            _toCoord(center[0], center[1], cosLat, SQUALL_DASH_HALF_KM * geometryScale * txKm, SQUALL_DASH_HALF_KM * geometryScale * tyKm),
+                        ]},
+                        properties: {id: p.id, prodKind: 'front-decoration-line', color},
+                    });
+                } else if (patternIndex === 19 || patternIndex === 29) {
+                    feats.push({
+                        type: 'Feature', geometry: {type: 'Point', coordinates: center},
+                        properties: {id: p.id, prodKind: 'front-decoration-dot', color},
+                    });
+                }
+            });
+            return feats;
+        }
+
+        if (cfg.pipMode === 'streamline') {
+            _pipPositions(frontCoords, 'right', STREAMLINE_ARROW_SPACING_KM * geometryScale)
+                .forEach(({lng, lat, txKm, tyKm, nxKm, nyKm, cosLat}) => {
+                    const widthScale = Math.max(0.6, (p.width || 2.5) / 2.5);
+                    const length = STREAMLINE_ARROW_LENGTH_KM * geometryScale * widthScale;
+                    const halfWidth = length * 0.46;
+                    const tip = [lng, lat];
+                    const backX = -length * txKm;
+                    const backY = -length * tyKm;
+                    feats.push({
+                        type: 'Feature',
+                        geometry: {type: 'LineString', coordinates: [
+                            _toCoord(lng, lat, cosLat, backX + halfWidth * nxKm, backY + halfWidth * nyKm),
+                            tip,
+                            _toCoord(lng, lat, cosLat, backX - halfWidth * nxKm, backY - halfWidth * nyKm),
+                        ]},
+                        properties: {
+                            id: p.id, prodKind: 'front-decoration-line', color,
+                            width: p.width || 2.5,
+                        },
+                    });
+                });
+            return feats;
+        }
 
         // Stationary and occluded fronts use one shared placement sequence.
         // Stationary symbols alternate sides and colors; occluded symbols
         // alternate shapes on the same side and remain purple.
         if (cfg.pipMode === 'stat' || cfg.pipMode === 'occ') {
             const isOccluded = cfg.pipMode === 'occ';
-            _pipPositions(frontCoords, side).forEach((position, index) => {
+            _pipPositions(frontCoords, side, PIP_SPACING_KM * geometryScale).forEach((position, index) => {
                 const { lng, lat, txKm, tyKm, nxKm, nyKm, cosLat } = position;
                 const isCold = index % 2 === 0;
                 const ring = isCold
-                    ? _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat)
+                    ? _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat, geometryScale)
                     : _makeSemicircle(lng, lat, txKm, tyKm,
                         isOccluded ? nxKm : -nxKm,
                         isOccluded ? nyKm : -nyKm,
-                        cosLat);
+                        cosLat, PIP_WARM_R_KM * geometryScale);
                 feats.push({
                     type: 'Feature',
                     geometry: { type: 'Polygon', coordinates: [ring] },
@@ -1438,8 +2263,8 @@ export const ProductGen = (() => {
 
         if (wantCold) {
             const pipColor = color;
-            _pipPositions(frontCoords, side).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
-                const ring = _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat);
+            _pipPositions(frontCoords, side, PIP_SPACING_KM * geometryScale).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
+                const ring = _makeTriangle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat, geometryScale);
                 feats.push({ type:'Feature', geometry:{ type:'Polygon', coordinates:[ring] },
                     properties:{ id:p.id, prodKind:'front-pip', color:pipColor } });
             });
@@ -1447,8 +2272,8 @@ export const ProductGen = (() => {
 
         if (wantWarm) {
             const pipColor = color;
-            _pipPositions(frontCoords, side).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
-                const ring = _makeSemicircle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat);
+            _pipPositions(frontCoords, side, PIP_SPACING_KM * geometryScale).forEach(({ lng, lat, txKm, tyKm, nxKm, nyKm, cosLat }) => {
+                const ring = _makeSemicircle(lng, lat, txKm, tyKm, nxKm, nyKm, cosLat, PIP_WARM_R_KM * geometryScale);
                 feats.push({ type:'Feature', geometry:{ type:'Polygon', coordinates:[ring] },
                     properties:{ id:p.id, prodKind:'front-pip', color:pipColor } });
             });
@@ -1460,6 +2285,29 @@ export const ProductGen = (() => {
     // ------------------------------------------------------------------
     // MapLibre source / layer management
     // ------------------------------------------------------------------
+    function _validHexColor(value, fallback = '#101020') {
+        return /^#[0-9a-f]{6}$/i.test(String(value || '')) ? String(value) : fallback;
+    }
+
+    function _ensureTextBoxImage(color) {
+        const safeColor = _validHexColor(color);
+        const imageId = `pg-text-box-${safeColor.slice(1).toLowerCase()}`;
+        if (_map.hasImage(imageId)) return imageId;
+        const canvas = document.createElement('canvas');
+        canvas.width = 16;
+        canvas.height = 16;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = safeColor;
+        ctx.fillRect(1, 1, 14, 14);
+        ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(1.5, 1.5, 13, 13);
+        _map.addImage(imageId, ctx.getImageData(0, 0, 16, 16), {
+            stretchX: [[5, 11]], stretchY: [[5, 11]], content: [4, 4, 12, 12],
+        });
+        return imageId;
+    }
+
     function _addMapLayers() {
         // ── Contour (polygon) layers ──────────────────────────────────
         _map.addSource(SRC_CONTOUR, { type: 'geojson', data: _emptyFC() });
@@ -1509,15 +2357,138 @@ export const ProductGen = (() => {
             paint: { 'fill-color': ['get', 'color'], 'fill-opacity': 1.0 },
         });
         _map.addLayer({
+            id: LYR_FRONT_PIP_OUTLINE, type: 'line', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'front-pip-outline'],
+            layout: {'line-cap': 'round', 'line-join': 'round'},
+            paint: {
+                'line-color': ['get', 'color'],
+                'line-width': 2.5,
+                'line-opacity': 1,
+            },
+        });
+        _map.addLayer({
+            id: LYR_FRONT_DECOR_LINE, type: 'line', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'front-decoration-line'],
+            layout: {'line-cap': 'round'},
+            paint: {
+                'line-color': ['get', 'color'],
+                'line-width': ['coalesce', ['get', 'width'], 3],
+                'line-opacity': 1,
+            },
+        });
+        _map.addLayer({
+            id: LYR_ITCZ_LINE, type: 'line', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'front-itcz-line'],
+            layout: {'line-cap': 'round', 'line-join': 'round'},
+            paint: {
+                'line-color': ['get', 'color'],
+                'line-width': ['get', 'width'],
+                'line-opacity': 1,
+            },
+        });
+        _map.addLayer({
+            id: LYR_ITCZ_LINK, type: 'line', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'front-itcz-link'],
+            layout: {'line-cap': 'round', 'line-join': 'round'},
+            paint: {
+                'line-color': ['get', 'color'],
+                'line-width': ['get', 'width'],
+                'line-opacity': 1,
+            },
+        });
+        _map.addLayer({
+            id: LYR_FRONT_DECOR_DOT, type: 'circle', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'front-decoration-dot'],
+            paint: {'circle-color': ['get', 'color'], 'circle-radius': 3, 'circle-opacity': 1},
+        });
+        _map.addLayer({
             id: LYR_FRONT_LINE, type: 'line', source: SRC_FRONTS,
             filter: ['==', ['get', 'prodKind'], 'front-line'],
             paint: { 'line-color': ['get', 'color'], 'line-width': ['get', 'width'], 'line-opacity': 0.95 },
         });
+        _map.addLayer({
+            id: LYR_FRONT_DASHED_LINE, type: 'line', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'front-dashed-line'],
+            layout: {'line-cap': 'butt', 'line-join': 'round'},
+            paint: {
+                'line-color': ['get', 'color'],
+                'line-width': ['get', 'width'],
+                'line-dasharray': [4, 3],
+                'line-opacity': 0.95,
+            },
+        });
+        _ensureTextBoxImage('#101020');
+        _map.addLayer({
+            id: LYR_ISOCHRONE_LABEL, type: 'symbol', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'isochrone-label'],
+            layout: {
+                'icon-image': ['get', 'boxImage'],
+                'icon-text-fit': 'both', 'icon-text-fit-padding': [4, 6, 4, 6],
+                'text-field': ['get', 'label'], 'text-size': 13,
+                'text-font': ['Trebuchet MS Bold'], 'text-anchor': 'left',
+                'text-offset': [0.65, 0], 'text-allow-overlap': true,
+                'icon-allow-overlap': true,
+            },
+            paint: {
+                'text-color': ['get', 'color'], 'text-halo-color': '#000000',
+                'text-halo-width': 0.7, 'icon-opacity': 0.92,
+            },
+        });
+        _map.addLayer({
+            id: LYR_VECTOR_LABEL, type: 'symbol', source: SRC_FRONTS,
+            filter: ['==', ['get', 'prodKind'], 'vector-label'],
+            layout: {
+                'icon-image': ['get', 'boxImage'],
+                'icon-text-fit': 'both', 'icon-text-fit-padding': [4, 6, 4, 6],
+                'text-field': ['get', 'label'], 'text-size': 13,
+                'text-font': ['Trebuchet MS Bold'], 'text-anchor': 'center',
+                'text-allow-overlap': true, 'icon-allow-overlap': true,
+            },
+            paint: {
+                'text-color': ['get', 'color'], 'text-halo-color': '#000000',
+                'text-halo-width': 0.7, 'icon-opacity': 0.92,
+            },
+        });
 
         // ── Text / symbol layers ──────────────────────────────────────
         _map.addSource(SRC_SYMBOLS, { type: 'geojson', data: _emptyFC() });
+        _ensureGempakImage(HURRICANE_SYMBOL_ID);
+        _ensureGempakImage(_curGempakSymbolId, '#ffffff');
+        _map.addLayer({
+            id: LYR_HURRICANE_SYMBOL, type: 'symbol', source: SRC_SYMBOLS,
+            filter: ['==', ['get', 'subKind'], 'hurricane'],
+            layout: {
+                'icon-image': _gempakImageId(HURRICANE_SYMBOL_ID),
+                'icon-size': ['/', ['get', 'fontSize'], 24],
+                'icon-allow-overlap': true,
+            },
+            paint: {
+                'icon-color': ['get', 'color'],
+                'icon-halo-color': '#000000',
+                'icon-halo-width': 1,
+            },
+        });
+        _map.addLayer({
+            id: LYR_GEMPAK_SYMBOL, type: 'symbol', source: SRC_SYMBOLS,
+            filter: ['==', ['get', 'subKind'], 'gempak'],
+            layout: {
+                'icon-image': ['get', 'iconImage'],
+                'icon-size': ['/', ['get', 'fontSize'], 24],
+                'icon-allow-overlap': true,
+            },
+            paint: {
+                'icon-color': ['get', 'color'],
+                'icon-halo-color': '#000000',
+                'icon-halo-width': 0.6,
+                'icon-opacity': 1,
+            },
+        });
         _map.addLayer({
             id: LYR_SYMBOL, type: 'symbol', source: SRC_SYMBOLS,
+            filter: ['all',
+                ['!', ['in', ['get', 'subKind'], ['literal', ['hurricane', 'gempak']]]],
+                ['!=', ['get', 'boxed'], true],
+            ],
             layout: {
                 'text-field':         ['get', 'text'],
                 'text-size':          ['get', 'fontSize'],
@@ -1526,6 +2497,89 @@ export const ProductGen = (() => {
                 'text-allow-overlap': true,
             },
             paint: { 'text-color': ['get', 'color'], 'text-halo-color': '#000', 'text-halo-width': 1.5 },
+        });
+        _ensureTextBoxImage(_curTextBackground);
+        _map.addLayer({
+            id: LYR_BOXED_TEXT, type: 'symbol', source: SRC_SYMBOLS,
+            filter: ['all', ['==', ['get', 'subKind'], 'text'], ['==', ['get', 'boxed'], true]],
+            layout: {
+                'icon-image': ['get', 'boxImage'],
+                'icon-text-fit': 'both',
+                'icon-text-fit-padding': [5, 7, 5, 7],
+                'text-field': ['get', 'text'],
+                'text-size': ['get', 'fontSize'],
+                'text-font': ['Trebuchet MS Bold'],
+                'text-anchor': 'center',
+                'text-allow-overlap': true,
+                'icon-allow-overlap': true,
+            },
+            paint: {
+                'text-color': ['get', 'color'],
+                'text-halo-color': '#000000', 'text-halo-width': 0.7,
+                'icon-opacity': 0.92,
+            },
+        });
+        _map.addLayer({
+            id: LYR_PRESSURE_LABEL, type: 'symbol', source: SRC_SYMBOLS,
+            filter: [
+                'all',
+                ['in', ['get', 'subKind'], ['literal', ['H', 'L']]],
+                ['!=', ['get', 'pressureLabel'], ''],
+            ],
+            layout: {
+                'text-field': ['get', 'pressureLabel'],
+                'text-size': ['*', ['get', 'fontSize'], 0.58],
+                'text-font': ['Trebuchet MS Bold'],
+                'text-anchor': 'top',
+                'text-offset': [0, 1.05],
+                'text-allow-overlap': true,
+            },
+            paint: {
+                'text-color': ['get', 'color'],
+                'text-halo-color': '#000',
+                'text-halo-width': 1.2,
+            },
+        });
+
+        // ── Distance and frame-aware extrapolation guides ────────────
+        _map.addSource(SRC_GUIDES, {type: 'geojson', data: _emptyFC()});
+        _map.addLayer({
+            id: LYR_GUIDE_LINE, type: 'line', source: SRC_GUIDES,
+            filter: ['==', ['get', 'prodKind'], 'guide-line'],
+            layout: {'line-cap': 'round', 'line-join': 'round'},
+            paint: {'line-color': ['get', 'color'], 'line-width': ['get', 'width'], 'line-opacity': 0.95},
+        });
+        _map.addLayer({
+            id: LYR_GUIDE_PROJECTION, type: 'line', source: SRC_GUIDES,
+            filter: ['==', ['get', 'prodKind'], 'guide-projection'],
+            layout: {'line-cap': 'round', 'line-join': 'round'},
+            paint: {
+                'line-color': ['get', 'color'], 'line-width': ['get', 'width'],
+                'line-dasharray': [4, 3], 'line-opacity': 0.9,
+            },
+        });
+        _map.addLayer({
+            id: LYR_GUIDE_POINT, type: 'circle', source: SRC_GUIDES,
+            filter: ['==', ['get', 'prodKind'], 'guide-point'],
+            paint: {
+                'circle-color': ['get', 'color'], 'circle-radius': 4,
+                'circle-stroke-color': '#000000', 'circle-stroke-width': 1.2,
+            },
+        });
+        _map.addLayer({
+            id: LYR_GUIDE_LABEL, type: 'symbol', source: SRC_GUIDES,
+            filter: ['==', ['get', 'prodKind'], 'guide-label'],
+            layout: {
+                'icon-image': ['get', 'boxImage'], 'icon-text-fit': 'both',
+                'icon-text-fit-padding': [4, 6, 4, 6],
+                'text-field': ['get', 'label'], 'text-size': 12,
+                'text-font': ['Trebuchet MS Bold'], 'text-anchor': 'center',
+                'text-allow-overlap': true, 'icon-allow-overlap': true,
+            },
+            paint: {
+                'text-color': ['get', 'color'], 'text-halo-color': '#000000',
+                'text-halo-width': 0.7, 'icon-opacity': 0.9,
+            },
         });
 
         // ── Draft (in-progress drawing) ───────────────────────────────
@@ -1749,14 +2803,87 @@ export const ProductGen = (() => {
 
     function _updateSymbolLayer() {
         if (!_map || !_map.getSource(SRC_SYMBOLS)) return;
+        _products.filter(p => p.subKind === 'gempak' && p.visible !== false)
+            .forEach(p => _ensureGempakImage(p.symbolId, p.color));
+        _products.filter(p => p.kind === 'text' && p.subKind === 'text' && p.boxed && p.visible !== false)
+            .forEach(p => _ensureTextBoxImage(p.backgroundColor));
         const features = _productsBackToFront()
             .filter(p => p.kind === 'text' && p.visible !== false)
             .map(p => ({
                 type: 'Feature',
                 geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
-                properties: { id: p.id, text: p.text, color: p.color, fontSize: p.fontSize || 18 },
+                properties: {
+                    id: p.id, subKind: p.subKind || 'text', text: p.text,
+                    color: p.color, fontSize: p.fontSize || 18,
+                    pressureLabel: _normalizedPressure(p.pressure),
+                    symbolId: p.symbolId || '',
+                    iconImage: p.subKind === 'gempak' ? _gempakImageId(p.symbolId, p.color) : '',
+                    boxed: Boolean(p.boxed),
+                    backgroundColor: _validHexColor(p.backgroundColor),
+                    boxImage: p.boxed ? _ensureTextBoxImage(p.backgroundColor) : '',
+                },
             }));
         _map.getSource(SRC_SYMBOLS).setData({ type: 'FeatureCollection', features });
+    }
+
+    function _updateGuideLayer() {
+        const source = _map?.getSource(SRC_GUIDES);
+        if (!source) return;
+        const features = [];
+        const boxImage = _ensureTextBoxImage('#101020');
+        _productsBackToFront()
+            .filter(p => p.kind === 'measurement' && p.visible !== false)
+            .forEach(p => {
+                const common = {id: p.id, color: p.color || '#66e0ff', width: p.width || 2};
+                features.push({
+                    type: 'Feature', geometry: {type: 'LineString', coordinates: p.coords},
+                    properties: {...common, prodKind: 'guide-line'},
+                });
+                p.coords.forEach(coord => features.push({
+                    type: 'Feature', geometry: {type: 'Point', coordinates: coord},
+                    properties: {...common, prodKind: 'guide-point'},
+                }));
+                if (p.measureType === 'distance') {
+                    const midpoint = [(p.coords[0][0] + p.coords[1][0]) / 2, (p.coords[0][1] + p.coords[1][1]) / 2];
+                    features.push({
+                        type: 'Feature', geometry: {type: 'Point', coordinates: midpoint},
+                        properties: {
+                            ...common, prodKind: 'guide-label', boxImage,
+                            label: `${p.distanceNm.toFixed(1)} nmi / ${p.distanceKm.toFixed(1)} km · ${Math.round(p.bearing).toString().padStart(3, '0')}°`,
+                        },
+                    });
+                    return;
+                }
+                const projected = Array.isArray(p.projected) ? p.projected : [];
+                if (projected.length) {
+                    features.push({
+                        type: 'Feature',
+                        geometry: {type: 'LineString', coordinates: [p.coords[1], ...projected.map(item => item.coord)]},
+                        properties: {...common, prodKind: 'guide-projection'},
+                    });
+                }
+                features.push({
+                    type: 'Feature', geometry: {type: 'Point', coordinates: p.coords[1]},
+                    properties: {
+                        ...common, prodKind: 'guide-label', boxImage,
+                        label: `${p.speedKt.toFixed(1)} kt · ${Math.round(p.bearing).toString().padStart(3, '0')}° · Δt ${Math.round(p.elapsedMinutes)} min`,
+                    },
+                });
+                projected.forEach(item => {
+                    features.push({
+                        type: 'Feature', geometry: {type: 'Point', coordinates: item.coord},
+                        properties: {...common, prodKind: 'guide-point'},
+                    });
+                    features.push({
+                        type: 'Feature', geometry: {type: 'Point', coordinates: item.coord},
+                        properties: {
+                            ...common, prodKind: 'guide-label', boxImage,
+                            label: `T+${item.minutes} · ${_formatUtc(item.timeMs).slice(11, 16)}Z`,
+                        },
+                    });
+                });
+            });
+        source.setData({type: 'FeatureCollection', features});
     }
 
     function _updateCountyAlertLayers() {
@@ -1862,6 +2989,7 @@ export const ProductGen = (() => {
         _updateFrontLayer();
         _updateSymbolLayer();
         _updateCountyAlertLayers();
+        _updateGuideLayer();
     }
 
     function _productsBackToFront() {
@@ -2028,10 +3156,14 @@ export const ProductGen = (() => {
                 badge.textContent = p.frontType || 'FRONT';
                 badge.style.color = (FRONT_CFG[p.frontType] || {}).color || p.color;
             } else if (p.kind === 'text') {
-                badge.textContent = p.text === 'H' ? 'H' : p.text === 'L' ? 'L' : 'TXT';
+                badge.textContent = p.subKind === 'hurricane' ? '🌀'
+                    : p.subKind === 'gempak' ? (_gempakSymbol(p.symbolId)?.code || 'SYM').toUpperCase()
+                    : p.text === 'H' ? 'H' : p.text === 'L' ? 'L' : 'TXT';
             } else if (p.kind === 'county-alert') {
                 badge.textContent = `${p.hazard} ${p.significance}`;
                 badge.title = `${p.counties.length} counties`;
+            } else if (p.kind === 'measurement') {
+                badge.textContent = p.measureType === 'extrapolation' ? 'XTRP' : 'DIST';
             } else {
                 badge.textContent = p.forecastProductLabel
                     ? `${p.forecastProductLabel}: ${p.levelLabel}`
@@ -2084,11 +3216,28 @@ export const ProductGen = (() => {
             orderControls.append(upBtn, downBtn);
             hdrRow.appendChild(orderControls);
 
-            // Edit button only for contour and front (not for text/H/L)
-            if (p.kind === 'contour' || p.kind === 'front') {
+            if (p.kind === 'front') {
+                const flipBtn = document.createElement('button');
+                flipBtn.className = 'pg-edit-btn';
+                flipBtn.title = `Flip front symbols to the ${p.pipSide === 'left' ? 'right' : 'left'} side`;
+                flipBtn.setAttribute('aria-label', `Flip orientation of ${p.name}`);
+                flipBtn.textContent = '↔';
+                flipBtn.addEventListener('click', () => {
+                    _saveUndo();
+                    p.pipSide = p.pipSide === 'left' ? 'right' : 'left';
+                    if (_editProduct?.id === p.id) _editProduct.pipSide = p.pipSide;
+                    _updateFrontLayer();
+                    _renderProductList();
+                });
+                hdrRow.appendChild(flipBtn);
+            }
+
+            // Text products use the same style editor without vertex handles.
+            if (p.kind === 'contour' || p.kind === 'front' || p.kind === 'text') {
                 const editBtn = document.createElement('button');
                 editBtn.className = 'pg-edit-btn' + (isEditing ? ' active' : '');
-                editBtn.title = isEditing ? 'Exit edit mode (Esc)' : 'Edit vertices & style';
+                editBtn.title = isEditing ? 'Exit edit mode (Esc)'
+                    : p.kind === 'text' ? 'Edit symbol or text' : 'Edit vertices & style';
                 editBtn.innerHTML = '&#9998;';
                 editBtn.addEventListener('click', () => {
                     if (_editProduct?.id === p.id) _exitEditMode();
@@ -2175,7 +3324,7 @@ export const ProductGen = (() => {
         });
     }
 
-    // TODO: export to GeoJSON, import from GeoJSON, undo/redo, save/load from localStorage
+    // TODO: save/load from localStorage
     function _countyAlertMultiPolygon(counties) {
         const polygons = [];
         counties.forEach(county => {
@@ -2183,6 +3332,134 @@ export const ProductGen = (() => {
             else if (county.geometry?.type === 'MultiPolygon') polygons.push(...county.geometry.coordinates);
         });
         return polygons.length ? {type: 'MultiPolygon', coordinates: polygons} : null;
+    }
+
+    function _finiteCoordinate(coord) {
+        return Array.isArray(coord) && coord.length >= 2 &&
+            Number.isFinite(Number(coord[0])) && Number.isFinite(Number(coord[1]));
+    }
+
+    function _importedProduct(feature, id) {
+        const geometry = feature?.geometry;
+        const props = feature?.properties || {};
+        if (!geometry || typeof props.kind !== 'string') return null;
+        const common = {
+            id,
+            kind: props.kind,
+            name: String(props.name || `${props.kind} #${id}`),
+            visible: props.visible !== false,
+            color: typeof props.color === 'string' ? props.color : '#ffff00',
+        };
+
+        if (props.kind === 'contour' && geometry.type === 'Polygon') {
+            const coords = geometry.coordinates?.[0];
+            if (!Array.isArray(coords) || coords.length < 4 || !coords.every(_finiteCoordinate)) return null;
+            return {
+                ...common, coords: coords.map(coord => [Number(coord[0]), Number(coord[1])]),
+                width: Number(props.width) || 2, label: String(props.label || ''),
+                type: String(props.type || 'General'), fillPattern: String(props.fillPattern || 'solid'),
+                patternDensity: Number(props.patternDensity) || 3,
+                patternWidth: Number(props.patternWidth) || 1.5,
+                suiteId: props.suiteId || null, suiteVersion: props.suiteVersion || null,
+                forecastProductId: props.forecastProductId || null,
+                forecastProductLabel: props.forecastProductLabel || null,
+                levelId: props.levelId || null, levelLabel: props.levelLabel || null,
+                value: props.value ?? null, units: props.units || null,
+                forecastRole: props.forecastRole || null,
+            };
+        }
+        if (props.kind === 'front' && geometry.type === 'LineString') {
+            if (!Array.isArray(geometry.coordinates) || geometry.coordinates.length < 2 ||
+                !geometry.coordinates.every(_finiteCoordinate)) return null;
+            return {
+                ...common,
+                coords: geometry.coordinates.map(coord => [Number(coord[0]), Number(coord[1])]),
+                width: Number(props.width) || 2.5,
+                frontType: FRONT_CFG[props.frontType] ? props.frontType : 'trough',
+                pipSide: props.pipSide === 'left' ? 'left' : 'right',
+                label: String(props.label || ''),
+            };
+        }
+        if (props.kind === 'text' && geometry.type === 'Point' && _finiteCoordinate(geometry.coordinates)) {
+            return {
+                ...common, lng: Number(geometry.coordinates[0]), lat: Number(geometry.coordinates[1]),
+                subKind: String(props.subKind || 'text'), text: String(props.text || 'Label'),
+                fontSize: Number(props.fontSize) || 18,
+                pressure: _normalizedPressure(props.pressure),
+                symbolId: _gempakSymbol(String(props.symbolId || ''))?.id || '',
+                boxed: props.subKind === 'text' && props.boxed === true,
+                backgroundColor: _validHexColor(props.backgroundColor),
+            };
+        }
+        if (props.kind === 'measurement' && geometry.type === 'LineString') {
+            if (!Array.isArray(geometry.coordinates) || geometry.coordinates.length !== 2 ||
+                !geometry.coordinates.every(_finiteCoordinate)) return null;
+            const coords = geometry.coordinates.map(coord => [Number(coord[0]), Number(coord[1])]);
+            const measureType = props.measureType === 'extrapolation' ? 'extrapolation' : 'distance';
+            const motion = _geodesicMotion(coords[0], coords[1]);
+            const elapsedMinutes = Number(props.elapsedMinutes) || 0;
+            const speedKt = Number(props.speedKt) || 0;
+            const projected = Array.isArray(props.projected) ? props.projected
+                .filter(item => _finiteCoordinate(item?.coord) && Number.isFinite(Number(item?.minutes)))
+                .map(item => ({
+                    coord: [Number(item.coord[0]), Number(item.coord[1])],
+                    minutes: Number(item.minutes), timeMs: Number(item.timeMs) || null,
+                })) : [];
+            return {
+                ...common, measureType, coords, width: Number(props.width) || 2,
+                distanceKm: motion.distanceKm, distanceNm: motion.distanceNm, bearing: motion.bearing,
+                elapsedMinutes, speedKt, projected,
+                observations: Array.isArray(props.observations) ? props.observations : [],
+                intervalMinutes: Number(props.intervalMinutes) || 30,
+                steps: Number(props.steps) || projected.length,
+            };
+        }
+        if (props.kind === 'county-alert' && geometry.type === 'MultiPolygon') {
+            const savedCounties = Array.isArray(props.counties) ? props.counties : [];
+            const counties = savedCounties.map((county, index) => ({
+                ...county,
+                geometry: county.geometry || (geometry.coordinates?.[index]
+                    ? {type: 'Polygon', coordinates: geometry.coordinates[index]} : null),
+            })).filter(county => county.geometry);
+            if (!counties.length) return null;
+            return {
+                ...common, counties,
+                significance: String(props.significance || 'Warning'),
+                hazard: String(props.hazard || 'Custom'),
+                alertNumber: props.alertNumber || '',
+            };
+        }
+        return null;
+    }
+
+    async function _importGeoJSON(file) {
+        if (file.size > 25 * 1024 * 1024) throw new Error('file exceeds the 25 MiB import limit');
+        const collection = JSON.parse(await file.text());
+        if (collection?.type !== 'FeatureCollection' || !Array.isArray(collection.features)) {
+            throw new Error('expected a GeoJSON FeatureCollection');
+        }
+        if (collection.schemaVersion != null && Number(collection.schemaVersion) > 1) {
+            throw new Error(`schema version ${collection.schemaVersion} is newer than this application supports`);
+        }
+
+        let nextImportedId = _nextId;
+        const imported = collection.features
+            .map(feature => _importedProduct(feature, nextImportedId++))
+            .filter(Boolean);
+        if (!imported.length) throw new Error('no supported Product Generation features were found');
+
+        const replace = _products.length > 0 && window.confirm(
+            `Import ${imported.length} product(s)?\n\nOK: replace current products\nCancel: merge with current products`
+        );
+        _saveUndo();
+        _exitEditMode();
+        _products = replace ? imported : [...imported, ..._products];
+        _nextId = Math.max(_nextId, nextImportedId);
+        _renderProductList();
+        _updateAllLayers();
+        const issues = validateForecastProducts(_products);
+        _updateForecastValidationStatus(issues);
+        _setHint(`Imported ${imported.length} product(s)${issues.length ? ` · ${issues.length} validation issue(s)` : ''}`);
     }
 
     function _exportGeoJSON() {
@@ -2228,13 +3505,33 @@ export const ProductGen = (() => {
                 features.push({
                     type: 'Feature',
                     geometry: { type: 'LineString', coordinates: p.coords },
-                    properties: { kind: 'front', id: p.id, name: p.name, color: p.color, width: p.width, frontType: p.frontType, pipSide: p.pipSide || 'right' },
+                    properties: { kind: 'front', id: p.id, name: p.name, color: p.color, width: p.width, frontType: p.frontType, pipSide: p.pipSide || 'right', label: p.label || '' },
                 });
             } else if (p.kind === 'text') {
                 features.push({
                     type: 'Feature',
                     geometry: { type: 'Point', coordinates: [p.lng, p.lat] },
-                    properties: { kind: 'text', id: p.id, name: p.name, color: p.color, text: p.text, fontSize: p.fontSize || 18 },
+                    properties: {
+                        kind: 'text', id: p.id, name: p.name,
+                        subKind: p.subKind || 'text', color: p.color,
+                        text: p.text, fontSize: p.fontSize || 18,
+                        pressure: _normalizedPressure(p.pressure) || null,
+                        symbolId: p.symbolId || null,
+                        boxed: Boolean(p.boxed),
+                        backgroundColor: p.boxed ? _validHexColor(p.backgroundColor) : null,
+                    },
+                });
+            } else if (p.kind === 'measurement') {
+                features.push({
+                    type: 'Feature', geometry: {type: 'LineString', coordinates: p.coords},
+                    properties: {
+                        kind: 'measurement', id: p.id, name: p.name,
+                        measureType: p.measureType, color: p.color, width: p.width,
+                        distanceKm: p.distanceKm, distanceNm: p.distanceNm, bearing: p.bearing,
+                        elapsedMinutes: p.elapsedMinutes || null, speedKt: p.speedKt || null,
+                        intervalMinutes: p.intervalMinutes || null, steps: p.steps || null,
+                        observations: p.observations || [], projected: p.projected || [],
+                    },
                 });
             } else if (p.kind === 'county-alert') {
                 features.push({
@@ -2245,7 +3542,7 @@ export const ProductGen = (() => {
                         significance: p.significance, hazard: p.hazard,
                         alertNumber: p.alertNumber || null,
                         color: p.color,
-                        counties: p.counties.map(({geometry, ...county}) => county),
+                        counties: p.counties,
                         county_fips: p.counties.map(county => county.fips),
                     },
                 });

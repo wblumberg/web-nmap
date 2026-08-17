@@ -50,3 +50,16 @@ export function smooth2D(data, nx, ny, passes = 3, missing = -9999) {
     }
     return arr;
 }
+
+/**
+ * Return true as soon as a typed/regular array contains a usable number.
+ * The early exit keeps valid fields cheap; an entirely missing field is scanned
+ * once so expensive downstream contour construction can be avoided.
+ */
+export function hasFiniteValues(data) {
+    if (!data || typeof data.length !== 'number') return false;
+    for (let i = 0; i < data.length; i++) {
+        if (Number.isFinite(data[i])) return true;
+    }
+    return false;
+}

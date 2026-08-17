@@ -9,3 +9,4 @@ api_keys.js
 frontend/public/static/**
 .env
 .env.local
+web-nmap*.json

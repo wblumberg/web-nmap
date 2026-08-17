@@ -940,11 +940,44 @@ export default {
         // has its complete trailing 60-minute strike history.
         point_range_page_size: 100000,
         point_range_paginate: true,
+        // Live ranges advance every update and overlap heavily, so retaining
+        // each decoded 60-minute pool provides no useful cache hits.
+        cache_live_point_ranges: false,
+        // This product centers its own range on the dominant frame and never
+        // consumes a catalog-matched key.
+        auto_update_skip_timematch: true,
+        // Its range is independent of the dominant raster and matched gridded
+        // secondaries, so it is safe to fetch concurrently with them.
+        auto_update_prefetch: true,
+        live_point_worker: 'lightning-age',
 
         make_layers(data, _grid) {
             const strike_age_levels = [0, 5, 10, 15, 20, 30, 45, 60];
             const strike_age_colors = ['#ffffb2', '#fed976', '#feb24c', '#fd8d3c', '#fc4e2a', '#e31a1c', '#b10026'];
             const strike_age_cmap = new apgl.ColorMap(strike_age_levels, strike_age_colors, {overflow_color: '#4d0014'});
+
+            const packed = data.lightning_columns;
+            if (packed) {
+                const strike_feature = {
+                    geometry: {type: 'PackedMultiPoint', coordinates: packed.coordinates},
+                    text_codes: packed.polarityCodes,
+                    text_code_map: {'-1': '-', '1': '+'},
+                    data: packed.ages,
+                    style: {
+                        text_cmap: strike_age_cmap,
+                        text_halo: true,
+                        text_halo_color: '#000000',
+                        text_font_size: 18,
+                    },
+                };
+                const geometry = new apgl.GeometryComponent([strike_feature]);
+                const geom_layer = new apgl.PlotLayer('lightning-strikes', geometry);
+                const cbar = apgl.makeColorBar(strike_age_cmap, {
+                    label: 'Strike Age (min)', fontface: 'Trebuchet MS', ticks: strike_age_levels,
+                    orientation: 'horizontal', tick_direction: 'bottom',
+                });
+                return {layers: [geom_layer], colorbar: [cbar], sampler: null};
+            }
 
             const obsJson = data.obs_json || [];
             const ageReferenceMs = Number(data.age_reference_ms);

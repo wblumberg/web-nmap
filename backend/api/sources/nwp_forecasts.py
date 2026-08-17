@@ -107,6 +107,9 @@ HREF = FilesystemSource(
     timeline_hours = 48,
     zarr_transport    = True,
 )
+# HREF loops commonly contain dozens of forecast hours. Decode compressed
+# chunks away from the UI thread so loading does not interrupt map interaction.
+HREF.zarr_decode_worker = True
 
 # REFS Ensemble
 REFS = FilesystemSource(

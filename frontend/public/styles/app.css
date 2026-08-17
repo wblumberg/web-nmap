@@ -12,6 +12,8 @@ body {
 }
 
 #topbar {
+    position: relative;
+    z-index: 30;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -87,12 +89,66 @@ body {
     color: #80f0a0;
 }
 
+.toolbar-text-icon {
+    font: 700 10px/0.88 'Courier New', monospace;
+    letter-spacing: -0.07em;
+    text-align: center;
+    pointer-events: none;
+}
+
+.nawips-toolbar-icon {
+    display: inline-block;
+    width: 23px;
+    max-height: 23px;
+    background: currentColor;
+    -webkit-mask: var(--nawips-icon-mask) center / contain no-repeat;
+    mask: var(--nawips-icon-mask) center / contain no-repeat;
+    pointer-events: none;
+    image-rendering: pixelated;
+}
+
+.play-btn .nawips-toolbar-icon {
+    width: 19px;
+    max-height: 19px;
+}
+
 /* NMAP2-style playback buttons */
 #playback-buttons {
     display: flex;
     gap: 2px;
     border-left: 1px solid #2a2a4e;
     padding-left: 10px;
+}
+
+#loop-speed-control {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+#loop-speed-tooltip {
+    position: absolute;
+    left: 50%;
+    top: calc(100% + 6px);
+    transform: translateX(-50%);
+    z-index: 20;
+    padding: 3px 7px;
+    border: 1px solid #777;
+    border-radius: 3px;
+    background: #111;
+    color: #fff;
+    font-size: 0.72rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 80ms linear;
+}
+
+#loop-speed-control:hover #loop-speed-tooltip,
+#loop-speed-control:focus-within #loop-speed-tooltip,
+#loop-speed-tooltip.visible {
+    opacity: 1;
 }
 
 .play-btn {
@@ -117,10 +173,23 @@ body {
 .play-btn.active { background: #ffe600; border-color: #ccb800; box-shadow: inset 0 0 4px rgba(0,0,0,0.4); }
 
 
-#readout {
-    font-size: 0.8rem;
-    color: #e0e0e0;
-    min-width: 220px;
+#data-opacity-control {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #8890aa;
+    font-size: 0.72rem;
+    white-space: nowrap;
+}
+
+#data-opacity {
+    width: clamp(80px, 10vw, 150px);
+    accent-color: #7788ff;
+}
+
+#data-opacity-value {
+    width: 34px;
+    color: #c8c8e8;
     text-align: right;
 }
 

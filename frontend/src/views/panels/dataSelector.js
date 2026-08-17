@@ -25,6 +25,7 @@
 import { getState } from '../../app/store.js';
 import * as CatalogClient from '../../services/api/catalogClient.js';
 import { PRODUCT_SUITES, PRODUCT_GROUPS } from '../../domain/dataProducts/productIndex.js';
+import {getProductPresentation, productPresentationMarkup} from '../../domain/ensembleProductPresentation.js';
 
 export const DataSelector = (() => {
     'use strict';
@@ -470,9 +471,11 @@ export const DataSelector = (() => {
             // Union of products for selected sources + any product matching
             // the query regardless of source (cross-search)
             const fromSource = sourceIds.length ? _productsForSources(sourceIds) : [];
-            const fromQuery  = Object.entries(PRODUCT_SUITES).filter(([k, p]) =>
-                _matches(p.label || k) || _matches(p.group || '')
-            );
+            const fromQuery  = Object.entries(PRODUCT_SUITES).filter(([k, p]) => {
+                const presentation = getProductPresentation(p, k);
+                return _matches(presentation.label) || _matches(p.group || '') ||
+                    presentation.tags.some(tag => _matches(tag.label) || _matches(tag.title));
+            });
             // Deduplicate
             const seen = new Set(fromSource.map(([k]) => k));
             const combined = [...fromSource];
@@ -513,12 +516,16 @@ export const DataSelector = (() => {
             ul.appendChild(hdr);
 
             for (const [key, prod] of byGroup.get(grp)) {
+                const presentation = productPresentationMarkup(prod, key);
                 const li = document.createElement('li');
                 li.className = 'ds-prod-item' + (key === _selProductKey ? ' selected' : '');
                 li.dataset.key = key;
                 li.innerHTML =
                     `<span class="ds-prod-indicator">&#9654;</span>` +
-                    `<span class="ds-prod-label">${prod.label || key}</span>`;
+                    `<span class="ds-prod-content">` +
+                      `<span class="ds-prod-badges">${presentation.badges}</span>` +
+                      `<span class="ds-prod-label">${presentation.label}</span>` +
+                    `</span>`;
 
                 li.addEventListener('click', () => {
                     _selProductKey = key;
@@ -587,9 +594,11 @@ export const DataSelector = (() => {
 </div>` : '';
 
         // Product detail section
+        const prodPresentation = prod ? productPresentationMarkup(prod, _selProductKey) : null;
         const prodHtml = prod ? `
 <div class="ds-info-section-label" style="margin-top:1em">Selected Product</div>
-<div class="ds-info-prod-name">${prod.label || _selProductKey}</div>
+<div class="ds-info-prod-badges">${prodPresentation.badges}</div>
+<div class="ds-info-prod-name">${prodPresentation.label}</div>
 <div class="ds-info-prod-meta">
   Group: <span class="ds-info-prod-group">${PRODUCT_GROUPS[prod.group] || prod.group || '—'}</span>
 </div>
@@ -609,7 +618,7 @@ export const DataSelector = (() => {
 ${cyclePickerHtml}
 ${prodHtml}` : `
 <p class="ds-info-placeholder" style="margin-top:0">
-  Product: <strong>${prod ? (prod.label || _selProductKey) : '—'}</strong><br>
+  Product: <strong>${prod ? prodPresentation.label : '—'}</strong><br>
   Select a data source to load it.
 </p>`;
 

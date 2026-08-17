@@ -18,10 +18,60 @@ import {
     TemporalScatterometerLayer,
 } from 'autumnplot-gl-extensions';
 import { pointWindow } from './pointFrames.js';
+import { GEOMETRY_DIAGNOSTICS } from './geometryFrames.js';
+import { estimateValueBytes, recordDiagnostic } from '../services/mapDiagnostics.js';
 
 // ─── ID namespacing ───────────────────────────────────────────────────────────
 function nsId(id, namespace) {
     return namespace ? `${namespace}/${id}` : id;
+}
+
+/**
+ * Report variables requested by a product but absent from a decoded frame.
+ *
+ * This is deliberately diagnostic-only: some products can still render a
+ * useful primary layer when an optional overlay is unavailable.  The product's
+ * make_layers implementation remains responsible for deciding whether a
+ * missing key is fatal or whether it should omit only that overlay.
+ */
+function diagnoseMissingDataKeys(productSuite, data, { namespace = '', key = '' } = {}) {
+    const requested = Array.isArray(productSuite?.data_keys)
+        ? productSuite.data_keys.filter(item => item && item !== '_all')
+        : [];
+    // Point/profile products carry requested variables inside each obs_json
+    // record rather than as top-level frame fields. Treat a variable as
+    // available when at least one observation supplies it; an empty frame has
+    // no evidence that the source schema is incomplete.
+    const observations = Array.isArray(data?.obs_json) ? data.obs_json : null;
+    const nestedKeys = observations?.length
+        ? new Set(observations.flatMap(obs => Object.keys(obs?.data ?? {})))
+        : null;
+    const missing = requested.filter(item => {
+        if (Object.prototype.hasOwnProperty.call(data ?? {}, item) && data[item] != null) return false;
+        if (observations) return nestedKeys === null ? false : !nestedKeys.has(item);
+        return true;
+    });
+    if (!missing.length) return missing;
+
+    const available = nestedKeys ? [...nestedKeys] : Object.keys(data ?? {});
+    const message = `Missing requested data key(s): ${missing.join(', ')}`;
+    console.warn(`[LayerBuilder] ${message}`, {
+        product: productSuite?.label,
+        source: namespace,
+        key,
+        requested,
+        available,
+    });
+    recordDiagnostic('data-keys-missing', {
+        source: namespace,
+        key,
+        product: productSuite?.label ?? '',
+        missingDataKeys: missing,
+        requestedDataKeys: requested,
+        availableDataKeys: available,
+        message,
+    });
+    return missing;
 }
 
 // ─── Static build ─────────────────────────────────────────────────────────────
@@ -39,6 +89,7 @@ function nsId(id, namespace) {
 //   sampler:    a Sampler object (or null)
 //   controller: null (no controller for static layers)
 function buildStaticLayers(productSuite, data, grid, namespace = '') {
+    diagnoseMissingDataKeys(productSuite, data, { namespace });
     console.warn('[LayerBuilder] buildStaticLayers: calling make_layers()', { data, grid });
     const result = productSuite.make_layers(data, grid);
     console.warn('[LayerBuilder] make_layers returned:', {
@@ -89,6 +140,8 @@ function buildMultiLayers(productSuite, dataByKey, gridOrGridFactory, orderedKey
     // Build the template result using the first key's data
     const firstKey       = orderedKeys[0];
 
+    diagnoseMissingDataKeys(productSuite, dataByKey[firstKey], { namespace, key: firstKey });
+
     // Build the template result using the first key's data
     console.warn('[LayerBuilder] buildMultiLayers: calling make_layers for template key:', firstKey, 'data:', dataByKey[firstKey]);
     const templateResult = productSuite.make_layers(dataByKey[firstKey], grid);
@@ -112,6 +165,9 @@ function buildMultiLayers(productSuite, dataByKey, gridOrGridFactory, orderedKey
         console.warn(`[LayerBuilder] Populating key "${key}" (${keyIdx+1}/${orderedKeys.length})`);
         let result;
         try {
+            if (key !== firstKey) {
+                diagnoseMissingDataKeys(productSuite, dataByKey[key], { namespace, key });
+            }
             result = productSuite.make_layers(dataByKey[key], grid);
         } catch (err) {
             console.error(`[LayerBuilder] make_layers THREW for key "${key}":`, err);
@@ -218,6 +274,7 @@ function _namespaceLayer(layer, namespace) {
 //    prog.addFrame('20260328_0600', newData); // appears without rebuilding
 //
 function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, namespace = '') {
+    const progressiveStarted = performance.now();
     if (productSuite.renderer === 'scatterometer') {
         const layer = new ScatterometerTimeSeriesLayer(
             nsId(productSuite.layer_id ?? 'scatterometer-winds', namespace),
@@ -258,6 +315,10 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
         };
     }
 
+    // Identify incomplete server/decoder responses before product code tries
+    // to dereference a missing field.
+    diagnoseMissingDataKeys(productSuite, firstData, { namespace, key: firstKey });
+
     // Build the template from the first frame's data
     const templateResult = productSuite.make_layers(firstData, grid);
     if (!templateResult.layers?.length) {
@@ -274,10 +335,83 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
         multiLayers[i].addField(_namespaceLayer(plotLayer, namespace), firstKey);
     });
     multiLayers.forEach(ml => ml.setActiveKey(firstKey));
+    recordDiagnostic('frame-added', {
+        source: namespace, key: firstKey, bytes: estimateValueBytes(firstData),
+        durationMs: performance.now() - progressiveStarted,
+        message: `${templateResult.layers.length} layer(s) (initial)`,
+    });
 
     // Mutable ordered list of loaded keys
     const loadedKeys = [firstKey];
+    const retainedBytesByKey = new Map([[firstKey, estimateValueBytes(firstData)]]);
+    const geometryDiagnosticsByKey = new Map();
+    if (firstData?.[GEOMETRY_DIAGNOSTICS]) {
+        geometryDiagnosticsByKey.set(firstKey, firstData[GEOMETRY_DIAGNOSTICS]);
+    }
     let currentKey = firstKey;
+    let ringPolicy = null;
+    let virtualKeys = loadedKeys;
+    const residentRecency = new Map([[firstKey, performance.now()]]);
+    const pendingLoads = new Map();
+    let measuredReloadMs = 100;
+
+    function residentGpuBytes() {
+        return multiLayers.reduce((sum, layer) => sum + (layer.getFrameDiagnostics?.().gpuBytes || 0), 0);
+    }
+
+    async function enforceGpuBudget(protectedKeys = []) {
+        if (!ringPolicy) return;
+        const protectedSet = new Set([currentKey, ...protectedKeys]);
+        while (residentGpuBytes() > ringPolicy.gpuBytes && loadedKeys.length > protectedSet.size) {
+            const victim = [...residentRecency.entries()]
+                .filter(([key]) => loadedKeys.includes(key) && !protectedSet.has(key))
+                .sort((a, b) => a[1] - b[1])[0]?.[0];
+            if (!victim) break;
+            await removeResidentFrame(victim);
+            residentRecency.delete(victim);
+        }
+    }
+
+    async function ensureResident(key) {
+        if (loadedKeys.includes(key)) {
+            residentRecency.set(key, performance.now());
+            return true;
+        }
+        if (!ringPolicy?.loadFrame) return false;
+        if (!pendingLoads.has(key)) {
+            pendingLoads.set(key, (async () => {
+                const reloadStarted = performance.now();
+                const data = await ringPolicy.loadFrame(key);
+                if (!data) return false;
+                await addFrame(key, data);
+                const elapsed = performance.now() - reloadStarted;
+                measuredReloadMs = measuredReloadMs * 0.75 + elapsed * 0.25;
+                return true;
+            })().finally(() => pendingLoads.delete(key)));
+        }
+        return pendingLoads.get(key);
+    }
+
+    function scheduleUploadAhead(key) {
+        if (!ringPolicy) return;
+        const center = virtualKeys.indexOf(key);
+        if (center < 0) return;
+        const aheadCount = Math.min(
+            virtualKeys.length - 1,
+            Math.max(ringPolicy.uploadAhead, Math.ceil(measuredReloadMs / ringPolicy.dwellMs) + 2),
+        );
+        const ahead = [];
+        for (let offset = 1; offset <= aheadCount; offset++) {
+            const index = (center + offset * ringPolicy.direction + virtualKeys.length) % virtualKeys.length;
+            ahead.push(virtualKeys[index]);
+        }
+        void (async () => {
+            // The worker pool provides its own concurrency bound. Queueing the
+            // whole look-ahead window lets both workers stay busy.
+            await Promise.all(ahead.map(nextKey => ensureResident(nextKey)));
+            await enforceGpuBudget([key, ...ahead]);
+        })();
+    }
 
     // Track per-key samplers so the active sampler can be swapped when the
     // displayed frame changes (important for geometry / alert products).
@@ -293,6 +427,7 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
         const makeLayersStarted = performance.now();
         let result;
         try {
+            diagnoseMissingDataKeys(productSuite, data, { namespace, key });
             result = productSuite.make_layers(data, grid);
         } catch (err) {
             console.error(`[LayerBuilder] progressive addFrame make_layers THREW for key "${key}":`, err);
@@ -318,7 +453,18 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
             });
         });
         if (result.sampler) samplerByKey.set(key, result.sampler);
-        loadedKeys.push(key);
+        if (!loadedKeys.includes(key)) loadedKeys.push(key);
+        if (!virtualKeys.includes(key)) virtualKeys.push(key);
+        residentRecency.set(key, performance.now());
+        retainedBytesByKey.set(key, estimateValueBytes(data));
+        if (data?.[GEOMETRY_DIAGNOSTICS]) {
+            geometryDiagnosticsByKey.set(key, data[GEOMETRY_DIAGNOSTICS]);
+        }
+        recordDiagnostic('frame-added', {
+            source: namespace, key, bytes: retainedBytesByKey.get(key),
+            durationMs: performance.now() - started,
+            message: `${setupResults.length} layer(s)`,
+        });
         console.info('[NMAP layer timing] Progressive frame prepared', {
             key,
             makeLayersMs: +makeLayersMs.toFixed(1),
@@ -329,13 +475,14 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
                 ms: +item.ms.toFixed(1),
             })),
         });
+        await enforceGpuBudget();
     }
 
     /**
      * Remove a frame from all MultiPlotLayers, freeing the CPU-side field data.
      * If the key is currently displayed, the next frame is activated automatically.
      */
-    function removeFrame(key) {
+    async function removeResidentFrame(key) {
         const idx = loadedKeys.indexOf(key);
         if (idx === -1) return;
 
@@ -348,21 +495,64 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
             }
         }
 
-        multiLayers.forEach(ml => ml.removeField(key));
+        await Promise.all(multiLayers.map(ml => ml.removeField(key)));
         samplerByKey.delete(key);
+        const reclaimedBytes = retainedBytesByKey.get(key) || 0;
+        retainedBytesByKey.delete(key);
+        geometryDiagnosticsByKey.delete(key);
         loadedKeys.splice(idx, 1);
+        recordDiagnostic('frame-purged', {
+            source: namespace, key, reclaimedBytes,
+            message: `${multiLayers.length} layer(s) released`,
+        });
+    }
+
+    /** Permanently remove a timeline key, as opposed to a GPU-ring eviction. */
+    async function removeFrame(key) {
+        await removeResidentFrame(key);
+        const virtualIndex = virtualKeys.indexOf(key);
+        if (virtualIndex >= 0) virtualKeys.splice(virtualIndex, 1);
+        residentRecency.delete(key);
     }
 
     const controller = {
         // Expose loadedKeys as a live reference so callers always see the latest set
-        get keys() { return loadedKeys; },
+        get keys() { return virtualKeys; },
 
         getKey()      { return currentKey; },
 
         setKey(key) {
-            if (!loadedKeys.includes(key)) return;
             currentKey = key;
-            multiLayers.forEach(ml => ml.setActiveKey(key));
+            if (loadedKeys.includes(key)) {
+                residentRecency.set(key, performance.now());
+                multiLayers.forEach(ml => ml.setActiveKey(key));
+                scheduleUploadAhead(key);
+                return;
+            }
+            // Keep the last complete frame visible while restoration occurs.
+            // Clearing the active key here caused a black flash at high speed.
+            void ensureResident(key).then(ready => {
+                if (!ready || currentKey !== key) return;
+                multiLayers.forEach(ml => ml.setActiveKey(key));
+                scheduleUploadAhead(key);
+            });
+        },
+
+        configureFrameRing({keys, loadFrame, gpuBytes, uploadAhead = 4}) {
+            virtualKeys = [...keys];
+            ringPolicy = {loadFrame, gpuBytes, uploadAhead, dwellMs: 100, direction: 1};
+            void enforceGpuBudget();
+        },
+
+        prepareKey(key) {
+            return ensureResident(key);
+        },
+
+        setPlaybackPolicy({dwellMs, direction = 1}) {
+            if (ringPolicy && Number.isFinite(dwellMs)) {
+                ringPolicy.dwellMs = Math.max(10, dwellMs);
+                ringPolicy.direction = direction < 0 ? -1 : 1;
+            }
         },
 
         /**
@@ -372,6 +562,26 @@ function buildProgressiveMultiLayers(productSuite, firstKey, firstData, grid, na
          */
         getSampler() {
             return samplerByKey.get(currentKey) ?? null;
+        },
+
+        getGeometryDiagnostics() {
+            if (!geometryDiagnosticsByKey.size) return null;
+            const totals = {
+                frameCount: geometryDiagnosticsByKey.size,
+                featureCount: 0,
+                coordinateCount: 0,
+                logicalBytes: 0,
+                sharedBytes: 0,
+                retainedBytes: 0,
+            };
+            for (const item of geometryDiagnosticsByKey.values()) {
+                totals.featureCount += item.featureCount || 0;
+                totals.coordinateCount += item.coordinateCount || 0;
+                totals.logicalBytes += item.logicalBytes || 0;
+                totals.sharedBytes += item.sharedBytes || 0;
+                totals.retainedBytes += item.retainedBytes || 0;
+            }
+            return totals;
         },
 
         stepForward() {

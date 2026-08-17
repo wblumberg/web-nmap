@@ -26,7 +26,7 @@ _MRMS_REGIONS = ["CONUS"]
 
 def _mrms_source(region: str, product_dir: str, zarr_var: str, label: str) -> RasterSource:
     """Construct an MRMS raster source declaration."""
-    return RasterSource(
+    source = RasterSource(
         source_id_    = f"MRMS_{region}_{zarr_var}",
         label_        = f"MRMS {region} — {label}",
         data_dir      = DATA_ROOT / f"raster/mrms/{region}/{product_dir}",
@@ -44,6 +44,13 @@ def _mrms_source(region: str, product_dir: str, zarr_var: str, label: str) -> Ra
         regions        = [region],
         zarr_transport=True,
     )
+    # Opt-in while this large, frequently updating grid is benchmarked. Other
+    # imagery and forecast sources remain on their established decode path.
+    source.zarr_decode_worker = True
+    # Raster frames become GPU-resident after upload; retaining the decoded
+    # field cache would keep (or later return) released CPU buffers.
+    source.zarr_cache_decoded = False
+    return source
 
 MRMS_SOURCES: dict[str, RasterSource] = {
     f"MRMS_{region}_{zarr_var}": _mrms_source(region, prod_dir, zarr_var, lbl)
@@ -68,7 +75,7 @@ def _goes_source(sat_num: int, region: str, channel: str) -> RasterSource:
     """Construct a GOES imagery source declaration."""
     satellite = f"GOES-{sat_num}"
     label_sat = "GOES-East" if sat_num == 19 else "GOES-West"
-    return RasterSource(
+    source = RasterSource(
         label_        = f"{label_sat} {region} — {channel} ({_GOES_CHANNELS.get(channel, channel)})",
         data_dir      = DATA_ROOT / f"raster/satellite/{satellite}/{region}/{channel}",
         filename_glob = f"{region}_{satellite}_{channel}_*.zarr",
@@ -87,6 +94,27 @@ def _goes_source(sat_num: int, region: str, channel: str) -> RasterSource:
         zarr_transport=True,
 
     )
+    # Large GOES frames are decompressed and converted away from the UI thread.
+    source.zarr_decode_worker = True
+    # Benchmark large GOES chunks serially. Concurrent browser downloads have
+    # shown substantial response-body contention for this product family.
+    # Keep this source-scoped so MRMS, forecast grids, and other transports
+    # retain their existing concurrency defaults.
+    source.zarr_stream_concurrency = 2
+    # Imagery is already stored in a GPU-compatible integer representation.
+    # Preserve it instead of manufacturing a float16 copy in the worker.
+    source.zarr_preserve_native_dtype = True
+    # Raster products release their CPU arrays after texture upload; cached
+    # decoded fields would otherwise point at released buffers.
+    source.zarr_cache_decoded = False
+    # Compressed chunks are far smaller than decoded rasters and provide the
+    # reload tier needed by a bounded decoded/GPU frame window.
+    source.zarr_chunk_cache_enabled = True
+    source.zarr_chunk_cache_max_bytes = 768 * 1024 * 1024
+    source.zarr_chunk_cache_ttl_ms = 24 * 60 * 60 * 1000
+    source.gpu_frame_budget_bytes = 384 * 1024 * 1024
+    source.gpu_upload_ahead_frames = 6
+    return source
 
 # Build a dict  source_id → RasterSource  for all GOES-E combinations
 GOES_SOURCES: dict[str, RasterSource] = {

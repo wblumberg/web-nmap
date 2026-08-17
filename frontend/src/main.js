@@ -37,11 +37,12 @@
  */
 
 import { init } from './controllers/appController.js';
+import {installGempakToolbarIcons} from './views/components/gempakToolbarIcons.js';
 
 window.addEventListener('load', () => {
+    installGempakToolbarIcons();
     init().catch(err => {
         console.error('%c[NMAP]%c Fatal initialization error:',
             'color:#ff4a4a;font-weight:bold', 'color:inherit', err);
     });
 });
-

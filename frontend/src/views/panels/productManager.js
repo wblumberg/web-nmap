@@ -53,6 +53,14 @@ export const LayerManager = (() => {
     let _overlay      = null;   // DOM overlay for the layer manager dialog
     let _uidCounter   = 0;      // Incrementing counter for assigning unique IDs to sources
 
+    const _sameUid = (left, right) => String(left) === String(right);
+
+    function _nextUid() {
+        do { _uidCounter++; }
+        while (_sources.some(source => _sameUid(source.uid, _uidCounter)));
+        return _uidCounter;
+    }
+
     // PROBE STATE - this is the action that actually queries the data store
     // for available frames and builds the timeline.
     let _allFrames    = [];     // ALL found frames from last probe (newest first)
@@ -116,6 +124,15 @@ export const LayerManager = (() => {
             has_cycles:        !!(apiSrc.has_cycles),
             has_fhrs:          !!(apiSrc.has_fhrs),
             zarr_transport:    !!(apiSrc.zarr_transport),
+            zarr_decode_worker: !!(apiSrc.zarr_decode_worker),
+            zarr_stream_concurrency: apiSrc.zarr_stream_concurrency ?? null,
+            zarr_preserve_native_dtype: !!(apiSrc.zarr_preserve_native_dtype),
+            zarr_cache_decoded: apiSrc.zarr_cache_decoded !== false,
+            zarr_chunk_cache_enabled: !!apiSrc.zarr_chunk_cache_enabled,
+            zarr_chunk_cache_max_bytes: apiSrc.zarr_chunk_cache_max_bytes ?? null,
+            zarr_chunk_cache_ttl_ms: apiSrc.zarr_chunk_cache_ttl_ms ?? null,
+            gpu_frame_budget_bytes: apiSrc.gpu_frame_budget_bytes ?? null,
+            gpu_upload_ahead_frames: apiSrc.gpu_upload_ahead_frames ?? null,
             variable_map:      apiSrc.variable_map ?? {},
             // Point-observation window/filter policy. These values must travel
             // with the selected source so the loader requests the same range
@@ -305,7 +322,7 @@ export const LayerManager = (() => {
             const sel = _getSelectedUid();
             if (!sel) return;
             _editingUid = sel;
-            const src = _sources.find(s => s.uid === sel);
+            const src = _sources.find(s => _sameUid(s.uid, sel));
             const presel = src ? { id: src.id, productKey: src.productKey || null, cycleTime: src.cycleTime || null } : null;
             DataSelector.open(_onDataSelected, presel);
         });
@@ -411,7 +428,7 @@ export const LayerManager = (() => {
 
         if (_editingUid !== null) {
             // Replace existing source
-            const idx = _sources.findIndex(s => s.uid === _editingUid);
+            const idx = _sources.findIndex(s => _sameUid(s.uid, _editingUid));
             if (idx !== -1) {
                 const old = _sources[idx];
                 _sources[idx] = {
@@ -447,7 +464,7 @@ export const LayerManager = (() => {
             _editingUid = null;
         } else {
             // Add new source
-            const uid = ++_uidCounter;
+            const uid = _nextUid();
             const color = _nextColor();
             _sources.push({
                 uid,
@@ -496,10 +513,10 @@ export const LayerManager = (() => {
     function _getSelectedUid() { return _selectedUid; }
 
     function _selectSourceItem(uid) {
-        uid = uid !== undefined ? +uid : null;
+        uid = uid !== undefined && uid !== null ? String(uid) : null;
         _selectedUid = uid;
         _overlay.querySelectorAll('.lm-source-item').forEach(li => {
-            li.classList.toggle('selected', +li.dataset.uid === uid);
+            li.classList.toggle('selected', uid !== null && _sameUid(li.dataset.uid, uid));
         });
         const hasSel = uid !== null;
         _overlay.querySelector('#lm-btn-edit').disabled   = !hasSel;
@@ -509,8 +526,8 @@ export const LayerManager = (() => {
     // Remove a selected data source from the list of data sources.
     function _removeSelected() {
         if (_selectedUid === null) return;
-        const removedSrc = _sources.find(s => s.uid === _selectedUid);
-        _sources = _sources.filter(s => s.uid !== _selectedUid);
+        const removedSrc = _sources.find(s => _sameUid(s.uid, _selectedUid));
+        _sources = _sources.filter(s => !_sameUid(s.uid, _selectedUid));
         // If removed source was dominant, reassign
         if (removedSrc && removedSrc.id === _dominantId) {
             _dominantId = _sources.length ? _sources[0].id : null;
@@ -542,7 +559,7 @@ export const LayerManager = (() => {
 
         _sources.forEach((src, idx) => {
             const li = document.createElement('li');
-            li.className = 'lm-source-item' + (_selectedUid === src.uid ? ' selected' : '');
+            li.className = 'lm-source-item' + (_selectedUid !== null && _sameUid(_selectedUid, src.uid) ? ' selected' : '');
             li.dataset.uid = src.uid;
 
             const isDominant = src.id === _dominantId;

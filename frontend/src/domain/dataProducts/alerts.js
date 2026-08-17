@@ -135,13 +135,86 @@ const SIG_LABELS = { 'W': 'Warning', 'A': 'Watch', 'Y': 'Advisory' };
 // ─── Per-frame sampler factory ───────────────────────────────────────────────
 //
 // Each call to _makeLayers() returns a NEW sampler closure that captures the
-// specific GeometryComponent built for that frame.  layerBuilder.js tracks
+// indexed geometry features built for that frame.  layerBuilder.js tracks
 // one sampler per key so _activeSampler is always swapped to match the
 // currently-displayed frame when the user steps through time.
-function _makeSampler(comp) {
+function _pointInRing(lon, lat, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i];
+        const [xj, yj] = ring[j];
+        const crosses = ((yi > lat) !== (yj > lat)) &&
+            (lon < (xj - xi) * (lat - yi) / ((yj - yi) || Number.EPSILON) + xi);
+        if (crosses) inside = !inside;
+    }
+    return inside;
+}
+
+function _pointInPolygon(lon, lat, rings) {
+    if (!rings?.length || !_pointInRing(lon, lat, rings[0])) return false;
+    // A point inside an interior ring is in a polygon hole, not the alert.
+    return !rings.slice(1).some(ring => _pointInRing(lon, lat, ring));
+}
+
+export function geometryContainsPoint(geometry, lon, lat) {
+    if (geometry?.type === 'Polygon') {
+        return _pointInPolygon(lon, lat, geometry.coordinates);
+    }
+    if (geometry?.type === 'MultiPolygon') {
+        return geometry.coordinates.some(rings => _pointInPolygon(lon, lat, rings));
+    }
+    return false;
+}
+
+function _geometryBounds(geometry) {
+    const polygons = geometry?.type === 'Polygon'
+        ? [geometry.coordinates]
+        : geometry?.type === 'MultiPolygon' ? geometry.coordinates : [];
+    let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+    for (const polygon of polygons) {
+        for (const ring of polygon) {
+            for (const [lon, lat] of ring) {
+                west = Math.min(west, lon); east = Math.max(east, lon);
+                south = Math.min(south, lat); north = Math.max(north, lat);
+            }
+        }
+    }
+    return Number.isFinite(west) ? [west, south, east, north] : null;
+}
+
+const SAMPLER_CELL_DEGREES = 2;
+
+function _samplerCellKey(lon, lat) {
+    return `${Math.floor((lon + 180) / SAMPLER_CELL_DEGREES)}:${Math.floor((lat + 90) / SAMPLER_CELL_DEGREES)}`;
+}
+
+function _makeSampler(features) {
+    const indexedFeatures = features.map(feature => ({
+        feature,
+        bounds: _geometryBounds(feature.geometry),
+    }));
+    const cells = new Map();
+    for (const indexed of indexedFeatures) {
+        if (!indexed.bounds) continue;
+        const [west, south, east, north] = indexed.bounds;
+        const minX = Math.floor((west + 180) / SAMPLER_CELL_DEGREES);
+        const maxX = Math.floor((east + 180) / SAMPLER_CELL_DEGREES);
+        const minY = Math.floor((south + 90) / SAMPLER_CELL_DEGREES);
+        const maxY = Math.floor((north + 90) / SAMPLER_CELL_DEGREES);
+        for (let x = minX; x <= maxX; x++) {
+            for (let y = minY; y <= maxY; y++) {
+                const key = `${x}:${y}`;
+                if (!cells.has(key)) cells.set(key, []);
+                cells.get(key).push(indexed);
+            }
+        }
+    }
     return function _alertSampler(lon, lat) {
-        if (!comp?.queryPoint) return null;
-        const hits = comp.queryPoint(lon, lat);
+        const candidates = cells.get(_samplerCellKey(lon, lat)) ?? [];
+        const hits = candidates
+            .filter(({bounds}) => bounds && lon >= bounds[0] && lon <= bounds[2] && lat >= bounds[1] && lat <= bounds[3])
+            .map(({feature}) => feature)
+            .filter(feature => geometryContainsPoint(feature.geometry, lon, lat));
         if (!hits.length) return null;
 
         const labels = hits.map(f => {
@@ -206,25 +279,21 @@ function _fcToGeomFeatures(fc, fallbackSlug = null) {
 // Given the data object and a list of slugs (data_keys), combine all
 // FeatureCollections into a single GeometryComponent PlotLayer.
 //
-function _makeLayer(layerId, data, slugs) {
+// ─── Shared make_layers helper ────────────────────────────────────────────────
+function _makeLayers(layerId, data, slugs) {
+    // Build the component and spatially indexed sampler for this frame so that
+    // layerBuilder.js can track one sampler per key.
     const features = slugs.flatMap(slug =>
         _fcToGeomFeatures(
-            data[slug] ?? { type: 'FeatureCollection', features: [] },
+            data[slug] ?? {type: 'FeatureCollection', features: []},
             slug,
         )
     );
-    return new apgl.GeometryComponent(features);
-}
-
-// ─── Shared make_layers helper ────────────────────────────────────────────────
-function _makeLayers(layerId, data, slugs) {
-    // Build the component for this specific frame and capture it in the sampler
-    // closure so that layerBuilder.js can track one sampler per key.
-    const geomComp = _makeLayer(layerId, data, slugs);
+    const geomComp = new apgl.GeometryComponent(features);
     return {
         layers:   [new apgl.PlotLayer(layerId, geomComp)],
         colorbar: [],
-        sampler:  _makeSampler(geomComp),
+        sampler:  _makeSampler(features),
     };
 }
 
@@ -241,6 +310,10 @@ export default {
         group:         'alerts',
         available_for: ['WARNINGS'],
         data_keys:     ['_all'],
+        // About 1 km at mid-latitudes. Source/procedure queryParams can
+        // override this value (or set it to null) for full-resolution polygons.
+        default_query_params: { simplify_deg: 0.01 },
+        geometry_data: true,
         make_layers(data, _grid) { return _makeLayers('warnings_all',  data, ['_all']); },
     },
 
@@ -249,6 +322,7 @@ export default {
         group:         'alerts',
         available_for: ['WARNINGS'],
         data_keys:     ['tornado'],
+        geometry_data: true,
         make_layers(data, _grid) { return _makeLayers('warnings_to',   data, ['tornado']); },
     },
 
@@ -257,6 +331,7 @@ export default {
         group:         'alerts',
         available_for: ['WARNINGS'],
         data_keys:     ['severe_thunderstorm'],
+        geometry_data: true,
         make_layers(data, _grid) { return _makeLayers('warnings_sv',   data, ['severe_thunderstorm']); },
     },
 
@@ -265,6 +340,7 @@ export default {
         group:         'alerts',
         available_for: ['WARNINGS'],
         data_keys:     ['tornado', 'severe_thunderstorm'],
+        geometry_data: true,
         make_layers(data, _grid) { return _makeLayers('warnings_convective', data, ['tornado', 'severe_thunderstorm']); },
     },
 
@@ -273,6 +349,7 @@ export default {
         group:         'alerts',
         available_for: ['WARNINGS'],
         data_keys:     ['flash_flood'],
+        geometry_data: true,
         make_layers(data, _grid) { return _makeLayers('warnings_ff',   data, ['flash_flood']); },
     },
 
@@ -281,6 +358,7 @@ export default {
         group:         'alerts',
         available_for: ['WARNINGS'],
         data_keys:     ['flash_flood', 'areal_flood', 'river_flood'],
+        geometry_data: true,
         make_layers(data, _grid) { return _makeLayers('warnings_flood', data, ['flash_flood', 'areal_flood', 'river_flood']); },
     },
 
@@ -334,6 +412,7 @@ export default {
         group:         'alerts',
         available_for: ['WATCHES'],
         data_keys:     ['_all'],
+        default_query_params: { simplify_deg: 0.01 },
         make_layers(data, _grid) { return _makeLayers('watches_all',  data, ['_all']); },
     },
 
@@ -403,6 +482,7 @@ export default {
         group:         'alerts',
         available_for: ['ADVISORIES'],
         data_keys:     ['_all'],
+        default_query_params: { simplify_deg: 0.01 },
         make_layers(data, _grid) { return _makeLayers('advisories_all',    data, ['_all']); },
     },
 

@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="/styles/dataSelector.css" />
   <link rel="stylesheet" href="/styles/productGen.css" />
   <link rel="stylesheet" href="/styles/basemapStyle.css" />
+  <link rel="stylesheet" href="/styles/procedureManager.css" />
+  <link rel="stylesheet" href="/styles/mapDiagnostics.css" />
 </head>
 <body>
   <div id="topbar">
@@ -17,7 +19,8 @@
       <span class="title">NMAP</span>
       <div id="toolbar-buttons">
         <button id="btn-load" class="toolbar-btn" title="Load Data">&#8635;</button>
-        <button id="btn-freeze" class="toolbar-btn" title="Freeze Map Location">&#128204;</button>
+        <button id="btn-procedures" class="toolbar-btn" title="Saved Procedures">&#128193;</button>
+        <button id="btn-freeze" class="toolbar-btn" title="Freeze Map Location"><span class="toolbar-text-icon">MAP<br>LOCK</span></button>
         <button id="btn-autoupdate" class="toolbar-btn" title="Auto-Update">&#9203;</button>
         <button id="btn-product" class="toolbar-btn" title="Product Generation">&#9998;</button>
         <button id="btn-basemap" class="toolbar-btn" title="Basemap Style">&#128506;</button>
@@ -25,6 +28,7 @@
         <button id="btn-dataset-status" class="toolbar-btn" title="Dataset Status">
           <span class="dataset-status-dot"></span><span class="dataset-status-count">–</span>
         </button>
+        <button id="btn-map-diagnostics" class="toolbar-btn" title="Map Diagnostics">&#128202;</button>
       </div>
       <div id="playback-buttons">
         <button id="btn-goto-first" class="play-btn" title="Go to first frame">&#9198;</button>
@@ -34,12 +38,19 @@
         <button id="btn-loop-fwd"   class="play-btn" title="Loop forwards">&#9654;&#9654;</button>
         <button id="btn-rock"       class="play-btn" title="Rock the loop">&#9664;&#9654;</button>
         <button id="btn-goto-last"  class="play-btn" title="Go to last frame">&#9197;</button>
-        <input type="range" id="loop_speed" name="loop_speed" min="25" max="75" value="50">
+        <span id="loop-speed-control">
+          <output id="loop-speed-tooltip" for="loop_speed">500 ms/frame</output>
+          <input type="range" id="loop_speed" name="loop_speed" min="0" max="100" value="0"
+                 aria-label="Loop dwell time, slow to fast" title="Dwell: 500 ms/frame — move right to play faster">
+        </span>
       </div>
     </div>
     <div id="topbar-right">
-      <select id="view-select"></select>
-      <div id="readout"></div>
+      <div id="data-opacity-control" title="Opacity of loaded data layers">
+        <label for="data-opacity">Data</label>
+        <input type="range" id="data-opacity" min="0" max="100" step="5" value="100" />
+        <output id="data-opacity-value" for="data-opacity">100%</output>
+      </div>
     </div>
   </div>
   <div id="map"></div>
